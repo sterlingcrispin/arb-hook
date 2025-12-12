@@ -21,6 +21,10 @@ Instead of constantly scanning markets or competing in gas wars, we wait for rea
 
 Most of the time the answer is no, and the hook exits almost immediately. When the answer is yes, the hook can act instantly, without latency or MEV competition.
 
+The hook doesn't assume the arbitrage leg happens on another Uniswap v4 pool. Targets could be v2 or v3 pools, or other AMMs like as PancakeSwap etc, so the v4 hook is acting as an observation point for broader cross venue price discovery.
+
+The current code assumes the hook contract holds its own funds for arbitrage execution. For now, this simplifies control flow during swaps. In the future I imagine this would be done with flash loans instead to remove capital constraints. That also opens a clearer path to allow profits from arbitrages to be shared with the user that started the transaction.
+
 
 ## How an Arbitrage Actually Happens (Step by Step)
 
