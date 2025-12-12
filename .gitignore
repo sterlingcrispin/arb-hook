@@ -3,6 +3,8 @@ artifacts/
 cache/
 coverage/
 typechain/
+.forge_*
+foundry/out/
 .env
 .env.*
 .DS_Store
