@@ -1,11 +1,6 @@
-## Arb Hook (name in progress)
+## Arb Hook
 
-> This repo is a work in progress with some large outstanding issues.
-
-
-> Most of this system has been proven to work in isolation and integrating it into a V4 hook is still a work in progress
-
-This is a Uniswap v4 hook–driven arbitrage system that checks for arb opportunities during swaps, without relying on off chain bots or mempool racing or any off chain searching logic.
+A Uniswap v4 hook–driven arbitrage system that checks for arb opportunities during swaps, without relying on off chain bots or mempool racing or any off chain searching logic.
 
 On L2's where gas is cheap this may be economically viable. When a user attempts a swap, we piggyback some logic to search for arbs and close them as we can.
 
