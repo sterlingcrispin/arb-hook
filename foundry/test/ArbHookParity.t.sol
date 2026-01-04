@@ -11,23 +11,27 @@ import {ArbUtils} from "../../contracts/ArbUtils.sol";
 import {IDataStorage} from "../../contracts/interfaces/IDataStorage.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {IWETH9} from "../../contracts/interfaces/IWETH9.sol";
+import {IUniswapV2Pair} from "../../contracts/interfaces/IUniswapV2Pair.sol";
+import {IPancakeV3Pool} from "../../contracts/interfaces/IPancakeV3Pool.sol";
 import {ISwapRouter02} from "../../contracts/interfaces/uniswap/ISwapRouter02.sol";
 import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 import {IPoolManager} from "@uniswap/v4-core/src/interfaces/IPoolManager.sol";
 import {IUniswapV3Pool} from "@uniswap/v3-core/contracts/interfaces/IUniswapV3Pool.sol";
 
 contract ArbHookParityTest is Test {
-    uint256 internal constant FOCUS_BLOCK = 33942332 - 70;
+    // Hardhat harness forks at 33942332 - 70 = 33942262
+    // (see ExampleTests/ArbLightweight.attemptAll.js line 12)
+    uint256 internal constant FOCUS_BLOCK = 33942262;
     uint256 internal constant FORK_START_BLOCK = FOCUS_BLOCK;
     uint256 internal constant MAX_ITER = 2;
     uint256 internal constant MAX_ROUNDS = 10;
-    uint256 internal constant DEBUG_ROUND_LIMIT = 5; // Adjust while stepping through rounds
+    uint256 internal constant DEBUG_ROUND_LIMIT = MAX_ROUNDS;
     uint256 internal constant USDC_DECIMALS = 6;
     uint16 internal constant MIN_SPREAD_BPS = 10; // Mirrors ArbLightweight default
     uint16 internal constant CHUNK_SPREAD_CONSUMPTION_BPS = 1500;
     uint256 internal constant MAX_IMPACT_BPS = 500;
     uint256 internal constant MIN_PROFIT_TO_EMIT = 0;
-    bool internal constant ENFORCE_PARITY = false;
+    bool internal constant ENFORCE_PARITY = true;
 
     address internal constant USDC = 0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913;
     address internal constant CBBTC = 0xcbB7C0000aB88B473b1f5aFd9ef808440eed33Bf;
@@ -140,7 +144,9 @@ contract ArbHookParityTest is Test {
         _registerParityPools(ctx, pools);
         _approveParityPools(ctx, pools);
         _fundBot(ctx);
+        _logPoolState(pools, "pool state before seeding");
         _seedCbBtcUsdcGap();
+        _logPoolState(pools, "pool state after seeding");
         _logPoolInventory(ctx, WETH, "WETH pool book");
         _logPoolInventory(ctx, USDC, "USDC pool book");
 
@@ -148,10 +154,25 @@ contract ArbHookParityTest is Test {
         RoundResult[] memory actual = new RoundResult[](MAX_ROUNDS);
         uint256 successfulRounds;
         for (uint256 round = 0; round < MAX_ROUNDS; ++round) {
+            emit log(
+                string.concat(
+                    "[block] pre-attempt number=",
+                    vm.toString(block.number),
+                    " ts=",
+                    vm.toString(block.timestamp)
+                )
+            );
             _logBestSpread(ctx, USDC, WETH, "pre-attempt best spread (USDC/WETH)");
-            _logBestSpread(ctx, WETH, USDC, "pre-attempt best spread (WETH/USDC)");
             vm.recordLogs();
             bool success = ctx.hook.attemptAllForTest(MAX_ITER);
+            emit log(
+                string.concat(
+                    "[block] post-attempt number=",
+                    vm.toString(block.number),
+                    " ts=",
+                    vm.toString(block.timestamp)
+                )
+            );
             Vm.Log[] memory logs = vm.getRecordedLogs();
             if (!success) {
                 emit log_named_uint("attemptAll returned false on round", round + 1);
@@ -169,11 +190,8 @@ contract ArbHookParityTest is Test {
                 _assertRoundMatches(actual[round], expected[round], round);
             }
             _logBestSpread(ctx, USDC, WETH, "post-attempt best spread (USDC/WETH)");
-            _logBestSpread(ctx, WETH, USDC, "post-attempt best spread (WETH/USDC)");
 
-            if (round + 1 >= DEBUG_ROUND_LIMIT) {
-                break;
-            }
+            // No debug break once full parity is required
         }
 
         assertGt(successfulRounds, 0, "at least one profitable round expected");
@@ -187,6 +205,83 @@ contract ArbHookParityTest is Test {
         } else {
             assertGt(tradeCount, 0, "trades should be recorded");
         }
+
+        // Print summary similar to JS harness
+        _logSummary(actual, expected, successfulRounds);
+    }
+
+    function _logSummary(
+        RoundResult[] memory actual,
+        RoundExpectation[] memory expected,
+        uint256 profitableRounds
+    ) private {
+        emit log("");
+        emit log("===== ArbHook Parity Test Summary =====");
+        emit log_named_uint("Rounds executed", MAX_ROUNDS);
+        emit log_named_uint("Profitable rounds", profitableRounds);
+
+        int256 totalProfit = 0;
+        uint256 totalIterations = 0;
+        for (uint256 i = 0; i < MAX_ROUNDS; ++i) {
+            totalProfit += actual[i].cumulativeProfit;
+            totalIterations += actual[i].iterations;
+        }
+
+        emit log_named_uint("Total iterations", totalIterations);
+        emit log_named_int("Total profit (raw USDC units)", totalProfit);
+
+        // Convert to human-readable USDC (6 decimals)
+        uint256 profitWhole = uint256(totalProfit) / 1e6;
+        uint256 profitFrac = uint256(totalProfit) % 1e6;
+        emit log(string.concat(
+            "Total USDC profit: ",
+            vm.toString(profitWhole),
+            ".",
+            _padZeros(profitFrac, 6),
+            " USDC"
+        ));
+
+        emit log("");
+        emit log("Per-round details:");
+        for (uint256 i = 0; i < MAX_ROUNDS; ++i) {
+            uint256 pWhole = uint256(actual[i].cumulativeProfit) / 1e6;
+            uint256 pFrac = uint256(actual[i].cumulativeProfit) % 1e6;
+            string memory profitStr = string.concat(
+                vm.toString(pWhole),
+                ".",
+                _padZeros(pFrac, 6)
+            );
+
+            bool matches = actual[i].cumulativeProfit == expected[i].profit &&
+                          actual[i].buyPool == expected[i].buyPool &&
+                          actual[i].sellPool == expected[i].sellPool;
+
+            emit log(string.concat(
+                "  Round ",
+                vm.toString(i + 1),
+                ": USDC profit=",
+                profitStr,
+                ", iters=",
+                vm.toString(actual[i].iterations),
+                matches ? " [MATCH]" : " [MISMATCH]"
+            ));
+        }
+        emit log("=======================================");
+    }
+
+    function _padZeros(uint256 value, uint256 width) private pure returns (string memory) {
+        bytes memory result = bytes(vm.toString(value));
+        if (result.length >= width) return string(result);
+
+        bytes memory padded = new bytes(width);
+        uint256 padding = width - result.length;
+        for (uint256 i = 0; i < padding; ++i) {
+            padded[i] = "0";
+        }
+        for (uint256 i = 0; i < result.length; ++i) {
+            padded[padding + i] = result[i];
+        }
+        return string(padded);
     }
 
     function testPerBlockReplayParity() public {
@@ -203,7 +298,9 @@ contract ArbHookParityTest is Test {
             _registerParityPools(ctx, pools);
             _approveParityPools(ctx, pools);
             _fundBot(ctx);
+            _logPoolState(pools, "pool state before seeding");
             _seedCbBtcUsdcGap();
+            _logPoolState(pools, "pool state after seeding");
 
             vm.recordLogs();
             bool success = ctx.hook.attemptAllForTest(MAX_ITER);
@@ -269,9 +366,49 @@ contract ArbHookParityTest is Test {
     }
 
     function _fundBot(DeployContext memory ctx) private {
-        uint256 botAmount = 100_000 * (10 ** USDC_DECIMALS);
-        _pullToken(USDC, USDC_WHALE, botAmount);
-        IERC20(USDC).transfer(address(ctx.hook), botAmount);
+        // Replicate JS funding behavior: swap WETH→USDC through fee=500 pool
+        // JS does 2 swaps of 25 WETH each to acquire ~200k USDC
+        // This changes pool prices, which affects arbitrage discovery
+
+        uint256 wethPerSwap = 25 ether;
+        uint256 numSwaps = 2;
+        uint256 totalWeth = wethPerSwap * numSwaps;
+
+        // Wrap ETH to WETH for funding swaps
+        vm.deal(address(this), totalWeth + 10 ether); // extra for bot
+        IWETH9 weth = IWETH9(WETH);
+        weth.deposit{value: totalWeth}();
+
+        // Approve router
+        IERC20(WETH).approve(SWAP_ROUTER, totalWeth);
+        ISwapRouter02 router = ISwapRouter02(SWAP_ROUTER);
+
+        // Swap WETH→USDC through fee=500 pool (same as JS)
+        emit log("funding: swapping WETH->USDC to replicate JS behavior");
+        for (uint256 i = 0; i < numSwaps; ++i) {
+            emit log_named_uint("funding: WETH->USDC swap", i + 1);
+            ISwapRouter02.ExactInputSingleParams memory params = ISwapRouter02
+                .ExactInputSingleParams({
+                    tokenIn: WETH,
+                    tokenOut: USDC,
+                    fee: 500,  // fee=500 pool 0xd0b5...
+                    recipient: address(this),
+                    amountIn: wethPerSwap,
+                    amountOutMinimum: 0,
+                    sqrtPriceLimitX96: 0
+                });
+            uint256 amountOut = router.exactInputSingle(params);
+            emit log_named_uint("funding: USDC received", amountOut);
+        }
+
+        // Transfer 100k USDC to bot
+        uint256 botUsdcAmount = 100_000 * (10 ** USDC_DECIMALS);
+        uint256 usdcBalance = IERC20(USDC).balanceOf(address(this));
+        emit log_named_uint("funding: total USDC after swaps", usdcBalance);
+        require(usdcBalance >= botUsdcAmount, "insufficient USDC from swaps");
+        IERC20(USDC).transfer(address(ctx.hook), botUsdcAmount);
+
+        // Wrap and transfer 10 WETH to bot
         _topUpWeth(ctx, 10 ether);
     }
 
@@ -396,16 +533,57 @@ contract ArbHookParityTest is Test {
         }
     }
 
+    function _logPoolState(
+        PoolSpec[] memory specs,
+        string memory label
+    ) private {
+        emit log(label);
+        emit log_named_uint("block number", block.number);
+        emit log_named_uint("timestamp", block.timestamp);
+        for (uint256 i = 0; i < specs.length; ++i) {
+            PoolSpec memory spec = specs[i];
+            emit log_named_address("pool", spec.pool);
+            emit log_named_uint("poolType", uint256(uint8(spec.poolType)));
+            if (spec.poolType == ArbUtils.PoolType.V3) {
+                IUniswapV3Pool pool = IUniswapV3Pool(spec.pool);
+                (uint160 sqrtPriceX96, int24 tick, , , , , ) = pool.slot0();
+                emit log_named_uint("sqrtPriceX96", sqrtPriceX96);
+                emit log_named_int("tick", tick);
+                emit log_named_uint("liquidity", pool.liquidity());
+            } else if (spec.poolType == ArbUtils.PoolType.PANCAKESWAP_V3) {
+                IPancakeV3Pool pool = IPancakeV3Pool(spec.pool);
+                (uint160 sqrtPriceX96, int24 tick, , , , , ) = pool.slot0();
+                emit log_named_uint("sqrtPriceX96", sqrtPriceX96);
+                emit log_named_int("tick", tick);
+                // Pancake V3 interface we use doesnt expose liquidity; skip.
+            } else {
+                IUniswapV2Pair pair = IUniswapV2Pair(spec.pool);
+                (uint112 r0, uint112 r1, uint32 lastTs) = pair.getReserves();
+                emit log_named_uint("reserve0", r0);
+                emit log_named_uint("reserve1", r1);
+                emit log_named_uint("lastTimestamp", lastTs);
+            }
+        }
+    }
+
     function _seedCbBtcUsdcGap() private {
         uint256 chunkCount = 5;
         uint256 usdcChunk = 400 * (10 ** USDC_DECIMALS);
         uint256 totalSeedUsdc = usdcChunk * chunkCount;
         emit log("seeding cbBTC/USDC pools via router chunks");
+        emit log_named_address("seed USDC whale", USDC_WHALE);
+        emit log_named_uint("seed chunk count", chunkCount);
+        emit log_named_uint("seed chunk size (USDC)", usdcChunk);
         _pullToken(USDC, USDC_WHALE, totalSeedUsdc);
+        emit log_named_uint(
+            "seed USDC balance after pull",
+            IERC20(USDC).balanceOf(address(this))
+        );
         IERC20(USDC).approve(SWAP_ROUTER, totalSeedUsdc);
         ISwapRouter02 router = ISwapRouter02(SWAP_ROUTER);
 
         for (uint256 i = 0; i < chunkCount; ++i) {
+            emit log_named_uint("seed USDC->cbBTC chunk", i + 1);
             ISwapRouter02.ExactInputSingleParams memory params = ISwapRouter02
                 .ExactInputSingleParams({
                 tokenIn: USDC,
@@ -416,7 +594,11 @@ contract ArbHookParityTest is Test {
                 amountOutMinimum: 0,
                 sqrtPriceLimitX96: 0
             });
-            router.exactInputSingle(params);
+            uint256 beforeCb = IERC20(CBBTC).balanceOf(address(this));
+            uint256 amountOut = router.exactInputSingle(params);
+            uint256 afterCb = IERC20(CBBTC).balanceOf(address(this));
+            emit log_named_uint("seed chunk amountOut", amountOut);
+            emit log_named_uint("seed cbBTC delta", afterCb - beforeCb);
         }
 
         uint256 cbBtcBalance = IERC20(CBBTC).balanceOf(address(this));
@@ -424,6 +606,7 @@ contract ArbHookParityTest is Test {
             emit log("seeding skipped: cbBTC balance zero after USDC legs");
             return;
         }
+        emit log_named_uint("seed cbBTC balance before sells", cbBtcBalance);
 
         IERC20(CBBTC).approve(SWAP_ROUTER, cbBtcBalance);
         uint256 cbChunks = chunkCount;
@@ -434,6 +617,8 @@ contract ArbHookParityTest is Test {
             if (amountIn == 0) {
                 break;
             }
+            emit log_named_uint("seed cbBTC->USDC chunk", j + 1);
+            emit log_named_uint("seed chunk amountIn", amountIn);
             ISwapRouter02.ExactInputSingleParams memory params = ISwapRouter02
                 .ExactInputSingleParams({
                 tokenIn: CBBTC,
@@ -444,31 +629,32 @@ contract ArbHookParityTest is Test {
                 amountOutMinimum: 0,
                 sqrtPriceLimitX96: 0
             });
-            router.exactInputSingle(params);
+            uint256 beforeUsdc = IERC20(USDC).balanceOf(address(this));
+            uint256 amountOut = router.exactInputSingle(params);
+            uint256 afterUsdc = IERC20(USDC).balanceOf(address(this));
+            emit log_named_uint("seed chunk amountOut", amountOut);
+            emit log_named_uint("seed USDC delta", afterUsdc - beforeUsdc);
         }
+        emit log_named_uint(
+            "seed final USDC balance",
+            IERC20(USDC).balanceOf(address(this))
+        );
+        emit log_named_uint(
+            "seed final cbBTC balance",
+            IERC20(CBBTC).balanceOf(address(this))
+        );
     }
 
     function _parityPools() private pure returns (PoolSpec[] memory specs) {
-        specs = new PoolSpec[](33);
+        // IMPORTANT: Only register pools with USDC as base token.
+        // The JS harness NEVER uses WETH as tokenA in _getSinglePoolPrices
+        // (confirmed by grep - no "tokenA 0x4200" in attemptAllOutput.txt).
+        // When WETH is tokenA, the price math underflows to zero due to
+        // decimal scaling issues in _calculatePrice1e18_corrected.
+        specs = new PoolSpec[](16);
         uint256 idx;
-        specs[idx++] = PoolSpec({base: WETH, pool: 0x9c087Eb773291e50CF6c6a90ef0F4500e349B903, fee: 500, poolType: ArbUtils.PoolType.V3});
-        specs[idx++] = PoolSpec({base: WETH, pool: 0x1D4daB3f27C7F656b6323C1D6Ef713b48A8f72F1, fee: 3000, poolType: ArbUtils.PoolType.V3});
-        specs[idx++] = PoolSpec({base: WETH, pool: 0xD5bdD66a87462a608edd28bDec91b88E16409f62, fee: 500, poolType: ArbUtils.PoolType.PANCAKESWAP_V3});
-        specs[idx++] = PoolSpec({base: WETH, pool: 0x8e0A7d4018fb2674346d5742055174f899Fe1826, fee: 10000, poolType: ArbUtils.PoolType.V3});
-        specs[idx++] = PoolSpec({base: WETH, pool: 0x1C450D7d1FD98A0b04E30deCFc83497b33A4F608, fee: 200, poolType: ArbUtils.PoolType.V3});
-        specs[idx++] = PoolSpec({base: WETH, pool: 0xd0b53D9277642d899DF5C87A3966A349A798F224, fee: 500, poolType: ArbUtils.PoolType.V3});
-        specs[idx++] = PoolSpec({base: WETH, pool: 0x72AB388E2E2F6FaceF59E3C3FA2C4E29011c2D38, fee: 100, poolType: ArbUtils.PoolType.PANCAKESWAP_V3});
-        specs[idx++] = PoolSpec({base: WETH, pool: 0xB775272E537cc670C65DC852908aD47015244EaF, fee: 500, poolType: ArbUtils.PoolType.PANCAKESWAP_V3});
-        specs[idx++] = PoolSpec({base: WETH, pool: 0x6c561B446416E1A00E8E93E221854d6eA4171372, fee: 3000, poolType: ArbUtils.PoolType.V3});
-        specs[idx++] = PoolSpec({base: WETH, pool: 0xb4CB800910B228ED3d0834cF79D697127BBB00e5, fee: 100, poolType: ArbUtils.PoolType.V3});
-        specs[idx++] = PoolSpec({base: WETH, pool: 0x56C8989222ed293E3c4a22628d8BCA633cE1eb99, fee: 400, poolType: ArbUtils.PoolType.V3});
-        specs[idx++] = PoolSpec({base: WETH, pool: 0xE9d76696f8A35e2E2520e3125875C3af23f1E69c, fee: 2500, poolType: ArbUtils.PoolType.PANCAKESWAP_V3});
-        specs[idx++] = PoolSpec({base: WETH, pool: 0x0b1C2DCbBfA744ebD3fC17fF1A96A1E1Eb4B2d69, fee: 10000, poolType: ArbUtils.PoolType.V3});
-        specs[idx++] = PoolSpec({base: WETH, pool: 0xC211e1f853A898Bd1302385CCdE55f33a8C4B3f3, fee: 100, poolType: ArbUtils.PoolType.PANCAKESWAP_V3});
-        specs[idx++] = PoolSpec({base: WETH, pool: 0x7AeA2E8A3843516afa07293a10Ac8E49906dabD1, fee: 500, poolType: ArbUtils.PoolType.V3});
-        specs[idx++] = PoolSpec({base: WETH, pool: 0x8c7080564B5A792A33Ef2FD473fbA6364d5495e5, fee: 3000, poolType: ArbUtils.PoolType.V3});
-        specs[idx++] = PoolSpec({base: WETH, pool: 0x13f979234a1FF5C315cC1a50254efB5b9EF6ee6f, fee: 400, poolType: ArbUtils.PoolType.V3});
 
+        // USDC-based pools only (matches JS harness behavior)
         specs[idx++] = PoolSpec({base: USDC, pool: 0x1C450D7d1FD98A0b04E30deCFc83497b33A4F608, fee: 200, poolType: ArbUtils.PoolType.V3});
         specs[idx++] = PoolSpec({base: USDC, pool: 0xd0b53D9277642d899DF5C87A3966A349A798F224, fee: 500, poolType: ArbUtils.PoolType.V3});
         specs[idx++] = PoolSpec({base: USDC, pool: 0x72AB388E2E2F6FaceF59E3C3FA2C4E29011c2D38, fee: 100, poolType: ArbUtils.PoolType.PANCAKESWAP_V3});
