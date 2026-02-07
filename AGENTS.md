@@ -7,7 +7,7 @@ The current test suite focuses on **cbBTC/USDC and WETH/USDC** pairs as the prim
 
 ## Primary Goal: Exact Parity with ExampleTests
 
-**The ArbHook Forge tests must produce EXACTLY the same output as the Hardhat tests in `ExampleTests/`.** This means:
+**The ArbHook Forge tests must produce EXACTLY the same output as the reference JS harness in `ExampleTests/`.** This means:
 - Same pool selection per round
 - Same profit amounts per round
 - Same total profit (18.679602 USDC across 10 rounds)
@@ -33,7 +33,7 @@ The current test suite focuses on **cbBTC/USDC and WETH/USDC** pairs as the prim
 
 | File | Purpose |
 |------|---------|
-| `ExampleTests/ArbLightweight.attemptAll.js` | **Golden source of truth** - Hardhat test harness |
+| `ExampleTests/ArbLightweight.attemptAll.js` | **Golden source of truth** - JS test harness |
 | `ExampleTests/attemptAllOutput.txt` | **Reference output** - exact profits/pools to match |
 | `ExampleTests/ArbLightweight.sol` | Original arbitrage contract (non-hook) |
 | `ExampleTests/helpers/constants.js` | Token addresses, pool addresses, router addresses |
@@ -41,7 +41,7 @@ The current test suite focuses on **cbBTC/USDC and WETH/USDC** pairs as the prim
 | `contracts/ArbHook.sol` | Uniswap V4 hook version we're testing |
 | `foundry/test/ArbHookParity.t.sol` | Forge test attempting exact parity |
 
-**Note**: The actual JS harness lives at `/Users/sterlingcrispin/code/arb-bot/test/ArbLightweight.attemptAll.js`. The `ExampleTests/` folder in this repo is a reference copy. When debugging JS behavior, modify and run from the arb-bot project.
+**Note**: The actual JS harness lives at `/Users/sterlingcrispin/code/arb-bot/test/ArbLightweight.attemptAll.js`. The `ExampleTests/` folder may not be present in this repo; run JS debugging from the arb-bot project.
 
 ## JS Harness Behavior (What We Must Replicate)
 
@@ -116,8 +116,8 @@ anvil --fork-url "$BASE_RPC_URL" --fork-block-number 33942262 --host 127.0.0.1 -
 # Run Forge parity test
 BASE_RPC_URL=http://127.0.0.1:8546 forge test --match-contract ArbHookParityTest -vv
 
-# Run JS harness for comparison
-npm test -- --grep "attemptAll"
+# Run JS harness for comparison (from arb-bot repo)
+(cd /Users/sterlingcrispin/code/arb-bot && npm test -- --grep "attemptAll")
 ```
 
 ## Steps to Achieve Parity
@@ -193,7 +193,7 @@ BASE_RPC_URL=http://127.0.0.1:8546 forge test --match-contract ArbHookParityTest
 - [ ] Consider adding more edge case tests
 
 ## Project Structure & Module Organization
-Core Solidity lives in `contracts/`: `ArbHook.sol` hosts the Uniswap v4 after-swap hook, `ArbitrageLogic.sol` + `ArbUtils.sol` cover pricing/loop helpers, and `contracts/interfaces/` + `contracts/lib/` mirror external pool ABIs. Test fixtures (`contracts/test/*.sol`) include deterministic ERC20s, hook miners, and PoolManager harnesses. Legacy Hardhat specs remain under `test/` for reference; new Forge tests should live under `foundry/`.
+Core Solidity lives in `contracts/`: `ArbHook.sol` hosts the Uniswap v4 after-swap hook, `ArbitrageLogic.sol` + `ArbUtils.sol` cover pricing/loop helpers, and `contracts/interfaces/` + `contracts/lib/` mirror external pool ABIs. Test fixtures (`contracts/test/*.sol`) include deterministic ERC20s, hook miners, and PoolManager harnesses. Forge tests live under `foundry/`; the JS reference harness lives in the external arb-bot repo.
 
 ## Coding Style & Naming Conventions
 Stick to Solidity ^0.8.20, four-space indentation, explicit visibility, and descriptive custom errors (`ArbErrors`). Contracts/structs are PascalCase, functions/state camelCase, and constants ALL_CAPS. Favor `using SafeERC20`, guard callbacks with `nonReentrant`, and emit events mirroring major revert reasons.
