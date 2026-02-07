@@ -10,6 +10,7 @@ import "./interfaces/IPancakeV3Pool.sol";
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import "@openzeppelin/contracts/token/ERC20/extensions/IERC20Metadata.sol";
 import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
+// import "hardhat/console.sol";
 import {ArbErrors} from "./Errors.sol";
 import {ArbitrageLogic} from "./ArbitrageLogic.sol";
 import {IDataStorage} from "./interfaces/IDataStorage.sol";
@@ -65,6 +66,21 @@ abstract contract ArbUtils {
     // [NEW] "Mailbox" for the worker to report profit back to the main contract,
     // bypassing the fragile delegatecall returndata.
     int256 public lastExecutionProfit;
+
+    struct FailedQuote {
+        uint128 qBuy;
+        uint128 qSell;
+    }
+    mapping(bytes32 => FailedQuote) internal lastFailedQuote;
+
+    // [NEW] More detailed struct for the pair-based failure cache
+    struct FailedAttempt {
+        address buyPool;
+        address sellPool;
+        uint128 qBuy;
+        uint128 qSell;
+    }
+    mapping(bytes32 => FailedAttempt) internal lastFailedAttemptForPair;
 
     mapping(address => uint256) internal poolActivityCache;
 
