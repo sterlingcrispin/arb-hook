@@ -6,7 +6,6 @@ pragma solidity ^0.8.20;
 
 import "./ArbUtils.sol";
 import "./ArbitrageLogic.sol";
-import "hardhat/console.sol";
 import {ArbErrors} from "./Errors.sol";
 
 import {BaseHook} from "@uniswap/v4-periphery/src/utils/BaseHook.sol";
@@ -31,9 +30,6 @@ import {
 import {
     IUniswapV3Pool
 } from "@uniswap/v3-core/contracts/interfaces/IUniswapV3Pool.sol";
-import {
-    IUniswapV3Factory
-} from "@uniswap/v3-core/contracts/interfaces/IUniswapV3Factory.sol";
 
 import {IUniswapV2Factory} from "./interfaces/IUniswapV2Factory.sol";
 import {IUniswapV2Pair} from "./interfaces/IUniswapV2Pair.sol";
@@ -74,14 +70,10 @@ contract ArbHook is BaseHook, ArbUtils, Ownable, ReentrancyGuard {
     address private constant WETH = 0x4200000000000000000000000000000000000006;
 
     // Trusted factories for callback validation
-    IUniswapV3Factory private constant V3_FACTORY =
-        IUniswapV3Factory(0x33128a8fC17869897dcE68Ed026d694621f6FDfD);
     IUniswapV2Factory private constant V2_FACTORY =
         IUniswapV2Factory(0x8909Dc15e40173Ff4699343b6eB8132c65e18eC6);
     IUniswapV2Factory private constant PANCAKESWAP_V2_FACTORY =
         IUniswapV2Factory(0x02a84c1b3BBD7401a5f7fa98a384EBC70bB5749E);
-    IUniswapV3Factory private constant PANCAKESWAP_V3_FACTORY =
-        IUniswapV3Factory(0x0BFbCF9fa4f9C56B0F40a671Ad40E0805A091865);
 
     event ArbitrageAttempted(
         address indexed tokenA,
@@ -125,7 +117,6 @@ contract ArbHook is BaseHook, ArbUtils, Ownable, ReentrancyGuard {
         bytes calldata
     ) internal override returns (bytes4, int128) {
         uint256 iterations = hookMaxIterations;
-            console.log("[ArbHook] afterSwap invoked", iterations);
         if (iterations > 0) {
             _attemptAllViaSelfCall(iterations);
         }
@@ -136,7 +127,6 @@ contract ArbHook is BaseHook, ArbUtils, Ownable, ReentrancyGuard {
     function _attemptAllViaSelfCall(
         uint256 iterations
     ) internal returns (bool) {
-            console.log("[ArbHook] Hook triggering attemptAll", iterations);
         (bool successCall, bytes memory returndata) = address(this).call(
             abi.encodeWithSelector(this.attemptAllInternal.selector, iterations)
         );
@@ -144,10 +134,8 @@ contract ArbHook is BaseHook, ArbUtils, Ownable, ReentrancyGuard {
         bool tradeSuccess = false;
         if (!successCall) {
             emit AttemptAllFailed(returndata);
-            console.log("[ArbHook] attemptAll reverted", returndata.length);
         } else {
             tradeSuccess = abi.decode(returndata, (bool));
-            console.log("[ArbHook] attemptAll success", tradeSuccess);
         }
 
         emit HookAttemptAll(iterations, successCall, tradeSuccess);
@@ -367,31 +355,23 @@ contract ArbHook is BaseHook, ArbUtils, Ownable, ReentrancyGuard {
     function attemptAllInternal(
         uint256 maxIterations
     ) external returns (bool success) {
-            console.log("GL attemptAllInternal called");
         require(msg.sender == address(this), "Only self");
-
-            console.log("GL attemptAll start", gasleft());
         lastExecutionProfit = 0; // reset mailbox
 
         int256 totalProfit = 0;
         uint256 baseCount = supportedTokens.length;
-            console.log("GL before base loop", gasleft());
         for (uint256 i = 0; i < baseCount; ++i) {
             address baseToken = supportedTokens[i];
             address[] storage counterTokens = baseCounterList[baseToken];
             uint256 counterCount = counterTokens.length;
-            console.log("GL before counter loop", gasleft());
 
             for (uint256 j = 0; j < counterCount; ++j) {
                 address counterToken = counterTokens[j];
-
-            console.log("GL before _runPair", gasleft());
                 (int256 profit, ) = _runPair(
                     baseToken,
                     counterToken,
                     maxIterations
                 );
-            console.log("GL after _runPair", gasleft());
                 if (profit > 0) {
                     totalProfit = profit;
                     break; // exit inner loop
@@ -403,12 +383,9 @@ contract ArbHook is BaseHook, ArbUtils, Ownable, ReentrancyGuard {
         }
 
         lastExecutionProfit = totalProfit;
-            console.log("GL attemptAll end", gasleft());
         bool tradeWasProfitable = totalProfit > 0;
         if (tradeWasProfitable && address(dataStorage) != address(0)) {
-            console.log("GL before dataStorage.storeTradeData", gasleft());
             dataStorage.storeTradeData(lastTradeData);
-            console.log("GL after dataStorage.storeTradeData", gasleft());
         }
         return tradeWasProfitable;
     }
@@ -429,7 +406,6 @@ contract ArbHook is BaseHook, ArbUtils, Ownable, ReentrancyGuard {
         address tokenB,
         uint256 maxIter
     ) internal returns (int256 cumulativeProfit, uint256 iterations) {
-            console.log("GL _runPair start", gasleft());
         LoopState memory state;
         state.triedCount = 0;
         state.attempts = 0;
@@ -442,7 +418,6 @@ contract ArbHook is BaseHook, ArbUtils, Ownable, ReentrancyGuard {
         FailedAttempt memory lastFail = lastFailedAttemptForPair[pairKey];
 
         if (lastFail.buyPool != address(0)) {
-            console.log("GL before _findPoolInBook calls", gasleft());
             (
                 ArbUtils.PoolInfo memory buyPoolInfo,
                 bool buyPoolFound
@@ -451,15 +426,12 @@ contract ArbHook is BaseHook, ArbUtils, Ownable, ReentrancyGuard {
                 ArbUtils.PoolInfo memory sellPoolInfo,
                 bool sellPoolFound
             ) = _findPoolInBook(tokenA, lastFail.sellPool);
-            console.log("GL after _findPoolInBook calls", gasleft());
 
             if (buyPoolFound && sellPoolFound) {
-            console.log("GL before _getSinglePoolPrices calls", gasleft());
                 (uint256 currentBuyPrice, , bool buyPriceSuccess) = arbLib
                     ._getSinglePoolPrices(tokenA, tokenB, buyPoolInfo);
                 (, uint256 currentSellPrice, bool sellPriceSuccess) = arbLib
                     ._getSinglePoolPrices(tokenA, tokenB, sellPoolInfo);
-            console.log("GL after _getSinglePoolPrices calls", gasleft());
 
                 if (buyPriceSuccess && sellPriceSuccess) {
                     uint128 qBuyNow = arbLib.quantise(currentBuyPrice);
@@ -473,15 +445,7 @@ contract ArbHook is BaseHook, ArbUtils, Ownable, ReentrancyGuard {
             }
         }
 
-        //console.log("GL before main while loop", gasleft());
         while (state.attempts < 2) {
-            console.log("[_runPair] attempt");
-            console.logUint(state.attempts);
-            console.log("skip buy");
-            console.logAddress(state.skipBuyPool);
-            console.log("skip sell");
-            console.logAddress(state.skipSellPool);
-            //console.log("GL before findBestPools", gasleft());
             (
                 address buyPool,
                 address sellPool,
@@ -495,13 +459,8 @@ contract ArbHook is BaseHook, ArbUtils, Ownable, ReentrancyGuard {
                     state.skipBuyPool,
                     state.skipSellPool
                 );
-            //console.log("GL after findBestPools", gasleft());
 
             if (buyPool == address(0)) return (0, 0);
-            console.log("candidate buy");
-            console.logAddress(buyPool);
-            console.log("candidate sell");
-            console.logAddress(sellPool);
             if (buyPool == sellPool) {
                 ++state.attempts;
                 state.skipSellPool = sellPool;
@@ -532,14 +491,10 @@ contract ArbHook is BaseHook, ArbUtils, Ownable, ReentrancyGuard {
 
             FailedQuote memory fq = lastFailedQuote[quoteKey];
             if (fq.qBuy == qBuy && fq.qSell == qSell) {
-                console.log("[_runPair] quote previously failed");
                 ++state.attempts;
                 state.skipSellPool = sellPool;
                 if (buyPool == state.lastBuyPool) {
                     if (++state.sellFailsForBuy >= 2) {
-                        console.log(
-                            "[_runPair] sellFailsForBuy threshold reached"
-                        );
                         state.skipBuyPool = buyPool;
                         state.sellFailsForBuy = 0;
                         state.lastBuyPool = address(0);
@@ -586,23 +541,14 @@ contract ArbHook is BaseHook, ArbUtils, Ownable, ReentrancyGuard {
                 returndata,
                 (bool, int256, uint256)
             );
-            console.log("[_runPair] tradeSuccess");
-            console.logBool(tradeSuccess);
-            console.log("[_runPair] profit");
-            console.logInt(profit);
-            console.log("[_runPair] iters");
-            console.logUint(iters);
 
             cumulativeProfit += profit;
             iterations += iters;
 
             if (tradeSuccess && profit > 0) {
-                console.log("[_runPair] profitable path found");
                 delete lastFailedQuote[quoteKey];
                 return (cumulativeProfit, iterations);
             }
-
-            console.log("[_runPair] marking failure for pair");
 
             lastFailedQuote[quoteKey] = FailedQuote(qBuy, qSell);
             lastFailedAttemptForPair[pairKey] = FailedAttempt(
@@ -624,7 +570,6 @@ contract ArbHook is BaseHook, ArbUtils, Ownable, ReentrancyGuard {
             state.skipSellPool = sellPool;
             if (buyPool == state.lastBuyPool) {
                 if (++state.sellFailsForBuy >= 2) {
-                    console.log("[_runPair] skipping buyPool after failures");
                     state.skipBuyPool = buyPool;
                     state.sellFailsForBuy = 0;
                     state.lastBuyPool = address(0);
@@ -632,12 +577,8 @@ contract ArbHook is BaseHook, ArbUtils, Ownable, ReentrancyGuard {
             } else {
                 state.lastBuyPool = buyPool;
                 state.sellFailsForBuy = 1;
-                console.log("[_runPair] lastBuyPool updated");
-                console.logAddress(buyPool);
             }
         }
-
-            console.log("GL _runPair end", gasleft());
         return (cumulativeProfit, iterations);
     }
 
@@ -751,7 +692,7 @@ contract ArbHook is BaseHook, ArbUtils, Ownable, ReentrancyGuard {
         public
         returns (bool success, int256 cumulativeProfit, uint256 iterations)
     {
-            console.log("GL executeIterativeArb start", gasleft());
+        if (msg.sender != address(this)) revert ArbErrors.WrapperOnlySelf();
         if (maxIterations == 0) return (false, 0, 0);
         if (poolA_addr == poolB_addr) return (false, 0, 0);
 
@@ -768,7 +709,6 @@ contract ArbHook is BaseHook, ArbUtils, Ownable, ReentrancyGuard {
         int24 initialAbsSpreadForThisArbOpportunity = 0;
 
         if (isPoolAV3 && isPoolBV3) {
-            console.log("GL before V3-V3 spread check", gasleft());
             IUniswapV3Pool pA_v3_check = IUniswapV3Pool(poolA_addr);
             IUniswapV3Pool pB_v3_check = IUniswapV3Pool(poolB_addr);
             int24 initialTickA_check;
@@ -854,14 +794,10 @@ contract ArbHook is BaseHook, ArbUtils, Ownable, ReentrancyGuard {
             ) {
                 return (true, 0, 0);
             }
-            console.log("GL after V3-V3 spread check", gasleft());
         }
 
         uint256 totalAmountSwapped = 0;
-
-            console.log("GL before main iteration loop", gasleft());
         for (uint256 i = 0; i < maxIterations; ) {
-            console.log("GL iteration start", i, gasleft());
             uint256 balanceBeforeIteration = startTokenContract.balanceOf(
                 address(this)
             );
@@ -871,7 +807,6 @@ contract ArbHook is BaseHook, ArbUtils, Ownable, ReentrancyGuard {
             uint160 sqrtPriceLimitB_v3 = 0;
 
             if (isPoolAV3 && isPoolBV3) {
-            console.log("GL before V3-V3 params", gasleft());
                 ArbitrageLogic.IterationConfig memory iterConfig;
                 iterConfig.minSpreadBps = minSpreadBps;
                 iterConfig
@@ -895,18 +830,6 @@ contract ArbHook is BaseHook, ArbUtils, Ownable, ReentrancyGuard {
                     );
 
                 if (!v3Params.shouldContinue) {
-            console.log("V3 params aborted");
-            console.log("poolA liq", v3Params.poolAState.liquidity);
-            console.log("poolB liq", v3Params.poolBState.liquidity);
-            console.log(
-                        "intermediate capacity",
-                        v3Params.intermediateCapacityOfB
-                    );
-            console.log("chunk upper bound", v3Params.chunkToSwap);
-            console.log(
-                        "start balance",
-                        iterConfig.currentStartTokenBalance
-                    );
                     break;
                 }
 
@@ -916,26 +839,12 @@ contract ArbHook is BaseHook, ArbUtils, Ownable, ReentrancyGuard {
                 );
 
                 if (chunkToSwap == 0) {
-            console.log("best chunk zero");
-            console.log("upper bound", v3Params.chunkToSwap);
-            console.log("min chunk", iterConfig.minChunkForStartToken);
-            console.log(
-                        "intermediate potential",
-                        v3Params.intermediateAmountPotentiallyFromA
-                    );
-            console.log("capacity B", v3Params.intermediateCapacityOfB);
-            console.log("poolA liq", v3Params.poolAState.liquidity);
-            console.log("poolB liq", v3Params.poolBState.liquidity);
                     break;
                 }
 
                 sqrtPriceLimitA_v3 = v3Params.sqrtPriceLimitA;
                 sqrtPriceLimitB_v3 = v3Params.sqrtPriceLimitB;
-            console.log("GL after V3-V3 params", gasleft());
-            console.log("V3-V3 params, chunk:");
-            console.logUint(chunkToSwap);
             } else if (!isPoolAV3 && !isPoolBV3) {
-            console.log("GL before V2-V2 params", gasleft());
                 ArbitrageLogic.V2TradeParams memory v2Params = arbLib
                     .calculateV2TradeParams(
                         poolA_addr,
@@ -943,7 +852,9 @@ contract ArbHook is BaseHook, ArbUtils, Ownable, ReentrancyGuard {
                         startToken,
                         intermediateToken,
                         balanceBeforeIteration,
-                        minChunkStartToken
+                        minChunkStartToken,
+                        _v2FeeForPoolType(poolAType),
+                        _v2FeeForPoolType(poolBType)
                     );
 
                 if (!v2Params.opportunityExists) break;
@@ -980,7 +891,9 @@ contract ArbHook is BaseHook, ArbUtils, Ownable, ReentrancyGuard {
                                 rA_s,
                                 rA_i,
                                 rB_i,
-                                rB_s
+                                rB_s,
+                                _v2FeeForPoolType(poolAType),
+                                _v2FeeForPoolType(poolBType)
                             );
 
                             if (
@@ -1006,9 +919,7 @@ contract ArbHook is BaseHook, ArbUtils, Ownable, ReentrancyGuard {
                 } else {
                     break;
                 }
-            console.log("GL after V2-V2 params", gasleft());
             } else {
-            console.log("GL before mixed params", gasleft());
                 uint256 currentBal = balanceBeforeIteration;
                 if (currentBal == 0) break;
 
@@ -1018,6 +929,7 @@ contract ArbHook is BaseHook, ArbUtils, Ownable, ReentrancyGuard {
                         poolA_addr,
                         poolB_addr,
                         poolAType,
+                        poolBType,
                         startToken,
                         intermediateToken,
                         initialTestChunk,
@@ -1039,10 +951,7 @@ contract ArbHook is BaseHook, ArbUtils, Ownable, ReentrancyGuard {
                         : uint160(
                             1461446703485210103287273052203988822378723970342
                         ) /* MAX */ - 1;
-            console.log("Mixed params, chunk:");
-            console.logUint(chunkToSwap);
                 }
-            console.log("GL after mixed params", gasleft());
             }
 
             if (chunkToSwap == 0) break;
@@ -1052,7 +961,6 @@ contract ArbHook is BaseHook, ArbUtils, Ownable, ReentrancyGuard {
             uint256 intermediateReceived = 0;
 
             bool swap1Success = false;
-            console.log("GL before swap1", gasleft());
             if (
                 poolAType == ArbUtils.PoolType.V3 ||
                 poolAType == ArbUtils.PoolType.PANCAKESWAP_V3
@@ -1075,8 +983,20 @@ contract ArbHook is BaseHook, ArbUtils, Ownable, ReentrancyGuard {
                 uint256 amountToReceive = arbLib.getAmountOut(
                     chunkToSwap,
                     rA_start,
-                    rA_interm
+                    rA_interm,
+                    _v2FeeForPoolType(poolAType)
                 );
+                if (
+                    poolBType == ArbUtils.PoolType.V3 ||
+                    poolBType == ArbUtils.PoolType.PANCAKESWAP_V3
+                ) {
+                    uint256 estimatedImpactB = arbLib.estimateImpactBps(
+                        poolB_addr,
+                        intermediateToken,
+                        amountToReceive
+                    );
+                    if (estimatedImpactB > _MAX_IMPACT_BPS) break;
+                }
                 swap1Success = _executeV2FlashSwap(
                     IUniswapV2Pair(poolA_addr),
                     intermediateToken,
@@ -1085,7 +1005,6 @@ contract ArbHook is BaseHook, ArbUtils, Ownable, ReentrancyGuard {
                     chunkToSwap
                 );
             }
-            console.log("GL after swap1", gasleft());
             if (!swap1Success) {
                 break;
             }
@@ -1101,7 +1020,6 @@ contract ArbHook is BaseHook, ArbUtils, Ownable, ReentrancyGuard {
             }
 
             bool swap2Success = false;
-            console.log("GL before swap2", gasleft());
             if (
                 poolBType == ArbUtils.PoolType.V3 ||
                 poolBType == ArbUtils.PoolType.PANCAKESWAP_V3
@@ -1121,8 +1039,6 @@ contract ArbHook is BaseHook, ArbUtils, Ownable, ReentrancyGuard {
                             50
                         );
                 }
-            console.log("Swap2 params, interm recv:");
-            console.logUint(intermediateReceived);
                 swap2Success = _executeSwapInternal_noBalanceCheck(
                     poolB_addr,
                     poolBType,
@@ -1141,7 +1057,8 @@ contract ArbHook is BaseHook, ArbUtils, Ownable, ReentrancyGuard {
                 uint256 amountToReceive2 = arbLib.getAmountOut(
                     intermediateReceived,
                     rB_interm,
-                    rB_start
+                    rB_start,
+                    _v2FeeForPoolType(poolBType)
                 );
                 swap2Success = _executeV2FlashSwap(
                     IUniswapV2Pair(poolB_addr),
@@ -1151,7 +1068,6 @@ contract ArbHook is BaseHook, ArbUtils, Ownable, ReentrancyGuard {
                     intermediateReceived
                 );
             }
-            console.log("GL after swap2", gasleft());
             if (!swap2Success) {
                 break;
             }
@@ -1169,20 +1085,11 @@ contract ArbHook is BaseHook, ArbUtils, Ownable, ReentrancyGuard {
                 iterations++;
             }
 
-            console.log("Iter #, iterProfit, cumProfit, totalSwapped:");
-            console.logUint(iterations);
-            console.logInt(currentIterationProfit);
-            console.logInt(cumulativeProfit);
-            console.logUint(totalAmountSwapped);
-
             if (currentIterationProfit <= 0) break;
             unchecked {
                 ++i;
             }
-            console.log("GL iteration end", i, gasleft());
         }
-
-            console.log("GL before unwind", gasleft());
         uint256 balanceBeforeUnwind = IERC20(startToken).balanceOf(
             address(this)
         );
@@ -1196,7 +1103,6 @@ contract ArbHook is BaseHook, ArbUtils, Ownable, ReentrancyGuard {
             intermediateToken != WETH &&
             cumulativeProfit > 0
         ) {
-            console.log("GL before unwind swap1", gasleft());
             uint160 unwindLimitB = 0;
             if (
                 poolBType == ArbUtils.PoolType.V3 ||
@@ -1218,13 +1124,11 @@ contract ArbHook is BaseHook, ArbUtils, Ownable, ReentrancyGuard {
                 remainingInterm,
                 unwindLimitB
             );
-            console.log("GL after unwind swap1", gasleft());
 
             remainingInterm = IERC20(intermediateToken).balanceOf(
                 address(this)
             );
             if (remainingInterm > 0) {
-            console.log("GL before unwind swap2", gasleft());
                 uint160 unwindLimitA = 0;
                 if (
                     poolAType == ArbUtils.PoolType.V3 ||
@@ -1246,7 +1150,6 @@ contract ArbHook is BaseHook, ArbUtils, Ownable, ReentrancyGuard {
                     remainingInterm,
                     unwindLimitA
                 );
-            console.log("GL after unwind swap2", gasleft());
             }
 
             remainingInterm = IERC20(intermediateToken).balanceOf(
@@ -1265,19 +1168,12 @@ contract ArbHook is BaseHook, ArbUtils, Ownable, ReentrancyGuard {
                 int256(balanceBeforeUnwind);
             cumulativeProfit += unwindProfit;
         }
-            console.log("GL after unwind", gasleft());
-
-            console.log("Attempt result: success, cumProfit, iters:");
-            console.logBool(cumulativeProfit > 0);
-            console.logInt(cumulativeProfit);
-            console.logUint(iterations);
 
         if (
             iterations > 0 &&
             cumulativeProfit > 0 &&
             uint256(cumulativeProfit) >= minProfitToEmit
         ) {
-            console.log("GL before emit ArbitrageAttempted", gasleft());
             emit ArbitrageAttempted(
                 startToken,
                 intermediateToken,
@@ -1287,7 +1183,6 @@ contract ArbHook is BaseHook, ArbUtils, Ownable, ReentrancyGuard {
                 cumulativeProfit,
                 iterations
             );
-            console.log("GL after emit ArbitrageAttempted", gasleft());
 
             uint256 buyPoolIndex = _getPoolIndex(startToken, poolB_addr);
             uint256 sellPoolIndex = _getPoolIndex(startToken, poolA_addr);
@@ -1305,7 +1200,6 @@ contract ArbHook is BaseHook, ArbUtils, Ownable, ReentrancyGuard {
                 timestamp: block.timestamp
             });
         }
-            console.log("GL executeIterativeArb end", gasleft());
         return (true, cumulativeProfit, iterations);
     }
 
@@ -1342,7 +1236,6 @@ contract ArbHook is BaseHook, ArbUtils, Ownable, ReentrancyGuard {
         uint256 amountIn,
         uint160 sqrtPriceLimitX96
     ) private returns (bool success) {
-            console.log("GL _executeSwapInternal_noBalanceCheck start", gasleft());
         if (tokenIn == tokenOut) revert ArbErrors.SwapTokensMustBeDifferent();
 
         bool zeroForOne;
@@ -1382,7 +1275,6 @@ contract ArbHook is BaseHook, ArbUtils, Ownable, ReentrancyGuard {
         // Assume approvals are set up front; avoid allowance SLOAD and branch
 
         if (poolType == ArbUtils.PoolType.V3) {
-            console.log("GL before V3 swap", gasleft());
             try
                 IUniswapV3Pool(poolAddress).swap(
                     address(this),
@@ -1403,9 +1295,7 @@ contract ArbHook is BaseHook, ArbUtils, Ownable, ReentrancyGuard {
             } catch {
                 success = false;
             }
-            console.log("GL after V3 swap", gasleft());
         } else if (poolType == ArbUtils.PoolType.PANCAKESWAP_V3) {
-            console.log("GL before PancakeV3 swap", gasleft());
             try
                 IPancakeV3Pool(poolAddress).swap(
                     address(this),
@@ -1426,9 +1316,7 @@ contract ArbHook is BaseHook, ArbUtils, Ownable, ReentrancyGuard {
             } catch {
                 success = false;
             }
-            console.log("GL after PancakeV3 swap", gasleft());
         }
-            console.log("GL _executeSwapInternal_noBalanceCheck end", gasleft());
     }
 
     // ----------------------------- Callbacks -------------------------------
@@ -1453,7 +1341,6 @@ contract ArbHook is BaseHook, ArbUtils, Ownable, ReentrancyGuard {
         int256 amount1Delta,
         bytes calldata data
     ) internal {
-            console.log("GL _v3SwapCallbackLogic start", gasleft());
         (
             address decodedTokenIn,
             address decodedCaller,
@@ -1477,7 +1364,6 @@ contract ArbHook is BaseHook, ArbUtils, Ownable, ReentrancyGuard {
         address pool = msg.sender;
         address token0;
         address token1;
-        uint24 fee;
 
         // Use cached meta instead of external calls and factory checks
         PoolMeta storage pm = poolMetaByAddr[pool];
@@ -1485,7 +1371,6 @@ contract ArbHook is BaseHook, ArbUtils, Ownable, ReentrancyGuard {
             revert ArbErrors.CallbackUnexpectedPool(pool, expectedPool);
         token0 = pm.token0;
         token1 = pm.token1;
-        fee = pm.fee;
 
         if (decodedTokenIn != token0 && decodedTokenIn != token1) {
             revert ArbErrors.CallbackDecodedTokenNotInPool(
@@ -1508,12 +1393,9 @@ contract ArbHook is BaseHook, ArbUtils, Ownable, ReentrancyGuard {
         }
 
         if (amountToPay > 0) {
-            console.log("GL before safeTransfer in callback", gasleft());
             bool ok = IERC20(tokenToPay).transfer(pool, amountToPay);
             if (!ok) revert("ERC20 transfer failed");
-            console.log("GL after safeTransfer in callback", gasleft());
         }
-            console.log("GL _v3SwapCallbackLogic end", gasleft());
     }
 
     function uniswapV2Call(
@@ -1535,6 +1417,7 @@ contract ArbHook is BaseHook, ArbUtils, Ownable, ReentrancyGuard {
         if (msg.sender != uniPair && msg.sender != pcsPair) {
             revert ArbErrors.CallbackUnexpectedPool(msg.sender, address(0));
         }
+        _requireRegisteredV2CallbackPool(msg.sender, t0, t1);
         if (tokenToPay != t0 && tokenToPay != t1) {
             revert ArbErrors.CallbackDecodedTokenNotInPool(tokenToPay, t0, t1);
         }
@@ -1563,6 +1446,7 @@ contract ArbHook is BaseHook, ArbUtils, Ownable, ReentrancyGuard {
         if (msg.sender != uniPair && msg.sender != pcsPair) {
             revert ArbErrors.CallbackUnexpectedPool(msg.sender, address(0));
         }
+        _requireRegisteredV2CallbackPool(msg.sender, t0, t1);
         if (tokenToPay != t0 && tokenToPay != t1) {
             revert ArbErrors.CallbackDecodedTokenNotInPool(tokenToPay, t0, t1);
         }
@@ -1598,6 +1482,32 @@ contract ArbHook is BaseHook, ArbUtils, Ownable, ReentrancyGuard {
             }
         }
         return type(uint256).max;
+    }
+
+    function _v2FeeForPoolType(
+        ArbUtils.PoolType poolType
+    ) private pure returns (uint24) {
+        return
+            poolType == ArbUtils.PoolType.PANCAKESWAP_V2
+                ? PANCAKESWAP_V2_POOL_FEE_PPM
+                : V2_POOL_FEE_PPM;
+    }
+
+    function _requireRegisteredV2CallbackPool(
+        address pool,
+        address token0,
+        address token1
+    ) private view {
+        PoolMeta storage pm = poolMetaByAddr[pool];
+        if (
+            !pm.exists ||
+            (pm.poolType != ArbUtils.PoolType.V2 &&
+                pm.poolType != ArbUtils.PoolType.PANCAKESWAP_V2) ||
+            pm.token0 != token0 ||
+            pm.token1 != token1
+        ) {
+            revert ArbErrors.CallbackUnexpectedPool(pool, address(0));
+        }
     }
 
     // ---------------------------- Treasury ---------------------------------

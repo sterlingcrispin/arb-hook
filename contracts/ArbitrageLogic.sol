@@ -396,6 +396,7 @@ contract ArbitrageLogic {
                         currentV2Pool,
                         tokenA,
                         minChunkIn,
+                        currentPoolFee,
                         r0,
                         r1,
                         poolToken0,
@@ -967,6 +968,14 @@ contract ArbitrageLogic {
         }
     }
 
+    function estimateImpactBps(
+        address pool,
+        address tokenIn,
+        uint256 amountIn
+    ) public view returns (uint256) {
+        return ArbMath._estImpactBps(pool, tokenIn, amountIn);
+    }
+
     // --- Uniswap V2 Price Calculation Functions ---
 
     /**
@@ -1082,6 +1091,7 @@ contract ArbitrageLogic {
         IUniswapV2Pair pair,
         address tokenIn,
         uint256 minChunkIn, // minChunkIn is for tokenIn
+        uint24 v2FeePPM,
         uint112 reserve0,
         uint112 reserve1,
         address pairToken0,
@@ -1108,12 +1118,16 @@ contract ArbitrageLogic {
             return true; // Swapping zero input is not meaningful for a dust check
         }
 
-        // Calculate amountOut for Uniswap V2: formula for getAmountOut
-        // amountOut = (amountIn * 997 * reserveOut) / (reserveIn * 1000 + amountIn * 997)
-        // Using 997/1000 for the 0.3% fee.
-        uint256 amountInWithFee = minChunkIn * 997; // amountIn * 0.997
+        if (v2FeePPM >= 1_000_000) {
+            return true;
+        }
+        uint256 amountInWithFee = FullMath.mulDiv(
+            minChunkIn,
+            1_000_000 - v2FeePPM,
+            1_000_000
+        );
         uint256 numerator = amountInWithFee * reserveOut;
-        uint256 denominator = (reserveIn * 1000) + amountInWithFee;
+        uint256 denominator = reserveIn + amountInWithFee;
 
         if (denominator == 0) {
             return true; // Should not happen if reserves are non-zero and minChunkIn > 0
@@ -1151,7 +1165,9 @@ contract ArbitrageLogic {
         address startToken,
         address intermediateToken,
         uint256 startTokenBalance,
-        uint256 minChunkStartToken
+        uint256 minChunkStartToken,
+        uint24 poolAFeePPM,
+        uint24 poolBFeePPM
     ) public view returns (V2TradeParams memory params) {
         params.opportunityExists = false; // Default to no opportunity
 
@@ -1235,7 +1251,9 @@ contract ArbitrageLogic {
                 reserveA_start,
                 reserveA_interm,
                 reserveB_interm,
-                reserveB_start
+                reserveB_start,
+                poolAFeePPM,
+                poolBFeePPM
             );
 
             if (simulatedProfit > bestSimulatedProfit) {
@@ -1265,7 +1283,9 @@ contract ArbitrageLogic {
                     reserveA_start,
                     reserveA_interm,
                     reserveB_interm,
-                    reserveB_start
+                    reserveB_start,
+                    poolAFeePPM,
+                    poolBFeePPM
                 );
                 if (minChunkProfit > 0) {
                     params.opportunityExists = true;
@@ -1289,7 +1309,9 @@ contract ArbitrageLogic {
                     reserveA_start,
                     reserveA_interm,
                     reserveB_interm,
-                    reserveB_start
+                    reserveB_start,
+                    poolAFeePPM,
+                    poolBFeePPM
                 );
                 if (params.expectedProfitFromChunk <= 0)
                     params.opportunityExists = false;
@@ -1333,7 +1355,9 @@ contract ArbitrageLogic {
         uint112 rA_start,
         uint112 rA_interm,
         uint112 rB_interm,
-        uint112 rB_start
+        uint112 rB_start,
+        uint24 poolAFeePPM,
+        uint24 poolBFeePPM
     ) public pure returns (int256 profitInStartToken) {
         if (chunkToSwapStartToken == 0) return 0;
 
@@ -1343,7 +1367,8 @@ contract ArbitrageLogic {
         uint256 intermediateAmountOut = getAmountOut(
             chunkToSwapStartToken,
             rA_start,
-            rA_interm
+            rA_interm,
+            poolAFeePPM
         );
 
         // console.log("intermediateAmountOut", intermediateAmountOut);
@@ -1363,7 +1388,8 @@ contract ArbitrageLogic {
         uint256 startTokenReceivedBack = getAmountOut(
             intermediateAmountOut,
             rB_interm,
-            rB_start
+            rB_start,
+            poolBFeePPM
         );
 
         // console.log("startTokenReceivedBack", startTokenReceivedBack);
@@ -1421,12 +1447,26 @@ contract ArbitrageLogic {
         uint256 reserveIn,
         uint256 reserveOut
     ) public pure returns (uint256 amountOut) {
+        return getAmountOut(amountIn, reserveIn, reserveOut, 3000);
+    }
+
+    function getAmountOut(
+        uint256 amountIn,
+        uint256 reserveIn,
+        uint256 reserveOut,
+        uint24 feePPM
+    ) public pure returns (uint256 amountOut) {
         if (amountIn == 0) return 0;
         if (reserveIn == 0 || reserveOut == 0) return 0;
+        if (feePPM >= 1_000_000) return 0;
 
-        uint256 amountInWithFee = amountIn * 997; // Uniswap V2 fee is 0.3%
+        uint256 amountInWithFee = FullMath.mulDiv(
+            amountIn,
+            1_000_000 - feePPM,
+            1_000_000
+        );
         uint256 numerator = amountInWithFee * reserveOut;
-        uint256 denominator = (reserveIn * 1000) + amountInWithFee;
+        uint256 denominator = reserveIn + amountInWithFee;
         amountOut = numerator / denominator;
         return amountOut;
     }
@@ -1437,11 +1477,21 @@ contract ArbitrageLogic {
         uint256 reserveIn,
         uint256 reserveOut
     ) public pure returns (uint256 amountIn) {
+        return getAmountIn(amountOut, reserveIn, reserveOut, 3000);
+    }
+
+    function getAmountIn(
+        uint256 amountOut,
+        uint256 reserveIn,
+        uint256 reserveOut,
+        uint24 feePPM
+    ) public pure returns (uint256 amountIn) {
         if (amountOut == 0) return 0;
         if (reserveIn == 0 || reserveOut == 0) return type(uint256).max;
         if (amountOut >= reserveOut) return type(uint256).max; // Not enough liquidity
-        uint256 numerator = reserveIn * amountOut * 1000;
-        uint256 denominator = (reserveOut - amountOut) * 997;
+        if (feePPM >= 1_000_000) return type(uint256).max;
+        uint256 numerator = reserveIn * amountOut * 1_000_000;
+        uint256 denominator = (reserveOut - amountOut) * (1_000_000 - feePPM);
         amountIn = (numerator / denominator) + 1;
         return amountIn;
     }
@@ -1547,7 +1597,8 @@ contract ArbitrageLogic {
         IUniswapV2Pair poolA,
         IUniswapV3Pool poolB,
         address startToken,
-        address intermediateToken
+        address intermediateToken,
+        uint24 poolAFeePPM
     ) public view returns (int256 profitInStartToken) {
         if (chunkToSwapStartToken == 0) return 0;
 
@@ -1573,7 +1624,8 @@ contract ArbitrageLogic {
         uint256 intermediateAmountOut = getAmountOut(
             chunkToSwapStartToken,
             rA_start,
-            rA_interm
+            rA_interm,
+            poolAFeePPM
         );
 
         // console.log("intermediateAmountOut", intermediateAmountOut);
@@ -1635,7 +1687,8 @@ contract ArbitrageLogic {
         IUniswapV3Pool poolA,
         IUniswapV2Pair poolB,
         address startToken,
-        address intermediateToken
+        address intermediateToken,
+        uint24 poolBFeePPM
     ) public view returns (int256 profitInStartToken) {
         if (chunkToSwapStartToken == 0) return 0;
 
@@ -1694,7 +1747,8 @@ contract ArbitrageLogic {
         uint256 startTokenReceivedBack = getAmountOut(
             intermediateAmountOut,
             rB_interm,
-            rB_start
+            rB_start,
+            poolBFeePPM
         );
 
         // console.log("startTokenReceivedBack", startTokenReceivedBack);
@@ -1744,6 +1798,7 @@ contract ArbitrageLogic {
         address poolA_addr,
         address poolB_addr,
         ArbUtils.PoolType poolAType,
+        ArbUtils.PoolType poolBType,
         address startToken,
         address intermediateToken,
         uint256 initialTestChunk,
@@ -1766,7 +1821,10 @@ contract ArbitrageLogic {
                     IUniswapV2Pair(poolA_addr),
                     IUniswapV3Pool(poolB_addr),
                     startToken,
-                    intermediateToken
+                    intermediateToken,
+                    poolAType == ArbUtils.PoolType.PANCAKESWAP_V2
+                        ? 2500
+                        : 3000
                 );
             } else {
                 // V3 -> V2 path
@@ -1775,7 +1833,10 @@ contract ArbitrageLogic {
                     IUniswapV3Pool(poolA_addr),
                     IUniswapV2Pair(poolB_addr),
                     startToken,
-                    intermediateToken
+                    intermediateToken,
+                    poolBType == ArbUtils.PoolType.PANCAKESWAP_V2
+                        ? 2500
+                        : 3000
                 );
             }
 
