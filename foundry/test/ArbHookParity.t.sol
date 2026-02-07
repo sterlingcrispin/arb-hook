@@ -19,7 +19,7 @@ import {IPoolManager} from "@uniswap/v4-core/src/interfaces/IPoolManager.sol";
 import {IUniswapV3Pool} from "@uniswap/v3-core/contracts/interfaces/IUniswapV3Pool.sol";
 
 contract ArbHookParityTest is Test {
-    // Hardhat harness forks at 33942332 - 70 = 33942262
+    // Reference JS harness forks at 33942332 - 70 = 33942262
     // (see ExampleTests/ArbLightweight.attemptAll.js line 12)
     uint256 internal constant FOCUS_BLOCK = 33942262;
     uint256 internal constant FORK_START_BLOCK = FOCUS_BLOCK;
@@ -102,12 +102,6 @@ contract ArbHookParityTest is Test {
         types[0] = ArbUtils.PoolType.V3;
         _expectOwnableRevert(stranger);
         ctx.hook.addPools(USDC, pools, fees, types);
-
-        _expectOwnableRevert(stranger);
-        ctx.hook.resetTokenPools(USDC);
-
-        _expectOwnableRevert(stranger);
-        ctx.hook.resetAllPools();
 
         pools = new address[](0);
         fees = new uint24[](0);

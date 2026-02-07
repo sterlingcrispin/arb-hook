@@ -12,7 +12,6 @@ import "@openzeppelin/contracts/utils/math/Math.sol"; // Import Math
 import "./interfaces/IUniswapV2Pair.sol"; // Added for V2
 import "@uniswap/v3-core/contracts/libraries/SwapMath.sol"; // Added for SwapMath
 import "./interfaces/IPancakeV3Pool.sol"; // NEW: Add PancakeV3 Pool interface
-import "hardhat/console.sol";
 
 /**
  * @title ArbitrageLogic
@@ -473,16 +472,7 @@ contract ArbitrageLogic {
         ArbUtils.PoolType poolType = poolInfo.poolType;
         uint24 poolFee = poolInfo.fee;
         uint256 rawPriceScaled;
-        uint160 lastSqrtPriceX96;
-        bool lastSqrtPriceValid;
-        uint112 lastReserve0;
-        uint112 lastReserve1;
 
-        console.log("[_getSinglePoolPrices] tokenA", tokenA);
-        console.log("[_getSinglePoolPrices] tokenB", tokenB);
-        console.log("[_getSinglePoolPrices] pool", poolAddr);
-        console.log("[_getSinglePoolPrices] type", uint256(uint8(poolType)));
-        console.log("[_getSinglePoolPrices] fee", poolFee);
 
         if (poolType == ArbUtils.PoolType.V3) {
             IUniswapV3Pool v3Pool = IUniswapV3Pool(poolAddr);
@@ -497,14 +487,10 @@ contract ArbitrageLogic {
                 bool
             ) {
                 sqrtPriceX96 = sp;
-                lastSqrtPriceX96 = sp;
-                lastSqrtPriceValid = true;
             } catch {
-                console.log("slot0 failed (uni v3)");
                 return (0, 0, false);
             }
             if (sqrtPriceX96 == 0) {
-                console.log("sqrtPriceX96 zero (uni v3)");
                 return (0, 0, false);
             }
 
@@ -514,7 +500,6 @@ contract ArbitrageLogic {
                 poolInfo.token0Decimals,
                 poolInfo.token1Decimals
             );
-            console.log("rawPriceScaled uni", rawPriceScaled);
         } else if (poolType == ArbUtils.PoolType.PANCAKESWAP_V3) {
             IPancakeV3Pool v3Pool = IPancakeV3Pool(poolAddr);
             uint160 sqrtPriceX96;
@@ -528,14 +513,10 @@ contract ArbitrageLogic {
                 bool
             ) {
                 sqrtPriceX96 = sp;
-                lastSqrtPriceX96 = sp;
-                lastSqrtPriceValid = true;
             } catch {
-                console.log("slot0 failed (pcs v3)");
                 return (0, 0, false);
             }
             if (sqrtPriceX96 == 0) {
-                console.log("sqrtPriceX96 zero (pcs v3)");
                 return (0, 0, false);
             }
 
@@ -551,10 +532,7 @@ contract ArbitrageLogic {
         ) {
             IUniswapV2Pair v2Pool = IUniswapV2Pair(poolAddr);
             (uint112 r0, uint112 r1, ) = v2Pool.getReserves();
-            lastReserve0 = r0;
-            lastReserve1 = r1;
             if (r0 == 0 || r1 == 0) {
-                console.log("reserves zero v2");
                 return (0, 0, false);
             }
 
@@ -574,22 +552,6 @@ contract ArbitrageLogic {
         }
 
         if (rawPriceScaled == 0) {
-            console.log("rawPriceScaled zero", poolAddr);
-            console.log("token0", poolInfo.token0);
-            console.log("token1", poolInfo.token1);
-            console.log("dec0", poolInfo.token0Decimals);
-            console.log("dec1", poolInfo.token1Decimals);
-            if (lastSqrtPriceValid) {
-                console.log("last sqrtPrice", lastSqrtPriceX96);
-                console.log(
-                    "aIsToken0",
-                    poolInfo.token0 == tokenA ? uint256(1) : uint256(0)
-                );
-            }
-            if (lastReserve0 > 0 || lastReserve1 > 0) {
-                console.log("reserve0", uint256(lastReserve0));
-                console.log("reserve1", uint256(lastReserve1));
-            }
             return (0, 0, false);
         }
 
@@ -599,17 +561,10 @@ contract ArbitrageLogic {
         ) {
             effBuyPrice = getEffectiveBuyPrice(rawPriceScaled, poolFee);
             effSellPrice = getEffectiveSellPrice(rawPriceScaled, poolFee);
-            console.log(
-                "eff (v3)",
-                effBuyPrice,
-                effSellPrice,
-                poolFee
-            );
         } else {
             // V2 pools
             effBuyPrice = getV2EffectiveBuyPrice(rawPriceScaled, poolFee);
             effSellPrice = getV2EffectiveSellPrice(rawPriceScaled, poolFee);
-            console.log("eff (v2)", effBuyPrice, effSellPrice, poolFee);
         }
 
         return (effBuyPrice, effSellPrice, true);
@@ -911,10 +866,6 @@ contract ArbitrageLogic {
         if (targetTickA < TickMath.MIN_TICK) targetTickA = TickMath.MIN_TICK;
         if (targetTickA > TickMath.MAX_TICK) targetTickA = TickMath.MAX_TICK;
         params.sqrtPriceLimitA = TickMath.getSqrtRatioAtTick(targetTickA);
-        console.log("tickA");
-        console.logInt(params.poolAState.tick);
-        console.log("targetA");
-        console.logInt(targetTickA);
 
         int24 targetTickB = params.zeroForOneB
             ? params.poolBState.tick - move
@@ -931,10 +882,6 @@ contract ArbitrageLogic {
             params.poolAState.liquidity
         );
         params.intermediateAmountPotentiallyFromA = intermOutA;
-        console.log("startInA");
-        console.logUint(startInA);
-        console.log("intermOutA");
-        console.logUint(intermOutA);
 
         params.intermediateCapacityOfB = ArbMath._exactCapacity(
             address(pB), // Pass address instead of interface
