@@ -72,3 +72,16 @@ The current code assumes the hook contract holds its own funds for arbitrage exe
 
 - Parity as the real invariant  
   Tests focus on restoring price relationships correctly, not just extracting profit.
+
+## Parity Test Context
+
+The parity suite in `foundry/test/ArbHookParity.t.sol` is a regression target against a **previous non-hook arbitrage implementation**, not a comparison between two hook designs.
+
+The expected behavior is defined by the legacy reference artifacts in `ParityTest/`:
+- `ParityTest/ArbLightweight.sol` (original non-hook contract)
+- `ParityTest/ArbLightweight.attemptAll.js` (legacy harness logic)
+- `ParityTest/attemptAllOutput.txt` (golden per-round pool/profit sequence)
+
+Legacy comments that referred to a "worker bot" or "worker deployment" were describing that earlier non-hook implementation.
+
+The purpose of the parity test is to confirm the current Uniswap v4 hook path reproduces that same outcome sequence and total profit profile.
