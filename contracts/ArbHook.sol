@@ -1,9 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
-// A streamlined arbitrage bot that inlines the worker logic.
-// It avoids the CREATE/SELFDESTRUCT pattern to reduce gas.
-
+// Executes bounded on-chain arbitrage attempts from Uniswap v4 swap callbacks.
 import "./ArbUtils.sol";
 import "./ArbitrageLogic.sol";
 import {ArbErrors} from "./Errors.sol";
@@ -37,9 +35,10 @@ import {IPancakeV3Pool} from "./interfaces/IPancakeV3Pool.sol";
 import {IDataStorage} from "./interfaces/IDataStorage.sol";
 
 /// @title ArbHook
-/// @notice Single-contract version that embeds the iterative worker logic and skips
-///         dynamic worker deployment. Uses the same pool-book, pricing and swap logic
-///         from the previous WorkerLogic implementation.
+/// @notice Uniswap v4 hook that performs bounded, on-chain arbitrage across
+///         registered external pools during swap callbacks. It owns pool
+///         registration, price discovery, sizing, execution, and callback safety
+///         checks in one contract.
 contract ArbHook is BaseHook, ArbUtils, Ownable, ReentrancyGuard {
     using SafeERC20 for IERC20;
 
@@ -348,10 +347,10 @@ contract ArbHook is BaseHook, ArbUtils, Ownable, ReentrancyGuard {
     }
 
     // -------------------------- Core entrypoint ----------------------------
-    /// @notice Attempt arbitrage across all configured base/counter pairs.
-    ///         Streamlined to avoid blob decode and worker deployment.
-    ///         Uses low-level call to prevent external transaction reverts.
-    /// @notice Internal implementation of attemptAll that can revert
+    /// @notice Evaluate arbitrage opportunities across all configured base/counter pairs.
+    /// @dev Must be executed via self-call. Individual pair attempts are isolated with
+    ///      low-level calls so a failing path does not revert the full cycle.
+    ///      This internal execution path may still revert on invariant or auth failures.
     function attemptAllInternal(
         uint256 maxIterations
     ) external returns (bool success) {
