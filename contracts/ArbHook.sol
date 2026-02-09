@@ -142,7 +142,7 @@ contract ArbHook is
     mapping(address => bool) public trustedFlashLender;
     address public defaultProfitRecipient;
 
-    address private activeAttemptProfitRecipient;
+    address internal activeAttemptProfitRecipient;
     address private _activeLender;
     address private _activeLoanToken;
     uint256 private _activeLoanAmount;
@@ -1541,16 +1541,6 @@ contract ArbHook is
             cumulativeProfit > 0 &&
             uint256(cumulativeProfit) >= minProfitToEmit
         ) {
-            emit ArbitrageAttempted(
-                startToken,
-                intermediateToken,
-                poolB_addr,
-                poolA_addr,
-                totalAmountSwapped,
-                cumulativeProfit,
-                iterations
-            );
-
             uint256 buyPoolIndex = _getPoolIndex(startToken, poolB_addr);
             uint256 sellPoolIndex = _getPoolIndex(startToken, poolA_addr);
 
@@ -1566,6 +1556,20 @@ contract ArbHook is
                 iterations: iterations,
                 timestamp: block.timestamp
             });
+
+            // In flash-loan execution, net accounting is finalized in onFlashLoan.
+            // Emit legacy gross event only when not in active flash context.
+            if (_activeLender == address(0)) {
+                emit ArbitrageAttempted(
+                    startToken,
+                    intermediateToken,
+                    poolB_addr,
+                    poolA_addr,
+                    totalAmountSwapped,
+                    cumulativeProfit,
+                    iterations
+                );
+            }
         }
         return (true, cumulativeProfit, iterations);
     }
@@ -1834,7 +1838,7 @@ contract ArbHook is
     function _resolveProfitRecipient(
         address sender,
         bytes calldata hookData
-    ) private view returns (address) {
+    ) internal view returns (address) {
         if (hookData.length == 32) {
             address decoded = abi.decode(hookData, (address));
             if (decoded != address(0)) return decoded;
