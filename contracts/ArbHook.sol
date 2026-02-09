@@ -144,10 +144,6 @@ contract ArbHook is BaseHook, ArbUtils, Ownable, ReentrancyGuard {
         return successCall && tradeSuccess;
     }
 
-    function attemptAll(uint256 iterations) external onlyOwner returns (bool) {
-        return _attemptAllViaSelfCall(iterations);
-    }
-
     function getHookPermissions()
         public
         pure
