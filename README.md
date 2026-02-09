@@ -22,7 +22,51 @@ The hook doesn't assume the arbitrage leg happens on another Uniswap v4 pool. To
 
 The current code assumes the hook contract holds its own funds for arbitrage execution. For now, this simplifies control flow during swaps. In the future I imagine this would be done with flash loans instead to remove capital constraints. That also opens a clearer path to allow profits from arbitrages to be shared with the user that started the transaction.
 
-There is still required operator setup off-chain: pool registration, approvals, inventory funding, and parameter tuning.
+There is still required operator setup off-chain: pool registration, approvals, and inventory funding.
+
+## Runtime Parameters Explained
+
+The main runtime knobs are owner-settable on `ArbHook`:
+
+- `setHookMaxIterations(uint256)`  
+  Limits how many iterative chunks can execute in one trigger.
+  Higher values can capture more residual spread, but increase gas and can over-trade into diminishing returns.
+  Lower values are safer/cheaper but may leave profit on the table.
+
+- `setMinSpreadBps(uint16)`  
+  Minimum spread threshold required before execution continues.
+  This acts as a noise filter so tiny spreads (often eaten by fees/rounding/impact) are skipped.
+
+- `setChunkSpreadConsumptionBps(uint16)`  
+  Controls chunk aggressiveness: how much spread each iteration tries to consume.
+  Higher values are more aggressive (fewer, larger chunks; more impact risk).
+  Lower values are more conservative (more, smaller chunks; less impact risk).
+
+- `setMaxImpactBps(uint256)`  
+  Maximum estimated price impact allowed for guarded paths before skipping.
+  This prevents trading when impact is likely to destroy expected edge.
+
+- `setMinProfitToEmit(uint256)`  
+  Minimum cumulative profit required before emitting/storing trade data.
+  Unit is raw `tokenA` units (not 1e18 normalized).
+
+### Parity Test Profile (Current)
+
+In the parity harness (`foundry/test/ArbHookParity.t.sol`), the runtime profile is:
+
+- `hookMaxIterations = 2`
+- `minSpreadBps = 10`
+- `chunkSpreadConsumptionBps = 1500`
+- `maxImpactBps = 500`
+- `minProfitToEmit = 0`
+
+Why these values are used for parity:
+
+- `2` iterations keeps execution bounded while still allowing a follow-up chunk after the first fill.
+- `10 bps` filters micro-spreads that are usually not robust after execution costs.
+- `1500` gives a moderate first-step aggressiveness instead of over-consuming spread immediately.
+- `500` (5%) blocks obviously excessive-impact paths.
+- `0` ensures every profitable round is emitted/stored, which makes round-by-round parity assertions observable.
 
 
 ## How an Arbitrage Actually Happens (Step by Step)
