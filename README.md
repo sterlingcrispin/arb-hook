@@ -20,9 +20,19 @@ Most of the time the answer is no, and the hook exits almost immediately. When t
 
 The hook doesn't assume the arbitrage leg happens on another Uniswap v4 pool. Today the implemented external pool types are Uniswap V2/V3 and PancakeSwap V2/V3, so the v4 hook is acting as an observation point for broader cross-venue price discovery.
 
-The current code assumes the hook contract holds its own funds for arbitrage execution. For now, this simplifies control flow during swaps. In the future I imagine this would be done with flash loans instead to remove capital constraints. That also opens a clearer path to allow profits from arbitrages to be shared with the user that started the transaction.
+The current execution path is moving to flash-loan-funded arbitrage for principal, so the hook does not need to hold full trading inventory. Router/pool approvals and flash-lender configuration are still required.
 
-There is still required operator setup off-chain: pool registration, approvals, and inventory funding.
+There is still required operator setup off-chain: pool registration, approvals, lender configuration, and parameter tuning.
+
+## Flash Migration Checklist
+
+- Keep changes minimal and localized; avoid broad rewrites.
+- Preserve existing guardrails unless there is a concrete flash-loan incompatibility.
+- Keep route traversal/order behavior stable (`supportedTokens`, `baseCounterList`, cache semantics).
+- Preserve bounded loop and early-stop behavior in iterative execution.
+- Maintain failure isolation: arb failures must not break user swap settlement.
+- Treat legacy parity harness as optional diagnostics, not release gating.
+- Defer deep deploy-size optimization to a dedicated post-migration pass.
 
 ## Runtime Parameters Explained
 
@@ -50,9 +60,9 @@ The main runtime knobs are owner-settable on `ArbHook`:
   Minimum cumulative profit required before emitting/storing trade data.
   Unit is raw `tokenA` units (not 1e18 normalized).
 
-### Parity Test Profile (Current)
+### Legacy Parity Profile (Optional)
 
-In the parity harness (`foundry/test/ArbHookParity.t.sol`), the runtime profile is:
+In the legacy parity harness (`foundry/test/ArbHookParity.t.sol`), the runtime profile is:
 
 - `hookMaxIterations = 2`
 - `minSpreadBps = 10`
@@ -67,6 +77,11 @@ Why these values are used for parity:
 - `1500` gives a moderate first-step aggressiveness instead of over-consuming spread immediately.
 - `500` (5%) blocks obviously excessive-impact paths.
 - `0` ensures every profitable round is emitted/stored, which makes round-by-round parity assertions observable.
+
+`ArbHookParity.t.sol` is now opt-in and disabled by default.
+To run it intentionally:
+- Set `RUN_LEGACY_INVENTORY_PARITY=true`
+- Set `BASE_RPC_URL`
 
 
 ## How an Arbitrage Actually Happens (Step by Step)
@@ -118,12 +133,12 @@ Why these values are used for parity:
 - Self-call execution  
   Arbitrage is treated as speculative and allowed to fail safely without polluting hook state, so the users swap will succeed even if our arb fails.
 
-- Parity as the real invariant  
-  Current parity tests target exact sequence matching against the legacy non-hook reference (pool picks and profit amounts), not just "some profitable trade happened."
+- Flash safety as the current invariant  
+  Primary gating focuses on flash-loan callback safety, repayment correctness, and net-profit payout behavior.
 
 ## Parity Test Context
 
-The parity suite in `foundry/test/ArbHookParity.t.sol` is a regression target against a **previous non-hook arbitrage implementation**, not a comparison between two hook designs.
+The parity suite in `foundry/test/ArbHookParity.t.sol` is a regression target against a **previous non-hook arbitrage implementation**, not a comparison between two hook designs. It also represents a legacy inventory-funded flow.
 
 The expected behavior is defined by the legacy reference artifacts in `ParityTest/`:
 - `ParityTest/ArbLightweight.sol` (original non-hook contract)
