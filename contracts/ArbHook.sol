@@ -146,6 +146,7 @@ contract ArbHook is
     address private _activeLender;
     address private _activeLoanToken;
     uint256 private _activeLoanAmount;
+    uint256 private _activePrincipalHint;
     bytes32 private _activeFlashContextHash;
 
     bool private _flashLastTradeSuccess;
@@ -618,6 +619,13 @@ contract ArbHook is
             }
 
             // Isolate pair execution failure from the outer scanner.
+            _activePrincipalHint = _derivePrincipalForQuote(
+                tokenA,
+                buyPrice,
+                sellPrice,
+                buyPoolType,
+                sellPoolType
+            );
             (bool successCall, bytes memory returndata) = address(this).call(
                 abi.encodeWithSelector(
                     this.executeIterativeArbViaFlash.selector,
@@ -630,6 +638,7 @@ contract ArbHook is
                     buyPoolType
                 )
             );
+            _activePrincipalHint = 0;
 
             if (!successCall) {
                 emit PairExecutionFailed(
@@ -815,12 +824,16 @@ contract ArbHook is
         if (msg.sender != address(this)) revert ArbErrors.WrapperOnlySelf();
 
         address lender = lenderByToken[startToken];
-        uint256 principal = flashPrincipalByToken[startToken];
-        if (
-            lender == address(0) ||
-            principal == 0 ||
-            !trustedFlashLender[lender]
-        ) {
+        if (lender == address(0) || !trustedFlashLender[lender]) {
+            return (false, 0, 0);
+        }
+
+        uint256 principalCap = _resolvePrincipalCap(startToken, lender);
+        uint256 principal = _activePrincipalHint;
+        if (principal == 0 || principal > principalCap) {
+            principal = principalCap;
+        }
+        if (principal == 0) {
             return (false, 0, 0);
         }
 
@@ -1867,7 +1880,85 @@ contract ArbHook is
         _activeLender = address(0);
         _activeLoanToken = address(0);
         _activeLoanAmount = 0;
+        _activePrincipalHint = 0;
         _activeFlashContextHash = bytes32(0);
+    }
+
+    function _derivePrincipalForQuote(
+        address token,
+        uint256 buyPrice,
+        uint256 sellPrice,
+        ArbUtils.PoolType,
+        ArbUtils.PoolType
+    ) private view returns (uint256) {
+        uint256 principalCap = _resolvePrincipalCap(token);
+        if (principalCap == 0) return 0;
+
+        uint256 minPrincipal = _minChunk(token);
+        if (minPrincipal > principalCap) minPrincipal = principalCap;
+        if (buyPrice == 0 || sellPrice <= buyPrice) return minPrincipal;
+
+        uint256 spreadBps = ((sellPrice - buyPrice) * FEE_BPS_DIVISOR) /
+            buyPrice;
+        if (spreadBps <= minSpreadBps) return minPrincipal;
+
+        // Adaptive utilization curve:
+        // - floor uses impact guardrail (default 5%),
+        // - ramp scales with observed spread and configured chunk-consumption policy,
+        // - cap remains bounded by existing risk controls.
+        uint256 floorUtilizationBps = _MAX_IMPACT_BPS;
+        if (floorUtilizationBps == 0) floorUtilizationBps = minSpreadBps;
+        if (floorUtilizationBps == 0) floorUtilizationBps = 1;
+        if (floorUtilizationBps > FEE_BPS_DIVISOR) {
+            floorUtilizationBps = FEE_BPS_DIVISOR;
+        }
+
+        uint256 maxUtilizationBps = CHUNK_SPREAD_CONSUMPTION_BPS +
+            (floorUtilizationBps * 4);
+        if (maxUtilizationBps > FEE_BPS_DIVISOR) {
+            maxUtilizationBps = FEE_BPS_DIVISOR;
+        }
+        if (maxUtilizationBps < floorUtilizationBps) {
+            maxUtilizationBps = floorUtilizationBps;
+        }
+
+        uint256 spreadOverThreshold = spreadBps - uint256(minSpreadBps);
+        uint256 rampDenominator = uint256(minSpreadBps) + _MAX_IMPACT_BPS;
+        if (rampDenominator == 0) rampDenominator = 1;
+
+        uint256 rampBps = (spreadOverThreshold * CHUNK_SPREAD_CONSUMPTION_BPS) /
+            rampDenominator;
+        uint256 utilizationBps = floorUtilizationBps + rampBps;
+        if (utilizationBps > maxUtilizationBps) utilizationBps = maxUtilizationBps;
+
+        uint256 principal = (principalCap * utilizationBps) / FEE_BPS_DIVISOR;
+        if (principal < minPrincipal) principal = minPrincipal;
+        if (principal > principalCap) principal = principalCap;
+        return principal;
+    }
+
+    function _resolvePrincipalCap(address token) private view returns (uint256) {
+        return _resolvePrincipalCap(token, lenderByToken[token]);
+    }
+
+    function _resolvePrincipalCap(
+        address token,
+        address lender
+    ) private view returns (uint256) {
+        uint256 configuredCap = flashPrincipalByToken[token];
+        uint256 lenderCap = 0;
+
+        if (lender != address(0) && trustedFlashLender[lender]) {
+            try IERC3156FlashLender(lender).maxFlashLoan(token) returns (
+                uint256 available
+            ) {
+                lenderCap = available;
+            } catch {}
+        }
+
+        if (configuredCap == 0) return lenderCap;
+        if (lenderCap == 0) return configuredCap;
+        return configuredCap < lenderCap ? configuredCap : lenderCap;
     }
 
     function _findPoolInBook(

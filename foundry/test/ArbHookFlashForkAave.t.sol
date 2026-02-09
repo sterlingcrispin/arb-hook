@@ -123,12 +123,21 @@ contract ArbHookFlashForkAaveTest is Test {
     uint256 internal constant FORK_BLOCK = 33_942_262;
     uint256 internal constant TEST_FLASH_PRINCIPAL_USDC = 5_000e6;
     uint256 internal constant PARITY_MAX_ITER = 2;
+    uint256 internal constant PARITY_FLASH_CAP_USDC = 100_000e6;
+    uint256 internal constant PARITY_ROUNDS = 10;
+    bytes32 internal constant FLASH_REQUESTED_TOPIC0 =
+        keccak256("FlashLoanRequested(address,address,uint256,address)");
 
     struct PoolSpec {
         address base;
         address pool;
         uint24 fee;
         ArbUtils.PoolType poolType;
+    }
+
+    struct RoundExpectation {
+        address buyPool;
+        address sellPool;
     }
 
     bool internal forkEnabled;
@@ -298,6 +307,71 @@ contract ArbHookFlashForkAaveTest is Test {
         assertGt(pairProfit, -int256(paidFee), "arb path should generate non-zero gross result");
     }
 
+    function testForkAaveAttemptAllTracksLegacyRoundSequenceShape() public {
+        if (!forkEnabled) return;
+
+        _configureParityPoolBook();
+        _replicateParityFundingState();
+        _seedCbBtcUsdcGap();
+
+        hook.setFlashPrincipalForToken(USDC, PARITY_FLASH_CAP_USDC);
+        hook.setMinProfitToEmit(0);
+
+        uint256 tradesBefore = dataStorage.getTradeCount();
+        RoundExpectation[PARITY_ROUNDS] memory expected = _legacyRoundExpectations();
+        uint256 profitableRounds;
+        uint256 routeMatches;
+        uint256 lastPrincipal;
+        bool sawPrincipalVariance;
+
+        emit log("===== Flash AttemptAll vs Legacy Round Sequence =====");
+        for (uint256 round = 0; round < PARITY_ROUNDS; ++round) {
+            vm.recordLogs();
+            bool success = hook.attemptAllForTest(PARITY_MAX_ITER);
+            assertTrue(success, "legacy-profitable round should remain profitable");
+            Vm.Log[] memory logs = vm.getRecordedLogs();
+            uint256 principal = _extractFlashRequestedPrincipal(logs);
+            assertGt(principal, 0, "round should request flash principal");
+            if (round > 0 && principal != lastPrincipal) {
+                sawPrincipalVariance = true;
+            }
+            lastPrincipal = principal;
+
+            uint256[] memory trade = dataStorage.fetchTradeData(tradesBefore + round);
+            address buyPool = address(uint160(trade[0]));
+            address sellPool = address(uint160(trade[1]));
+            uint256 profit = trade[5];
+
+            bool routeMatch =
+                buyPool == expected[round].buyPool &&
+                sellPool == expected[round].sellPool;
+            if (routeMatch) routeMatches++;
+            if (profit > 0) profitableRounds++;
+
+            emit log("");
+            emit log_named_uint("round", round + 1);
+            emit log_named_address("expected buy", expected[round].buyPool);
+            emit log_named_address("actual buy", buyPool);
+            emit log_named_address("expected sell", expected[round].sellPool);
+            emit log_named_address("actual sell", sellPool);
+            emit log_named_uint("flash principal (raw usdc)", principal);
+            emit log_named_uint("net profit (raw usdc)", profit);
+            emit log_named_uint("iterations", trade[6]);
+            emit log_named_uint("route match (1=yes)", routeMatch ? 1 : 0);
+
+            assertGt(profit, 0, "round should have positive net profit");
+        }
+
+        emit log("");
+        emit log_named_uint("profitable rounds", profitableRounds);
+        emit log_named_uint("route matches vs legacy", routeMatches);
+        emit log("====================================================");
+
+        assertEq(profitableRounds, PARITY_ROUNDS, "all legacy-profitable rounds should stay profitable");
+        assertGt(routeMatches, 0, "expected at least some route alignment with legacy order");
+        assertTrue(sawPrincipalVariance, "flash principal should adapt across rounds");
+    }
+
     function _configureParityPoolBook() private {
         PoolSpec[] memory specs = _parityPools();
         for (uint256 i = 0; i < specs.length; ++i) {
@@ -431,5 +505,62 @@ contract ArbHookFlashForkAaveTest is Test {
         specs[idx++] = PoolSpec({base: USDC, pool: 0xeC558e484cC9f2210714E345298fdc53B253c27D, fee: 3000, poolType: ArbUtils.PoolType.V3});
         specs[idx++] = PoolSpec({base: USDC, pool: 0xEdc625B74537eE3a10874f53D170E9c17A906B9c, fee: 3000, poolType: ArbUtils.PoolType.V3});
         specs[idx++] = PoolSpec({base: USDC, pool: 0x36B4869995672DF7E3aFc36BE795Dbb998Bc639d, fee: 10000, poolType: ArbUtils.PoolType.V3});
+    }
+
+    function _legacyRoundExpectations() private pure returns (RoundExpectation[PARITY_ROUNDS] memory rounds) {
+        rounds[0] = RoundExpectation({
+            buyPool: 0x56C8989222ed293E3c4a22628d8BCA633cE1eb99,
+            sellPool: 0x1C450D7d1FD98A0b04E30deCFc83497b33A4F608
+        });
+        rounds[1] = RoundExpectation({
+            buyPool: 0x56C8989222ed293E3c4a22628d8BCA633cE1eb99,
+            sellPool: 0x1C450D7d1FD98A0b04E30deCFc83497b33A4F608
+        });
+        rounds[2] = RoundExpectation({
+            buyPool: 0x56C8989222ed293E3c4a22628d8BCA633cE1eb99,
+            sellPool: 0xd0b53D9277642d899DF5C87A3966A349A798F224
+        });
+        rounds[3] = RoundExpectation({
+            buyPool: 0xb4CB800910B228ED3d0834cF79D697127BBB00e5,
+            sellPool: 0xd0b53D9277642d899DF5C87A3966A349A798F224
+        });
+        rounds[4] = RoundExpectation({
+            buyPool: 0xB775272E537cc670C65DC852908aD47015244EaF,
+            sellPool: 0xd0b53D9277642d899DF5C87A3966A349A798F224
+        });
+        rounds[5] = RoundExpectation({
+            buyPool: 0x72AB388E2E2F6FaceF59E3C3FA2C4E29011c2D38,
+            sellPool: 0xd0b53D9277642d899DF5C87A3966A349A798F224
+        });
+        rounds[6] = RoundExpectation({
+            buyPool: 0x56C8989222ed293E3c4a22628d8BCA633cE1eb99,
+            sellPool: 0xd0b53D9277642d899DF5C87A3966A349A798F224
+        });
+        rounds[7] = RoundExpectation({
+            buyPool: 0xb4CB800910B228ED3d0834cF79D697127BBB00e5,
+            sellPool: 0xd0b53D9277642d899DF5C87A3966A349A798F224
+        });
+        rounds[8] = RoundExpectation({
+            buyPool: 0x56C8989222ed293E3c4a22628d8BCA633cE1eb99,
+            sellPool: 0xd0b53D9277642d899DF5C87A3966A349A798F224
+        });
+        rounds[9] = RoundExpectation({
+            buyPool: 0xB775272E537cc670C65DC852908aD47015244EaF,
+            sellPool: 0xd0b53D9277642d899DF5C87A3966A349A798F224
+        });
+    }
+
+    function _extractFlashRequestedPrincipal(
+        Vm.Log[] memory entries
+    ) private pure returns (uint256 principal) {
+        for (uint256 i = 0; i < entries.length; ++i) {
+            if (
+                entries[i].topics.length > 0 &&
+                entries[i].topics[0] == FLASH_REQUESTED_TOPIC0
+            ) {
+                (principal, ) = abi.decode(entries[i].data, (uint256, address));
+                return principal;
+            }
+        }
     }
 }

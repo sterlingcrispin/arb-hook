@@ -13,3 +13,5 @@ coverage.json
 broadcast/
 dist/
 ParityTest/
+.anvil-cache/
+.anvil-state/
