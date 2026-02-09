@@ -4,9 +4,12 @@ pragma solidity ^0.8.20;
 import {ArbHook} from "../ArbHook.sol";
 import {ArbUtils} from "../ArbUtils.sol";
 import {IPoolManager} from "@uniswap/v4-core/src/interfaces/IPoolManager.sol";
+import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 
 /// @notice Simple harness that exposes internal entrypoints for testing.
 contract ArbHookHarness is ArbHook {
+    uint256 public testProfitBps;
+
     constructor(
         IPoolManager poolManager,
         address owner,
@@ -49,5 +52,51 @@ contract ArbHookHarness is ArbHook {
         );
         if (!callOk) return (false, 0, 0);
         return abi.decode(returndata, (bool, int256, uint256));
+    }
+
+    function setTestProfitBps(uint256 bps) external onlyOwner {
+        testProfitBps = bps;
+    }
+
+    function executeIterativeArb(
+        address poolA_addr,
+        address poolB_addr,
+        address startToken,
+        address intermediateToken,
+        uint256 maxIterations,
+        ArbUtils.PoolType poolAType,
+        ArbUtils.PoolType poolBType
+    )
+        public
+        override
+        returns (bool success, int256 cumulativeProfit, uint256 iterations)
+    {
+        if (testProfitBps > 0 && maxIterations == 0) {
+            uint256 bal = IERC20(startToken).balanceOf(address(this));
+            uint256 mintAmount = (bal * testProfitBps) / 10_000;
+            if (mintAmount > 0) {
+                // Test token only; used in flash-loan E2E tests to simulate profitable execution.
+                (bool ok, ) = startToken.call(
+                    abi.encodeWithSignature(
+                        "mint(address,uint256)",
+                        address(this),
+                        mintAmount
+                    )
+                );
+                require(ok, "test mint failed");
+            }
+            return (true, int256(mintAmount), 1);
+        }
+
+        return
+            super.executeIterativeArb(
+                poolA_addr,
+                poolB_addr,
+                startToken,
+                intermediateToken,
+                maxIterations,
+                poolAType,
+                poolBType
+            );
     }
 }

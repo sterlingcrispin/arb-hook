@@ -12,6 +12,7 @@ import {TestToken} from "../../contracts/test/TestToken.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {IERC3156FlashBorrower} from "../../contracts/interfaces/IERC3156FlashBorrower.sol";
 import {IERC3156FlashLender} from "../../contracts/interfaces/IERC3156FlashLender.sol";
+import {IDataStorage} from "../../contracts/interfaces/IDataStorage.sol";
 import {IPoolManager} from "@uniswap/v4-core/src/interfaces/IPoolManager.sol";
 
 contract MockERC3156Lender is IERC3156FlashLender {
@@ -105,11 +106,12 @@ contract BadInitiatorFlashLender is IERC3156FlashLender {
 contract ArbHookFlashLoanE2ETest is Test {
     ArbHookHarness internal hook;
     TestToken internal token;
+    DataStorage internal dataStorage;
 
     function setUp() public {
         PoolManagerHarness poolManager = new PoolManagerHarness(address(this));
         ArbitrageLogic logic = new ArbitrageLogic();
-        DataStorage dataStorage = new DataStorage(address(this));
+        dataStorage = new DataStorage(address(this));
         hook = new ArbHookHarness(
             IPoolManager(address(poolManager)),
             address(this),
@@ -189,5 +191,62 @@ contract ArbHookFlashLoanE2ETest is Test {
         assertFalse(success, "bad initiator callback should fail safely");
         assertEq(profit, 0, "failed flash request should not report profit");
         assertEq(iterations, 0, "failed flash request should not run iterations");
+    }
+
+    function testFlashLoanProfitablePathPaysBeneficiaryAndStoresTrade() public {
+        uint256 principal = 100_000e18;
+        MockERC3156Lender lender = new MockERC3156Lender(IERC20(address(token)), 5); // 0.05%
+        token.mint(address(lender), principal);
+
+        hook.setTrustedFlashLender(address(lender), true);
+        hook.setLenderForToken(address(token), address(lender));
+        hook.setFlashPrincipalForToken(address(token), principal);
+        hook.setMaxFlashFeeBpsForToken(address(token), 20);
+        hook.setMinProfitToEmit(1);
+
+        // Configure harness-only deterministic profit injection for maxIterations=0.
+        hook.setTestProfitBps(100); // +1.00% over current balance
+
+        address beneficiary = makeAddr("beneficiary");
+        hook.setDefaultProfitRecipient(beneficiary);
+
+        uint256 fee = lender.flashFee(address(token), principal);
+        uint256 expectedGross = principal / 100; // 1%
+        uint256 expectedNet = expectedGross - fee;
+        assertGt(expectedNet, 0, "expectedNet should be positive");
+
+        uint256 lenderBefore = token.balanceOf(address(lender));
+        uint256 beneficiaryBefore = token.balanceOf(beneficiary);
+        uint256 tradesBefore = dataStorage.getTradeCount();
+
+        (bool success, int256 profit, uint256 iterations) = hook.runFlashArbForTest(
+            address(0xD1),
+            address(0xD2),
+            address(token),
+            address(0xD3),
+            0,
+            ArbUtils.PoolType.V3,
+            ArbUtils.PoolType.V3
+        );
+
+        assertTrue(success, "profitable flash test path should succeed");
+        assertEq(uint256(profit), expectedNet, "reported net profit mismatch");
+        assertEq(iterations, 1, "injected profitable path should report one iteration");
+
+        assertEq(
+            token.balanceOf(beneficiary),
+            beneficiaryBefore + expectedNet,
+            "beneficiary did not receive net profit"
+        );
+        assertEq(
+            token.balanceOf(address(lender)),
+            lenderBefore + fee,
+            "lender should only gain fee"
+        );
+        assertEq(
+            dataStorage.getTradeCount(),
+            tradesBefore + 1,
+            "successful net-profit flash trade should be stored"
+        );
     }
 }

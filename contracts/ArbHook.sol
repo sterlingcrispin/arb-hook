@@ -982,6 +982,14 @@ contract ArbHook is
             params.beneficiary
         );
 
+        if (
+            _flashLastTradeSuccess &&
+            address(dataStorage) != address(0) &&
+            uint256(netProfit) >= minProfitToEmit
+        ) {
+            dataStorage.storeTradeData(lastTradeData);
+        }
+
         return ERC3156_CALLBACK_SUCCESS;
     }
 
@@ -1001,6 +1009,7 @@ contract ArbHook is
         ArbUtils.PoolType poolBType
     )
         public
+        virtual
         returns (bool success, int256 cumulativeProfit, uint256 iterations)
     {
         if (msg.sender != address(this)) revert ArbErrors.WrapperOnlySelf();
