@@ -15,9 +15,11 @@ import {ArbitrageLogic} from "./ArbitrageLogic.sol";
 import {IDataStorage} from "./interfaces/IDataStorage.sol";
 
 /// @title ArbUtils
-/// @notice Shared pure/view helpers extracted from IterativeArbBot.
-///         Keeping them `internal` preserves the original gas profile while
-///         shrinking the main contract's byte-code.
+/// @notice Shared state and helper routines for pool registration, route discovery,
+///         pricing support, and treasury operations used by ArbHook.
+/// @dev Route planning is intentionally simple and deterministic:
+///      `supportedTokens` (outer loop) -> `baseCounterList[base]` (inner loop).
+///      Registration order therefore determines evaluation order in `attemptAllInternal`.
 abstract contract ArbUtils {
     using SafeERC20 for IERC20;
 
@@ -50,20 +52,23 @@ abstract contract ArbUtils {
         int24 tickSpacing; // Only for V3 pools, 0 for V2
     }
 
-    // ↓ Made internal – eliminates two public getters, saving bytecode.
+    // Base token -> all pools registered under that base token.
     mapping(address => PoolInfo[]) internal tokenPools;
+    // Distinct base tokens in insertion order. This order drives attemptAll traversal.
     address[] internal supportedTokens;
 
+    // Base token -> unique counterpart tokens seen in registered pools.
     mapping(address => address[]) internal baseCounterList;
+    // Dedupe guard for baseCounterList.
     mapping(address => mapping(address => bool)) internal isCounterKnown;
 
-    // To be shared by both IterativeArbBot and the ephemeral Worker
+    // Stateless pricing/sizing engine shared by the hook execution paths.
     ArbitrageLogic internal arbLib;
 
     IDataStorage.TradeData public lastTradeData;
 
-    // [NEW] "Mailbox" for the worker to report profit back to the main contract,
-    // bypassing the fragile delegatecall returndata.
+    // Mailbox written by inner execution and consumed by wrapper callsites.
+    // Keeping this on storage avoids pushing richer structs through low-level return data.
     int256 public lastExecutionProfit;
 
     struct FailedQuote {
@@ -72,7 +77,7 @@ abstract contract ArbUtils {
     }
     mapping(bytes32 => FailedQuote) internal lastFailedQuote;
 
-    // [NEW] More detailed struct for the pair-based failure cache
+    // Last failing pool combination seen for a token pair at a specific quantised quote.
     struct FailedAttempt {
         address buyPool;
         address sellPool;
@@ -93,7 +98,7 @@ abstract contract ArbUtils {
         delete baseCounterList[base];
     }
 
-    // [NEW] Helper to get a normalized key for a token pair
+    // Key is symmetric for (A,B) and (B,A) so both directions share one cache slot.
     function _getPairKey(
         address tokenA,
         address tokenB
@@ -128,6 +133,7 @@ abstract contract ArbUtils {
             poolAddresses.length != poolTypes.length
         ) revert ArbErrors.InputArrayLengthMismatch();
 
+        // Preserve first-seen ordering for deterministic traversal in attemptAll.
         bool tokenIsNew = true;
         for (uint j; j < supportedTokens.length; ++j)
             if (supportedTokens[j] == token) {
@@ -240,6 +246,7 @@ abstract contract ArbUtils {
         }
         poolActivityCache[poolAddr] = initialActivityIndicator;
 
+        // Build the base -> counter adjacency list used by attemptAll route scanning.
         address counter = (t0 == token) ? t1 : t0;
         if (!isCounterKnown[token][counter]) {
             isCounterKnown[token][counter] = true;

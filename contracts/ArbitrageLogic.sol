@@ -199,6 +199,8 @@ contract ArbitrageLogic {
             ArbUtils.PoolType bestSellPoolType
         )
     {
+        // Given a base-token pool list, select the best executable buy/sell quote pair.
+        // Caller controls `skip*Pool` to force exploration of alternates after a failure.
         uint256 poolCount = poolsForTokenA.length;
         bestBuyPrice = type(uint256).max;
         bestSellPrice = 0;
@@ -606,29 +608,27 @@ contract ArbitrageLogic {
                 : keccak256(abi.encodePacked(tokenB, tokenA, qBuy, qSell));
     }
 
-    // --- Structs for _executeIterativeArbInternal refactor ---
+    // Snapshot fields reused across sizing/simulation in one iteration.
     struct PoolStatesForIteration {
         uint160 sqrtPrice;
         int24 tick;
         uint128 liquidity;
         address token0;
-        // Add other fields if needed by subsequent logic steps, e.g., fee
     }
 
     struct V3SwapParams {
-        // RENAMED from InitialIterationParams
-        bool shouldContinue; // True if all checks pass and iteration can proceed
-        uint256 chunkToSwap; // The ROUGH chunk size. The final chunk is found by findBestV3Chunk.
+        bool shouldContinue; // True if all pre-checks pass and iteration can proceed.
+        uint256 chunkToSwap; // Coarse upper bound; refined by findBestV3Chunk.
         uint160 sqrtPriceLimitA; // Price limit for swap in pool A
         uint160 sqrtPriceLimitB; // Price limit for swap in pool B
-        uint256 intermediateAmountPotentiallyFromA; // intermOutA (before pool B capacity clamp)
-        uint256 intermediateCapacityOfB; // intermInCapB
-        PoolStatesForIteration poolAState; // Current state of pool A, fetched by this function
-        PoolStatesForIteration poolBState; // Current state of pool B, fetched by this function
+        uint256 intermediateAmountPotentiallyFromA; // intermOutA before pool-B capacity clamp
+        uint256 intermediateCapacityOfB; // max intermediate token pool B can absorb in-window
+        PoolStatesForIteration poolAState;
+        PoolStatesForIteration poolBState;
         bool zeroForOneA; // Swap direction for pool A
         bool zeroForOneB; // Swap direction for pool B
-        uint24 feeB; // NEW: Fee for pool B, needed for simulation
-        uint256 calculatedSellImpactBps; // The impact on pool A for the chunkToSwap
+        uint24 feeB; // Pool-B fee used in simulation
+        uint256 calculatedSellImpactBps; // Estimated impact on pool A for coarse chunk
     }
 
     struct IterationConfig {
@@ -659,10 +659,12 @@ contract ArbitrageLogic {
         bestChunk = 0;
 
         for (uint8 iter; iter < 16 && lo <= hi; ++iter) {
-            // ≤32 rounds is enough for 2²⁵⁶ space
+            // Bounded binary search keeps execution predictable inside hook callbacks.
+            // 16 rounds is enough once `hi` is already a narrow, liquidity-derived bound.
             uint256 mid = (lo + hi) >> 1; // mid = (lo+hi)/2
 
-            // scale outputs linearly inside the single-tick slab
+            // Approximate scaling in the local execution window.
+            // This is intentionally heuristic; exact tick-by-tick simulation is too costly here.
             uint256 intermOut_mid = FullMath.mulDiv(intermOut_full, mid, hi);
             uint256 intermInB_mid = intermOut_mid > intermCapB
                 ? intermCapB
@@ -708,9 +710,10 @@ contract ArbitrageLogic {
         if (bestPL <= 0) bestChunk = 0; // nothing profitable after search
     }
 
-    // --- Main Iterative Calculation Logic (Part 1) ---
+    // Part 1 of V3 sizing:
+    // gather live pool state, compute a coarse chunk and swap limits, then
+    // hand off to findBestV3Chunk for bounded profit search.
     function getV3SwapParameters(
-        // RENAMED from calculateInitialIterationParameters
         address poolA_address,
         address poolB_address,
         address startToken,
@@ -719,8 +722,7 @@ contract ArbitrageLogic {
         ArbUtils.PoolType poolAType,
         ArbUtils.PoolType poolBType
     ) public view returns (V3SwapParams memory params) {
-        // This function now only performs on-chain reads and initial calculations.
-        // The heavy binary search is moved to findBestV3Chunk.
+        // Keep this function read-heavy and deterministic; avoid deep search loops here.
         params.shouldContinue = false; // Default to not continuing
 
         IUniswapV3Pool pA = IUniswapV3Pool(poolA_address);
@@ -836,7 +838,8 @@ contract ArbitrageLogic {
             return params; // shouldContinue is false, stop here
         }
 
-        // --- Calculate movement in ticks based on spread -------------------------
+        // Convert spread into a target move window.
+        // Larger remaining spread -> larger step; tighter spread -> smaller step.
         int24 move;
         uint16 moveBpsAdaptive;
         unchecked {
@@ -875,7 +878,8 @@ contract ArbitrageLogic {
         if (targetTickB > TickMath.MAX_TICK) targetTickB = TickMath.MAX_TICK;
         params.sqrtPriceLimitB = TickMath.getSqrtRatioAtTick(targetTickB);
 
-        // --- Initial "balanced" chunk (upper bound for search) ----------
+        // Coarse upper bound:
+        // amount needed to move pool A by `move`, then clamped to what pool B can absorb.
         (uint256 startInA, uint256 intermOutA) = ArbMath._deltaAmounts(
             params.zeroForOneA,
             params.poolAState.sqrtPrice,
@@ -911,7 +915,7 @@ contract ArbitrageLogic {
             return params; // shouldContinue is false
         }
 
-        // --- Determine Sell Leg Impact (Pool A) but do not scale chunk here ---
+        // Track estimated impact for observability/guardrails; refinement happens in part 2.
         uint256 impactOnA_forChunkPreImpact = ArbMath._estImpactBps(
             poolA_address,
             startToken,
@@ -924,7 +928,7 @@ contract ArbitrageLogic {
             return params; // still false
         }
 
-        // ---- Binary-search refinement is now in findBestV3Chunk ----
+        // Binary-search refinement happens in findBestV3Chunk.
 
         try IUniswapV3Pool(poolB_address).fee() returns (uint24 fB) {
             params.feeB = fB;
@@ -940,7 +944,8 @@ contract ArbitrageLogic {
         return params;
     }
 
-    // [NEW] Second part of V3 calculation. Takes raw state and runs the heavy simulation loop.
+    // Part 2 of V3 sizing:
+    // use coarse parameters from getV3SwapParameters and select the best executable chunk.
     function findBestV3Chunk(
         V3SwapParams memory params,
         uint256 minChunkForStartToken
@@ -1212,7 +1217,11 @@ contract ArbitrageLogic {
             return params; // Not enough liquidity in one of the pools
         }
 
-        // Improved Placeholder: Try a few different chunk sizes
+        // Heuristic probe ladder.
+        // Exact optimal V2-V2 size is possible off-chain but expensive on-chain,
+        // so we probe representative sizes and pick the best simulated outcome.
+        // The largest probe (50% balance) is intentional: slippage usually makes
+        // oversizing fail fast, and smaller candidates are then cheap to test.
         uint256[] memory testChunkSizes = new uint256[](4);
         testChunkSizes[0] = minChunkStartToken;
         if (testChunkSizes[0] == 0 && startTokenBalance > 0)
@@ -1234,7 +1243,7 @@ contract ArbitrageLogic {
                 currentTestChunk = startTokenBalance;
             if (currentTestChunk == 0) continue;
 
-            // Ensure we don't re-test same chunk if balance is very small
+            // Skip duplicate probes when balance is small and ratios collapse to same value.
             if (
                 i > 0 &&
                 currentTestChunk == testChunkSizes[i - 1] &&
@@ -1536,7 +1545,8 @@ contract ArbitrageLogic {
         bool zeroForOne = tokenIn == token0;
         int256 amountRemaining = int256(amountIn);
 
-        // Simulate multi-step (loop until filled or no progress)
+        // Approximate multi-step fill to derive a conservative price limit.
+        // This deliberately trades perfect precision for bounded gas.
         uint8 maxSteps = 5; // Cap to avoid high gas on deep liquidity
         for (uint8 step = 0; step < maxSteps && amountRemaining > 0; step++) {
             (uint160 sqrtQ, uint256 stepAmountIn, , ) = SwapMath
@@ -1806,6 +1816,9 @@ contract ArbitrageLogic {
         int256 cumulativeProfit,
         int256 minCumulativeProfit
     ) public view returns (uint256 bestChunk) {
+        // Mixed-path sizing uses monotonic backoff.
+        // Start from a large probe and halve until a profitable/safe chunk is found.
+        // This minimizes quote simulations while still quickly adapting to impact.
         uint8 halvings = 0;
         uint256 testChunk = initialTestChunk;
 

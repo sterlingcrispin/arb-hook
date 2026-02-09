@@ -53,7 +53,7 @@ contract ArbHook is BaseHook, ArbUtils, Ownable, ReentrancyGuard {
     // Quick lookup for callbacks and validation without extra external calls
     mapping(address => PoolMeta) private poolMetaByAddr;
 
-    // Cache last “best” selection to bias discovery and reduce recompute
+    // Last winning pools for a pair; useful for telemetry and future warm-start heuristics.
     mapping(bytes32 => address) private lastBestBuyPoolForPair;
     mapping(bytes32 => address) private lastBestSellPoolForPair;
 
@@ -115,6 +115,7 @@ contract ArbHook is BaseHook, ArbUtils, Ownable, ReentrancyGuard {
         BalanceDelta,
         bytes calldata
     ) internal override returns (bytes4, int128) {
+        // Hook path is best-effort only: trade failure must never block user swap settlement.
         uint256 iterations = hookMaxIterations;
         if (iterations > 0) {
             _attemptAllViaSelfCall(iterations);
@@ -126,6 +127,8 @@ contract ArbHook is BaseHook, ArbUtils, Ownable, ReentrancyGuard {
     function _attemptAllViaSelfCall(
         uint256 iterations
     ) internal returns (bool) {
+        // Self-call gives us a hard failure boundary:
+        // any revert in deep execution is captured as bytes and does not bubble.
         (bool successCall, bytes memory returndata) = address(this).call(
             abi.encodeWithSelector(this.attemptAllInternal.selector, iterations)
         );
@@ -221,6 +224,7 @@ contract ArbHook is BaseHook, ArbUtils, Ownable, ReentrancyGuard {
         uint24[] memory fees,
         ArbUtils.PoolType[] memory poolTypes
     ) external onlyOwner nonReentrant {
+        // Registration order matters: it affects supportedTokens/baseCounterList traversal order.
         _addPools(token, poolAddresses, fees, poolTypes);
         // Populate pool meta for callbacks and cheaper checks
         for (uint256 i = 0; i < poolAddresses.length; i++) {
@@ -359,11 +363,13 @@ contract ArbHook is BaseHook, ArbUtils, Ownable, ReentrancyGuard {
 
         int256 totalProfit = 0;
         uint256 baseCount = supportedTokens.length;
+        // Outer loop walks base tokens in registration order.
         for (uint256 i = 0; i < baseCount; ++i) {
             address baseToken = supportedTokens[i];
             address[] storage counterTokens = baseCounterList[baseToken];
             uint256 counterCount = counterTokens.length;
 
+            // Inner loop walks all counterpart tokens registered for this base.
             for (uint256 j = 0; j < counterCount; ++j) {
                 address counterToken = counterTokens[j];
                 (int256 profit, ) = _runPair(
@@ -372,6 +378,7 @@ contract ArbHook is BaseHook, ArbUtils, Ownable, ReentrancyGuard {
                     maxIterations
                 );
                 if (profit > 0) {
+                    // Deliberately stop at the first profitable path to keep callback gas bounded.
                     totalProfit = profit;
                     break; // exit inner loop
                 }
@@ -391,10 +398,14 @@ contract ArbHook is BaseHook, ArbUtils, Ownable, ReentrancyGuard {
 
     // ---------------------------- Pair runner ------------------------------
     struct LoopState {
+        // Quote keys attempted during this _runPair invocation.
         bytes32[10] tried;
         uint8 triedCount;
+        // Bounded retry count for alternative pool combinations.
         uint8 attempts;
+        // Tracks repeated failures for the same buy pool to force buy-pool rotation.
         uint8 sellFailsForBuy;
+        // Pools excluded in the next discovery pass after a failed attempt.
         address skipSellPool;
         address skipBuyPool;
         address lastBuyPool;
@@ -416,6 +427,8 @@ contract ArbHook is BaseHook, ArbUtils, Ownable, ReentrancyGuard {
         bytes32 pairKey = _getPairKey(tokenA, tokenB);
         FailedAttempt memory lastFail = lastFailedAttemptForPair[pairKey];
 
+        // Fast-path skip:
+        // if the last failing quote for this pair has not moved, do not spend gas retrying.
         if (lastFail.buyPool != address(0)) {
             (
                 ArbUtils.PoolInfo memory buyPoolInfo,
@@ -444,6 +457,8 @@ contract ArbHook is BaseHook, ArbUtils, Ownable, ReentrancyGuard {
             }
         }
 
+        // Up to two discovery/execute attempts:
+        // first on best quote, then one fallback excluding previously failing side(s).
         while (state.attempts < 2) {
             (
                 address buyPool,
@@ -470,6 +485,7 @@ contract ArbHook is BaseHook, ArbUtils, Ownable, ReentrancyGuard {
             uint128 qSell = arbLib.quantise(sellPrice);
             bytes32 quoteKey = arbLib.quoteKey(tokenA, tokenB, qBuy, qSell);
 
+            // Prevent duplicate execution attempts for identical quantised quotes in one pass.
             bool alreadyTried = false;
             for (uint8 k = 0; k < state.triedCount; ) {
                 if (state.tried[k] == quoteKey) {
@@ -490,6 +506,8 @@ contract ArbHook is BaseHook, ArbUtils, Ownable, ReentrancyGuard {
 
             FailedQuote memory fq = lastFailedQuote[quoteKey];
             if (fq.qBuy == qBuy && fq.qSell == qSell) {
+                // Quote-level cache says this exact price pair already failed recently.
+                // Skip quickly and rotate away from repeated buy-pool failures.
                 ++state.attempts;
                 state.skipSellPool = sellPool;
                 if (buyPool == state.lastBuyPool) {
@@ -505,7 +523,7 @@ contract ArbHook is BaseHook, ArbUtils, Ownable, ReentrancyGuard {
                 continue;
             }
 
-            // Use low-level call to prevent pair execution from reverting the entire attemptAll
+            // Isolate pair execution failure from the outer scanner.
             (bool successCall, bytes memory returndata) = address(this).call(
                 abi.encodeWithSelector(
                     this.executeIterativeArb.selector,
@@ -550,6 +568,7 @@ contract ArbHook is BaseHook, ArbUtils, Ownable, ReentrancyGuard {
             }
 
             lastFailedQuote[quoteKey] = FailedQuote(qBuy, qSell);
+            // Pair-level cache helps skip stale failing route combos on subsequent callbacks.
             lastFailedAttemptForPair[pairKey] = FailedAttempt(
                 buyPool,
                 sellPool,
@@ -599,6 +618,7 @@ contract ArbHook is BaseHook, ArbUtils, Ownable, ReentrancyGuard {
         )
     {
         // Iterate storage directly to avoid copying the entire pool array to memory
+        // Pool universe is "all pools registered under tokenA as base".
         ArbUtils.PoolInfo[] storage pools = tokenPools[tokenA];
         uint256 n = pools.length;
         if (n == 0) {
@@ -615,6 +635,9 @@ contract ArbHook is BaseHook, ArbUtils, Ownable, ReentrancyGuard {
         bestBuyPrice = type(uint256).max;
         bestSellPrice = 0;
 
+        // One pass picks:
+        // - cheapest pool to buy tokenA (lowest effective buy price),
+        // - richest pool to sell tokenA (highest effective sell price).
         for (uint256 i = 0; i < n; ) {
             ArbUtils.PoolInfo storage ps = pools[i];
             address pa = ps.poolAddress;
@@ -654,6 +677,7 @@ contract ArbHook is BaseHook, ArbUtils, Ownable, ReentrancyGuard {
             bestBuyPool == bestSellPool ||
             bestSellPrice <= bestBuyPrice
         ) {
+            // No executable spread after fees, or only one usable pool.
             return (
                 address(0),
                 address(0),
@@ -679,6 +703,12 @@ contract ArbHook is BaseHook, ArbUtils, Ownable, ReentrancyGuard {
     }
 
     // ---------------------------- Core executor ----------------------------
+    /// @notice Execute bounded iterative arbitrage for one chosen buy/sell pool pair.
+    /// @dev Loop shape:
+    ///      1) choose chunk size for current pool types (V3-V3, V2-V2, or mixed),
+    ///      2) execute startToken->intermediateToken then reverse leg,
+    ///      3) stop as soon as marginal iteration profit is non-positive.
+    ///      This greedy early-stop avoids paying gas to chase diminishing edge.
     function executeIterativeArb(
         address poolA_addr,
         address poolB_addr,
@@ -697,7 +727,9 @@ contract ArbHook is BaseHook, ArbUtils, Ownable, ReentrancyGuard {
 
         IERC20 startTokenContract = IERC20(startToken);
         IERC20 intermediateTokenContract = IERC20(intermediateToken);
+        // Minimum practical trade size for this token precision (e.g. 1e14 for 18-dec tokens).
         uint256 minChunkStartToken = _minChunk(startToken);
+        // Guardrail to avoid "winning tiny amount after prior losses" situations.
         int256 minCumulativeProfit = int256(minChunkStartToken) / 10;
 
         bool isPoolAV3 = (poolAType == ArbUtils.PoolType.V3 ||
@@ -708,6 +740,7 @@ contract ArbHook is BaseHook, ArbUtils, Ownable, ReentrancyGuard {
         int24 initialAbsSpreadForThisArbOpportunity = 0;
 
         if (isPoolAV3 && isPoolBV3) {
+            // For V3/V3 paths we anchor dynamic sizing to the initial tick spread.
             IUniswapV3Pool pA_v3_check = IUniswapV3Pool(poolA_addr);
             IUniswapV3Pool pB_v3_check = IUniswapV3Pool(poolB_addr);
             int24 initialTickA_check;
@@ -791,11 +824,13 @@ contract ArbHook is BaseHook, ArbUtils, Ownable, ReentrancyGuard {
                 initialAbsSpreadForThisArbOpportunity <
                 int24(uint24(minSpreadBps))
             ) {
+                // Spread already too tight; treat as clean no-op success.
                 return (true, 0, 0);
             }
         }
 
         uint256 totalAmountSwapped = 0;
+        // Outer execution loop: each pass recomputes a fresh chunk from live state.
         for (uint256 i = 0; i < maxIterations; ) {
             uint256 balanceBeforeIteration = startTokenContract.balanceOf(
                 address(this)
@@ -806,6 +841,9 @@ contract ArbHook is BaseHook, ArbUtils, Ownable, ReentrancyGuard {
             uint160 sqrtPriceLimitB_v3 = 0;
 
             if (isPoolAV3 && isPoolBV3) {
+                // V3/V3 path:
+                // - derive a rough chunk from spread/liquidity,
+                // - refine with profit search.
                 ArbitrageLogic.IterationConfig memory iterConfig;
                 iterConfig.minSpreadBps = minSpreadBps;
                 iterConfig
@@ -844,6 +882,8 @@ contract ArbHook is BaseHook, ArbUtils, Ownable, ReentrancyGuard {
                 sqrtPriceLimitA_v3 = v3Params.sqrtPriceLimitA;
                 sqrtPriceLimitB_v3 = v3Params.sqrtPriceLimitB;
             } else if (!isPoolAV3 && !isPoolBV3) {
+                // V2/V2 path:
+                // start from heuristic candidate, then halve until a profitable chunk survives.
                 ArbitrageLogic.V2TradeParams memory v2Params = arbLib
                     .calculateV2TradeParams(
                         poolA_addr,
@@ -861,6 +901,8 @@ contract ArbHook is BaseHook, ArbUtils, Ownable, ReentrancyGuard {
 
                 uint256 initialChunkForV2Halving = chunkToSwap;
                 if (initialChunkForV2Halving > 0) {
+                    // Start from the largest heuristic chunk first.
+                    // If too aggressive, halve quickly instead of doing many tiny upward probes.
                     uint8 v2Halvings = 0;
                     uint256 testV2Chunk = initialChunkForV2Halving;
                     bool profitableV2ChunkFound = false;
@@ -880,6 +922,7 @@ contract ArbHook is BaseHook, ArbUtils, Ownable, ReentrancyGuard {
                         );
 
                     if (rA_s > 0 && rA_i > 0 && rB_i > 0 && rB_s > 0) {
+                        // Monotonic backoff: the first chunk that clears profit thresholds wins.
                         while (true) {
                             lastEstPLFullV2Halving = arbLib.simulateV2V2Profit(
                                 testV2Chunk,
@@ -919,9 +962,13 @@ contract ArbHook is BaseHook, ArbUtils, Ownable, ReentrancyGuard {
                     break;
                 }
             } else {
+                // Mixed V2/V3 path:
+                // exact optimum is expensive on-chain, so probe from half-balance downward.
                 uint256 currentBal = balanceBeforeIteration;
                 if (currentBal == 0) break;
 
+                // Half-balance is a practical "large first probe":
+                // it converges quickly with halving while avoiding full-balance over-commit.
                 uint256 initialTestChunk = currentBal / 2;
                 if (initialTestChunk > 0) {
                     chunkToSwap = arbLib.findBestMixedPairChunk(
@@ -959,6 +1006,7 @@ contract ArbHook is BaseHook, ArbUtils, Ownable, ReentrancyGuard {
                 .balanceOf(address(this));
             uint256 intermediateReceived = 0;
 
+            // Leg 1: startToken -> intermediateToken on pool A.
             bool swap1Success = false;
             if (
                 poolAType == ArbUtils.PoolType.V3 ||
@@ -1019,6 +1067,7 @@ contract ArbHook is BaseHook, ArbUtils, Ownable, ReentrancyGuard {
             }
 
             bool swap2Success = false;
+            // Leg 2: intermediateToken -> startToken on pool B.
             if (
                 poolBType == ArbUtils.PoolType.V3 ||
                 poolBType == ArbUtils.PoolType.PANCAKESWAP_V3
@@ -1084,6 +1133,8 @@ contract ArbHook is BaseHook, ArbUtils, Ownable, ReentrancyGuard {
                 iterations++;
             }
 
+            // Greedy stop: once marginal iteration profit turns non-positive,
+            // additional size usually worsens execution due to local curve impact.
             if (currentIterationProfit <= 0) break;
             unchecked {
                 ++i;
@@ -1102,6 +1153,9 @@ contract ArbHook is BaseHook, ArbUtils, Ownable, ReentrancyGuard {
             intermediateToken != WETH &&
             cumulativeProfit > 0
         ) {
+            // Best-effort unwind:
+            // if we ended with residual intermediate token and are still net profitable,
+            // try converting leftovers back to start token before final accounting.
             uint160 unwindLimitB = 0;
             if (
                 poolBType == ArbUtils.PoolType.V3 ||
@@ -1347,6 +1401,10 @@ contract ArbHook is BaseHook, ArbUtils, Ownable, ReentrancyGuard {
             address expectedPool
         ) = abi.decode(data, (address, address, uint256, address));
 
+        // Callback hardening:
+        // - call must originate from this contract's initiated swap payload,
+        // - caller must be the exact pool we encoded,
+        // - pool must be registered in our pool book.
         if (decodedCaller != address(this)) {
             revert ArbErrors.CallbackCallerMismatch(
                 decodedCaller,
@@ -1364,7 +1422,7 @@ contract ArbHook is BaseHook, ArbUtils, Ownable, ReentrancyGuard {
         address token0;
         address token1;
 
-        // Use cached meta instead of external calls and factory checks
+        // Use cached pool metadata instead of fresh external reads.
         PoolMeta storage pm = poolMetaByAddr[pool];
         if (!pm.exists)
             revert ArbErrors.CallbackUnexpectedPool(pool, expectedPool);
@@ -1382,10 +1440,12 @@ contract ArbHook is BaseHook, ArbUtils, Ownable, ReentrancyGuard {
         uint256 amountToPay;
         address tokenToPay;
         if (decodedTokenIn == token0) {
+            // Positive amount0Delta means pool expects token0 repayment from this callback.
             if (amount0Delta <= 0) revert ArbErrors.CallbackInvalidDelta0Sign();
             amountToPay = uint256(amount0Delta);
             tokenToPay = token0;
         } else {
+            // Positive amount1Delta means pool expects token1 repayment from this callback.
             if (amount1Delta <= 0) revert ArbErrors.CallbackInvalidDelta1Sign();
             amountToPay = uint256(amount1Delta);
             tokenToPay = token1;
@@ -1411,6 +1471,7 @@ contract ArbHook is BaseHook, ArbUtils, Ownable, ReentrancyGuard {
         IUniswapV2Pair pair = IUniswapV2Pair(msg.sender);
         address t0 = pair.token0();
         address t1 = pair.token1();
+        // Verify msg.sender is a canonical pair from one of the trusted factories.
         address uniPair = V2_FACTORY.getPair(t0, t1);
         address pcsPair = PANCAKESWAP_V2_FACTORY.getPair(t0, t1);
         if (msg.sender != uniPair && msg.sender != pcsPair) {
@@ -1440,6 +1501,7 @@ contract ArbHook is BaseHook, ArbUtils, Ownable, ReentrancyGuard {
         IUniswapV2Pair pair = IUniswapV2Pair(msg.sender);
         address t0 = pair.token0();
         address t1 = pair.token1();
+        // Same factory and registration checks as uniswapV2Call; Pancake uses a distinct callback selector.
         address uniPair = V2_FACTORY.getPair(t0, t1);
         address pcsPair = PANCAKESWAP_V2_FACTORY.getPair(t0, t1);
         if (msg.sender != uniPair && msg.sender != pcsPair) {
