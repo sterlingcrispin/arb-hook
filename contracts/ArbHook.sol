@@ -33,13 +33,21 @@ import {IUniswapV2Factory} from "./interfaces/IUniswapV2Factory.sol";
 import {IUniswapV2Pair} from "./interfaces/IUniswapV2Pair.sol";
 import {IPancakeV3Pool} from "./interfaces/IPancakeV3Pool.sol";
 import {IDataStorage} from "./interfaces/IDataStorage.sol";
+import {IERC3156FlashBorrower} from "./interfaces/IERC3156FlashBorrower.sol";
+import {IERC3156FlashLender} from "./interfaces/IERC3156FlashLender.sol";
 
 /// @title ArbHook
 /// @notice Uniswap v4 hook that performs bounded, on-chain arbitrage across
 ///         registered external pools during swap callbacks. It owns pool
 ///         registration, price discovery, sizing, execution, and callback safety
 ///         checks in one contract.
-contract ArbHook is BaseHook, ArbUtils, Ownable, ReentrancyGuard {
+contract ArbHook is
+    BaseHook,
+    ArbUtils,
+    Ownable,
+    ReentrancyGuard,
+    IERC3156FlashBorrower
+{
     using SafeERC20 for IERC20;
 
     struct PoolMeta {
@@ -67,6 +75,9 @@ contract ArbHook is BaseHook, ArbUtils, Ownable, ReentrancyGuard {
     // Well-known tokens used by unwind heuristics
     address private constant USDC = 0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913;
     address private constant WETH = 0x4200000000000000000000000000000000000006;
+    uint256 private constant FEE_BPS_DIVISOR = 10_000;
+    bytes32 private constant ERC3156_CALLBACK_SUCCESS =
+        keccak256("ERC3156FlashBorrower.onFlashLoan");
 
     // Trusted factories for callback validation
     IUniswapV2Factory private constant V2_FACTORY =
@@ -108,17 +119,66 @@ contract ArbHook is BaseHook, ArbUtils, Ownable, ReentrancyGuard {
         bool tradeProfitable
     );
 
+    event FlashLoanRequested(
+        address indexed lender,
+        address indexed token,
+        uint256 principal,
+        address beneficiary
+    );
+    event FlashLoanSettled(
+        address indexed lender,
+        address indexed token,
+        uint256 principal,
+        uint256 fee,
+        int256 netProfit,
+        address beneficiary
+    );
+    event FlashLoanFailed(address indexed lender, address indexed token, bytes revertData);
+
+    // Flash-loan config and runtime context.
+    mapping(address => address) public lenderByToken;
+    mapping(address => uint256) public flashPrincipalByToken;
+    mapping(address => uint256) public maxFlashFeeBpsByToken;
+    mapping(address => bool) public trustedFlashLender;
+    address public defaultProfitRecipient;
+
+    address private activeAttemptProfitRecipient;
+    address private _activeLender;
+    address private _activeLoanToken;
+    uint256 private _activeLoanAmount;
+    bytes32 private _activeFlashContextHash;
+
+    bool private _flashLastTradeSuccess;
+    int256 private _flashLastProfit;
+    uint256 private _flashLastIterations;
+
+    struct FlashLoanExecutionParams {
+        address sellPool;
+        address buyPool;
+        address tokenA;
+        address tokenB;
+        uint256 maxIterations;
+        ArbUtils.PoolType sellPoolType;
+        ArbUtils.PoolType buyPoolType;
+        address beneficiary;
+    }
+
     function _afterSwap(
-        address,
+        address sender,
         PoolKey calldata,
         SwapParams calldata,
         BalanceDelta,
-        bytes calldata
+        bytes calldata hookData
     ) internal override returns (bytes4, int128) {
         // Hook path is best-effort only: trade failure must never block user swap settlement.
         uint256 iterations = hookMaxIterations;
         if (iterations > 0) {
+            activeAttemptProfitRecipient = _resolveProfitRecipient(
+                sender,
+                hookData
+            );
             _attemptAllViaSelfCall(iterations);
+            activeAttemptProfitRecipient = address(0);
         }
 
         return (BaseHook.afterSwap.selector, 0);
@@ -183,6 +243,7 @@ contract ArbHook is BaseHook, ArbUtils, Ownable, ReentrancyGuard {
         arbLib = ArbitrageLogic(_arbLib);
         dataStorage = IDataStorage(_dataStorage);
         hookMaxIterations = 2;
+        defaultProfitRecipient = initialOwner;
     }
 
     // ------------------------------- Admin ---------------------------------
@@ -211,6 +272,46 @@ contract ArbHook is BaseHook, ArbUtils, Ownable, ReentrancyGuard {
 
     function setHookMaxIterations(uint256 newMaxIterations) external onlyOwner {
         hookMaxIterations = newMaxIterations;
+    }
+
+    function setTrustedFlashLender(
+        address lender,
+        bool isTrusted
+    ) external onlyOwner {
+        require(lender != address(0), "lender=0");
+        trustedFlashLender[lender] = isTrusted;
+    }
+
+    function setLenderForToken(
+        address token,
+        address lender
+    ) external onlyOwner {
+        require(token != address(0), "token=0");
+        require(lender != address(0), "lender=0");
+        require(trustedFlashLender[lender], "lender not trusted");
+        lenderByToken[token] = lender;
+    }
+
+    function setFlashPrincipalForToken(
+        address token,
+        uint256 principal
+    ) external onlyOwner {
+        require(token != address(0), "token=0");
+        flashPrincipalByToken[token] = principal;
+    }
+
+    function setMaxFlashFeeBpsForToken(
+        address token,
+        uint256 maxFeeBps
+    ) external onlyOwner {
+        require(token != address(0), "token=0");
+        require(maxFeeBps <= FEE_BPS_DIVISOR, "maxFeeBps>10000");
+        maxFlashFeeBpsByToken[token] = maxFeeBps;
+    }
+
+    function setDefaultProfitRecipient(address recipient) external onlyOwner {
+        require(recipient != address(0), "recipient=0");
+        defaultProfitRecipient = recipient;
     }
 
     // ------------------------- Pool-book API -------------------------------
@@ -522,7 +623,7 @@ contract ArbHook is BaseHook, ArbUtils, Ownable, ReentrancyGuard {
             // Isolate pair execution failure from the outer scanner.
             (bool successCall, bytes memory returndata) = address(this).call(
                 abi.encodeWithSelector(
-                    this.executeIterativeArb.selector,
+                    this.executeIterativeArbViaFlash.selector,
                     sellPool,
                     buyPool,
                     tokenA,
@@ -699,6 +800,181 @@ contract ArbHook is BaseHook, ArbUtils, Ownable, ReentrancyGuard {
     }
 
     // ---------------------------- Core executor ----------------------------
+    /// @notice Execute one arbitrage attempt using flash-loaned startToken capital.
+    /// @dev Preserves existing iterative execution logic by invoking executeIterativeArb
+    ///      inside the flash-loan callback.
+    function executeIterativeArbViaFlash(
+        address poolA_addr,
+        address poolB_addr,
+        address startToken,
+        address intermediateToken,
+        uint256 maxIterations,
+        ArbUtils.PoolType poolAType,
+        ArbUtils.PoolType poolBType
+    )
+        public
+        returns (bool success, int256 cumulativeProfit, uint256 iterations)
+    {
+        if (msg.sender != address(this)) revert ArbErrors.WrapperOnlySelf();
+
+        address lender = lenderByToken[startToken];
+        uint256 principal = flashPrincipalByToken[startToken];
+        if (
+            lender == address(0) ||
+            principal == 0 ||
+            !trustedFlashLender[lender]
+        ) {
+            return (false, 0, 0);
+        }
+
+        uint256 fee;
+        try
+            IERC3156FlashLender(lender).flashFee(startToken, principal)
+        returns (uint256 quotedFee) {
+            fee = quotedFee;
+        } catch {
+            return (false, 0, 0);
+        }
+
+        uint256 maxFeeBps = maxFlashFeeBpsByToken[startToken];
+        if (maxFeeBps > 0) {
+            uint256 maxFee = (principal * maxFeeBps) / FEE_BPS_DIVISOR;
+            if (fee > maxFee) return (false, 0, 0);
+        }
+
+        address beneficiary = _currentProfitRecipient();
+        if (beneficiary == address(0)) return (false, 0, 0);
+
+        FlashLoanExecutionParams memory params = FlashLoanExecutionParams({
+            sellPool: poolA_addr,
+            buyPool: poolB_addr,
+            tokenA: startToken,
+            tokenB: intermediateToken,
+            maxIterations: maxIterations,
+            sellPoolType: poolAType,
+            buyPoolType: poolBType,
+            beneficiary: beneficiary
+        });
+        bytes memory loanData = abi.encode(params);
+
+        _activeLender = lender;
+        _activeLoanToken = startToken;
+        _activeLoanAmount = principal;
+        _activeFlashContextHash = _flashContextHash(
+            lender,
+            startToken,
+            principal,
+            loanData
+        );
+
+        _flashLastTradeSuccess = false;
+        _flashLastProfit = 0;
+        _flashLastIterations = 0;
+
+        emit FlashLoanRequested(lender, startToken, principal, beneficiary);
+
+        bool loanRequested;
+        try
+            IERC3156FlashLender(lender).flashLoan(
+                address(this),
+                startToken,
+                principal,
+                loanData
+            )
+        returns (bool ok) {
+            loanRequested = ok;
+        } catch (bytes memory reason) {
+            emit FlashLoanFailed(lender, startToken, reason);
+            _clearActiveFlashContext();
+            return (false, 0, 0);
+        }
+
+        _clearActiveFlashContext();
+        if (!loanRequested) return (false, 0, 0);
+        return (_flashLastTradeSuccess, _flashLastProfit, _flashLastIterations);
+    }
+
+    function onFlashLoan(
+        address initiator,
+        address token,
+        uint256 amount,
+        uint256 fee,
+        bytes calldata data
+    ) external override returns (bytes32) {
+        if (msg.sender != _activeLender || !trustedFlashLender[msg.sender]) {
+            revert("invalid flash lender");
+        }
+        if (initiator != address(this)) revert("invalid flash initiator");
+        if (token != _activeLoanToken || amount != _activeLoanAmount) {
+            revert("flash loan mismatch");
+        }
+        if (
+            _activeFlashContextHash !=
+            _flashContextHash(msg.sender, token, amount, data)
+        ) {
+            revert("flash context mismatch");
+        }
+
+        FlashLoanExecutionParams memory params = abi.decode(
+            data,
+            (FlashLoanExecutionParams)
+        );
+        if (params.tokenA != token) revert("flash tokenA mismatch");
+
+        uint256 balanceBefore = IERC20(token).balanceOf(address(this));
+
+        (bool successCall, bytes memory returndata) = address(this).call(
+            abi.encodeWithSelector(
+                this.executeIterativeArb.selector,
+                params.sellPool,
+                params.buyPool,
+                params.tokenA,
+                params.tokenB,
+                params.maxIterations,
+                params.sellPoolType,
+                params.buyPoolType
+            )
+        );
+        if (!successCall) revert("flash arb execution failed");
+
+        (bool tradeSuccess, , uint256 iters) = abi.decode(
+            returndata,
+            (bool, int256, uint256)
+        );
+
+        uint256 balanceAfter = IERC20(token).balanceOf(address(this));
+        int256 netProfit = int256(balanceAfter) -
+            int256(balanceBefore) -
+            int256(fee);
+
+        _flashLastTradeSuccess = tradeSuccess && netProfit > 0;
+        _flashLastProfit = netProfit;
+        _flashLastIterations = iters;
+
+        if (_flashLastTradeSuccess && params.beneficiary != address(0)) {
+            IERC20(token).safeTransfer(params.beneficiary, uint256(netProfit));
+        }
+
+        uint256 repayAmount = amount + fee;
+        uint256 repaymentBalance = IERC20(token).balanceOf(address(this));
+        if (repaymentBalance < repayAmount) {
+            revert("insufficient flash repayment balance");
+        }
+        IERC20(token).approve(msg.sender, 0);
+        IERC20(token).approve(msg.sender, repayAmount);
+
+        emit FlashLoanSettled(
+            msg.sender,
+            token,
+            amount,
+            fee,
+            netProfit,
+            params.beneficiary
+        );
+
+        return ERC3156_CALLBACK_SUCCESS;
+    }
+
     /// @notice Execute bounded iterative arbitrage for one chosen buy/sell pool pair.
     /// @dev Loop shape:
     ///      1) choose chunk size for current pool types (V3-V3, V2-V2, or mixed),
@@ -1513,6 +1789,41 @@ contract ArbHook is BaseHook, ArbUtils, Ownable, ReentrancyGuard {
     }
 
     // ----------------------- Internal helpers ------------------------------
+    function _resolveProfitRecipient(
+        address sender,
+        bytes calldata hookData
+    ) private view returns (address) {
+        if (hookData.length == 32) {
+            address decoded = abi.decode(hookData, (address));
+            if (decoded != address(0)) return decoded;
+        }
+        if (sender != address(0)) return sender;
+        return defaultProfitRecipient;
+    }
+
+    function _currentProfitRecipient() private view returns (address) {
+        if (activeAttemptProfitRecipient != address(0)) {
+            return activeAttemptProfitRecipient;
+        }
+        return defaultProfitRecipient;
+    }
+
+    function _flashContextHash(
+        address lender,
+        address token,
+        uint256 amount,
+        bytes memory data
+    ) private pure returns (bytes32) {
+        return keccak256(abi.encode(lender, token, amount, data));
+    }
+
+    function _clearActiveFlashContext() private {
+        _activeLender = address(0);
+        _activeLoanToken = address(0);
+        _activeLoanAmount = 0;
+        _activeFlashContextHash = bytes32(0);
+    }
+
     function _findPoolInBook(
         address token,
         address poolAddr
