@@ -18,6 +18,9 @@ import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 import {IPoolManager} from "@uniswap/v4-core/src/interfaces/IPoolManager.sol";
 import {IUniswapV3Pool} from "@uniswap/v3-core/contracts/interfaces/IUniswapV3Pool.sol";
 
+/// @notice Legacy parity harness for inventory-funded behavior.
+/// @dev This suite is intentionally opt-in and disabled by default now that
+///      production flow is moving to flash-loan-funded execution.
 contract ArbHookParityTest is Test {
     // Reference JS harness forks at 33942332 - 70 = 33942262
     // (see ExampleTests/ArbLightweight.attemptAll.js line 12)
@@ -42,6 +45,7 @@ contract ArbHookParityTest is Test {
     address internal constant SWAP_ROUTER = 0x2626664c2603336E57B271c5C0b26F421741e481;
 
     string internal baseRpcUrl;
+    bool internal legacyParityEnabled;
 
     struct DeployContext {
         ArbHookHarness hook;
@@ -78,10 +82,29 @@ contract ArbHookParityTest is Test {
     );
 
     function setUp() public {
-        baseRpcUrl = vm.envString("BASE_RPC_URL");
+        baseRpcUrl = vm.envOr("BASE_RPC_URL", string(""));
+        legacyParityEnabled = vm.envOr("RUN_LEGACY_INVENTORY_PARITY", false);
+    }
+
+    function _legacyParityPrecheck() private returns (bool) {
+        if (!legacyParityEnabled) {
+            emit log(
+                "skipping legacy parity suite; set RUN_LEGACY_INVENTORY_PARITY=true to enable"
+            );
+            return false;
+        }
+        if (bytes(baseRpcUrl).length == 0) {
+            emit log(
+                "skipping legacy parity suite; BASE_RPC_URL must be set when RUN_LEGACY_INVENTORY_PARITY=true"
+            );
+            return false;
+        }
+        return true;
     }
 
     function testOwnerOnlyAccessParity() public {
+        if (!_legacyParityPrecheck()) return;
+
         vm.createSelectFork(baseRpcUrl, FORK_START_BLOCK);
         DeployContext memory ctx = _deploySystem();
         address stranger = makeAddr("stranger");
@@ -130,6 +153,8 @@ contract ArbHookParityTest is Test {
     }
 
     function testAttemptAllOnForkMatchesArbLightweightFlow() public {
+        if (!_legacyParityPrecheck()) return;
+
         vm.createSelectFork(baseRpcUrl, FORK_START_BLOCK);
         vm.deal(address(this), 100 ether);
 
@@ -279,6 +304,8 @@ contract ArbHookParityTest is Test {
     }
 
     function testPerBlockReplayParity() public {
+        if (!_legacyParityPrecheck()) return;
+
         uint256[] memory blocks = new uint256[](3);
         blocks[0] = FORK_START_BLOCK - 1;
         blocks[1] = FORK_START_BLOCK;
@@ -360,6 +387,8 @@ contract ArbHookParityTest is Test {
     }
 
     function _fundBot(DeployContext memory ctx) private {
+        // Legacy parity-only funding path:
+        // this suite intentionally pre-funds inventory to mirror the historical non-flash flow.
         // Replicate JS funding behavior: swap WETH→USDC through fee=500 pool
         // JS does 2 swaps of 25 WETH each to acquire ~200k USDC
         // This changes pool prices, which affects arbitrage discovery
