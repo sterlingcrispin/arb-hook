@@ -20,9 +20,9 @@ Most of the time the answer is no, and the hook exits almost immediately. When t
 
 The hook doesn't assume the arbitrage leg happens on another Uniswap v4 pool. Today the implemented external pool types are Uniswap V2/V3 and PancakeSwap V2/V3, so the v4 hook is acting as an observation point for broader cross-venue price discovery.
 
-The current execution path is moving to flash-loan-funded arbitrage for principal, so the hook does not need to hold full trading inventory. Router/pool approvals and flash-lender configuration are still required.
+The production execution path is flash-loan-funded for principal, so the hook does not need to hold full trading inventory. Router/pool approvals and flash-lender configuration are still required.
 
-There is still required operator setup off-chain: pool registration, approvals, lender configuration, and parameter tuning.
+There is still required operator setup off-chain: pool registration, approvals, lender configuration, and runtime-parameter configuration (`hookMaxIterations`, `minSpreadBps`, `chunkSpreadConsumptionBps`, `maxImpactBps`, `minProfitToEmit`).
 
 ## Flash Migration Checklist
 
@@ -33,6 +33,16 @@ There is still required operator setup off-chain: pool registration, approvals, 
 - Maintain failure isolation: arb failures must not break user swap settlement.
 - Treat legacy parity harness as optional diagnostics, not release gating.
 - Defer deep deploy-size optimization to a dedicated post-migration pass.
+
+## Primary Test Gate
+
+Use the flash-loan suites as the primary release gate:
+
+```bash
+forge test --match-contract ArbHookFlash
+```
+
+Legacy parity remains opt-in diagnostics only.
 
 ## Runtime Parameters Explained
 

@@ -6,10 +6,16 @@ import {ArbUtils} from "../ArbUtils.sol";
 import {IDataStorage} from "../interfaces/IDataStorage.sol";
 import {IPoolManager} from "@uniswap/v4-core/src/interfaces/IPoolManager.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 
 /// @notice Simple harness that exposes internal entrypoints for testing.
 contract ArbHookHarness is ArbHook {
+    using SafeERC20 for IERC20;
+
     uint256 public testProfitBps;
+    bool public testInjectProfitAnyIterations;
+    address public testProfitPayer;
+    uint256 public testFixedProfitAmount;
 
     constructor(
         IPoolManager poolManager,
@@ -89,6 +95,15 @@ contract ArbHookHarness is ArbHook {
         testProfitBps = bps;
     }
 
+    function setTestInjectProfitAnyIterations(bool enabled) external onlyOwner {
+        testInjectProfitAnyIterations = enabled;
+    }
+
+    function setTestProfitTransfer(address payer, uint256 amount) external onlyOwner {
+        testProfitPayer = payer;
+        testFixedProfitAmount = amount;
+    }
+
     function executeIterativeArb(
         address poolA_addr,
         address poolB_addr,
@@ -102,19 +117,35 @@ contract ArbHookHarness is ArbHook {
         override
         returns (bool success, int256 cumulativeProfit, uint256 iterations)
     {
-        if (testProfitBps > 0 && maxIterations == 0) {
+        if (
+            testProfitBps > 0 &&
+            (maxIterations == 0 || testInjectProfitAnyIterations)
+        ) {
             uint256 bal = IERC20(startToken).balanceOf(address(this));
-            uint256 mintAmount = (bal * testProfitBps) / 10_000;
-            if (mintAmount > 0) {
-                // Test token only; used in flash-loan E2E tests to simulate profitable execution.
-                (bool ok, ) = startToken.call(
-                    abi.encodeWithSignature(
-                        "mint(address,uint256)",
-                        address(this),
-                        mintAmount
-                    )
+            uint256 realizedProfit;
+
+            if (testFixedProfitAmount > 0) {
+                require(testProfitPayer != address(0), "test profit payer=0");
+                IERC20(startToken).safeTransferFrom(
+                    testProfitPayer,
+                    address(this),
+                    testFixedProfitAmount
                 );
-                require(ok, "test mint failed");
+                realizedProfit = testFixedProfitAmount;
+            } else {
+                uint256 mintAmount = (bal * testProfitBps) / 10_000;
+                if (mintAmount > 0) {
+                    // Test token only; used in flash-loan E2E tests to simulate profitable execution.
+                    (bool ok, ) = startToken.call(
+                        abi.encodeWithSignature(
+                            "mint(address,uint256)",
+                            address(this),
+                            mintAmount
+                        )
+                    );
+                    require(ok, "test mint failed");
+                }
+                realizedProfit = mintAmount;
             }
 
             lastTradeData = IDataStorage.TradeData({
@@ -125,11 +156,11 @@ contract ArbHookHarness is ArbHook {
                 buyPoolIndex: _getPoolIndex(startToken, poolB_addr),
                 sellPoolIndex: _getPoolIndex(startToken, poolA_addr),
                 totalAmountSwapped: bal,
-                profit: mintAmount,
+                profit: realizedProfit,
                 iterations: 1,
                 timestamp: block.timestamp
             });
-            return (true, int256(mintAmount), 1);
+            return (true, int256(realizedProfit), 1);
         }
 
         return

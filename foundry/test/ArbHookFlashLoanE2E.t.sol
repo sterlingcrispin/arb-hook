@@ -13,6 +13,7 @@ import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {IERC3156FlashBorrower} from "../../contracts/interfaces/IERC3156FlashBorrower.sol";
 import {IERC3156FlashLender} from "../../contracts/interfaces/IERC3156FlashLender.sol";
 import {IDataStorage} from "../../contracts/interfaces/IDataStorage.sol";
+import {IUniswapV2Pair} from "../../contracts/interfaces/IUniswapV2Pair.sol";
 import {IPoolManager} from "@uniswap/v4-core/src/interfaces/IPoolManager.sol";
 
 contract MockERC3156Lender is IERC3156FlashLender {
@@ -149,6 +150,42 @@ contract TamperedDataFlashLender is IERC3156FlashLender {
     }
 }
 
+contract MockV2PricePair is IUniswapV2Pair {
+    address private immutable _token0;
+    address private immutable _token1;
+    uint112 private _reserve0;
+    uint112 private _reserve1;
+
+    constructor(address token0_, address token1_, uint112 reserve0_, uint112 reserve1_) {
+        _token0 = token0_;
+        _token1 = token1_;
+        _reserve0 = reserve0_;
+        _reserve1 = reserve1_;
+    }
+
+    function token0() external view returns (address) {
+        return _token0;
+    }
+
+    function token1() external view returns (address) {
+        return _token1;
+    }
+
+    function getReserves()
+        external
+        view
+        returns (uint112 reserve0, uint112 reserve1, uint32 blockTimestampLast)
+    {
+        return (_reserve0, _reserve1, uint32(block.timestamp));
+    }
+
+    function swap(uint, uint, address, bytes calldata) external pure {}
+
+    function skim(address) external pure {}
+
+    function sync() external pure {}
+}
+
 contract ArbHookFlashLoanE2ETest is Test {
     bytes32 private constant ARBITRAGE_ATTEMPTED_TOPIC =
         keccak256(
@@ -160,13 +197,17 @@ contract ArbHookFlashLoanE2ETest is Test {
         );
     bytes32 private constant FLASH_LOAN_FAILED_TOPIC =
         keccak256("FlashLoanFailed(address,address,bytes)");
+    bytes32 private constant HOOK_ATTEMPT_ALL_TOPIC =
+        keccak256("HookAttemptAll(uint256,bool,bool)");
 
+    PoolManagerHarness internal poolManager;
     ArbHookHarness internal hook;
     TestToken internal token;
+    TestToken internal counterToken;
     DataStorage internal dataStorage;
 
     function setUp() public {
-        PoolManagerHarness poolManager = new PoolManagerHarness(address(this));
+        poolManager = new PoolManagerHarness(address(this));
         ArbitrageLogic logic = new ArbitrageLogic();
         dataStorage = new DataStorage(address(this));
         hook = new ArbHookHarness(
@@ -178,6 +219,51 @@ contract ArbHookFlashLoanE2ETest is Test {
         dataStorage.setWriter(address(hook));
 
         token = new TestToken("Flash Loan Token", "FLT", 0);
+        counterToken = new TestToken("Counter Token", "CTR", 0);
+    }
+
+    function _configureAfterSwapV2Route(
+        IERC3156FlashLender lender,
+        uint256 principal,
+        uint256 maxFeeBps,
+        uint256 testProfitBps
+    ) internal {
+        address[] memory pools = new address[](2);
+        uint24[] memory fees = new uint24[](2);
+        ArbUtils.PoolType[] memory types = new ArbUtils.PoolType[](2);
+
+        // Lower ratio -> preferred buy pool.
+        pools[0] = address(
+            new MockV2PricePair(
+                address(token),
+                address(counterToken),
+                1_000_000,
+                1_000_000
+            )
+        );
+        // Higher ratio -> preferred sell pool.
+        pools[1] = address(
+            new MockV2PricePair(
+                address(token),
+                address(counterToken),
+                1_000_000,
+                2_000_000
+            )
+        );
+        fees[0] = 0;
+        fees[1] = 0;
+        types[0] = ArbUtils.PoolType.V2;
+        types[1] = ArbUtils.PoolType.V2;
+
+        hook.addPools(address(token), pools, fees, types);
+        hook.setTrustedFlashLender(address(lender), true);
+        hook.setLenderForToken(address(token), address(lender));
+        hook.setFlashPrincipalForToken(address(token), principal);
+        hook.setMaxFlashFeeBpsForToken(address(token), maxFeeBps);
+        hook.setMinProfitToEmit(1);
+        hook.setHookMaxIterations(1);
+        hook.setTestProfitBps(testProfitBps);
+        hook.setTestInjectProfitAnyIterations(true);
     }
 
     function testFlashLoanRoundTripRepaysPrincipalAndFee() public {
@@ -706,5 +792,165 @@ contract ArbHookFlashLoanE2ETest is Test {
             defaultBefore,
             "default recipient should not receive payout when sender is set"
         );
+    }
+
+    function testAfterSwapCallbackPathPaysSenderWhenNoHookDataOverride() public {
+        uint256 principal = 100_000;
+        MockERC3156Lender lender = new MockERC3156Lender(IERC20(address(token)), 5);
+        token.mint(address(lender), principal);
+        _configureAfterSwapV2Route(lender, principal, 20, 100);
+
+        address defaultRecipient = makeAddr("afterSwapDefault");
+        address senderRecipient = makeAddr("afterSwapSender");
+        hook.setDefaultProfitRecipient(defaultRecipient);
+
+        uint256 fee = lender.flashFee(address(token), principal);
+        uint256 expectedGross = (principal * 100) / 10_000;
+        uint256 expectedNet = expectedGross - fee;
+        uint256 senderBefore = token.balanceOf(senderRecipient);
+        uint256 defaultBefore = token.balanceOf(defaultRecipient);
+        uint256 tradesBefore = dataStorage.getTradeCount();
+
+        (bytes4 selector, int128 delta) = poolManager.callAfterSwap(
+            hook,
+            senderRecipient,
+            bytes("")
+        );
+
+        assertEq(selector, hook.afterSwap.selector, "afterSwap selector mismatch");
+        assertEq(delta, int128(0), "afterSwap delta should be zero");
+        assertEq(
+            token.balanceOf(senderRecipient),
+            senderBefore + expectedNet,
+            "sender should receive net profit in callback path"
+        );
+        assertEq(
+            token.balanceOf(defaultRecipient),
+            defaultBefore,
+            "default recipient should not receive payout when sender is present"
+        );
+        assertEq(
+            dataStorage.getTradeCount(),
+            tradesBefore + 1,
+            "profitable callback-path run should store trade data"
+        );
+    }
+
+    function testAfterSwapCallbackPathUsesHookDataRecipientOverride() public {
+        uint256 principal = 100_000;
+        MockERC3156Lender lender = new MockERC3156Lender(IERC20(address(token)), 5);
+        token.mint(address(lender), principal);
+        _configureAfterSwapV2Route(lender, principal, 20, 100);
+
+        address defaultRecipient = makeAddr("afterSwapDefault2");
+        address sender = makeAddr("afterSwapSender2");
+        address overrideRecipient = makeAddr("afterSwapOverride");
+        hook.setDefaultProfitRecipient(defaultRecipient);
+
+        uint256 fee = lender.flashFee(address(token), principal);
+        uint256 expectedGross = (principal * 100) / 10_000;
+        uint256 expectedNet = expectedGross - fee;
+        uint256 senderBefore = token.balanceOf(sender);
+        uint256 overrideBefore = token.balanceOf(overrideRecipient);
+        uint256 defaultBefore = token.balanceOf(defaultRecipient);
+
+        (bytes4 selector, int128 delta) = poolManager.callAfterSwap(
+            hook,
+            sender,
+            abi.encode(overrideRecipient)
+        );
+
+        assertEq(selector, hook.afterSwap.selector, "afterSwap selector mismatch");
+        assertEq(delta, int128(0), "afterSwap delta should be zero");
+        assertEq(
+            token.balanceOf(overrideRecipient),
+            overrideBefore + expectedNet,
+            "hookData override recipient should receive net profit"
+        );
+        assertEq(
+            token.balanceOf(sender),
+            senderBefore,
+            "sender should not receive payout when hookData override is set"
+        );
+        assertEq(
+            token.balanceOf(defaultRecipient),
+            defaultBefore,
+            "default recipient should not receive payout when hookData override is set"
+        );
+    }
+
+    function testAfterSwapCallbackPathContainsFlashFailure() public {
+        uint256 principal = 100_000;
+        BadInitiatorFlashLender lender = new BadInitiatorFlashLender(
+            IERC20(address(token)),
+            5
+        );
+        token.mint(address(lender), principal);
+        _configureAfterSwapV2Route(lender, principal, 20, 100);
+
+        address defaultRecipient = makeAddr("afterSwapDefault3");
+        address sender = makeAddr("afterSwapSender3");
+        hook.setDefaultProfitRecipient(defaultRecipient);
+
+        uint256 senderBefore = token.balanceOf(sender);
+        uint256 defaultBefore = token.balanceOf(defaultRecipient);
+        uint256 tradesBefore = dataStorage.getTradeCount();
+
+        vm.recordLogs();
+        (bytes4 selector, int128 delta) = poolManager.callAfterSwap(
+            hook,
+            sender,
+            bytes("")
+        );
+
+        assertEq(selector, hook.afterSwap.selector, "afterSwap selector mismatch");
+        assertEq(delta, int128(0), "afterSwap delta should be zero");
+        assertEq(
+            token.balanceOf(sender),
+            senderBefore,
+            "sender should not receive payout when flash execution fails"
+        );
+        assertEq(
+            token.balanceOf(defaultRecipient),
+            defaultBefore,
+            "default recipient should not receive payout when flash execution fails"
+        );
+        assertEq(
+            dataStorage.getTradeCount(),
+            tradesBefore,
+            "failed callback-path run must not store trade data"
+        );
+
+        Vm.Log[] memory entries = vm.getRecordedLogs();
+        bool sawHookAttemptAll = false;
+        bool sawFlashLoanFailed = false;
+        bool hookCallSuccess = false;
+        bool hookTradeProfitable = true;
+
+        for (uint256 i = 0; i < entries.length; i++) {
+            if (
+                entries[i].emitter == address(hook) &&
+                entries[i].topics.length > 0
+            ) {
+                if (entries[i].topics[0] == HOOK_ATTEMPT_ALL_TOPIC) {
+                    (, hookCallSuccess, hookTradeProfitable) = abi.decode(
+                        entries[i].data,
+                        (uint256, bool, bool)
+                    );
+                    sawHookAttemptAll = true;
+                }
+                if (entries[i].topics[0] == FLASH_LOAN_FAILED_TOPIC) {
+                    sawFlashLoanFailed = true;
+                }
+            }
+        }
+
+        assertTrue(sawHookAttemptAll, "expected HookAttemptAll event");
+        assertTrue(hookCallSuccess, "attemptAll self-call should remain isolated");
+        assertFalse(
+            hookTradeProfitable,
+            "failed flash callback should not report profitable hook execution"
+        );
+        assertTrue(sawFlashLoanFailed, "expected FlashLoanFailed event");
     }
 }
