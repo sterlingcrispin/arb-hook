@@ -841,6 +841,15 @@ contract ArbHook is
             uint256 maxFee = (principal * maxFeeBps) / FEE_BPS_DIVISOR;
             if (fee > maxFee) return (false, 0, 0);
         }
+        uint256 available;
+        try IERC3156FlashLender(lender).maxFlashLoan(startToken) returns (
+            uint256 maxLoan
+        ) {
+            available = maxLoan;
+        } catch {
+            return (false, 0, 0);
+        }
+        if (available < principal) return (false, 0, 0);
 
         address beneficiary = _currentProfitRecipient();
         if (beneficiary == address(0)) return (false, 0, 0);
@@ -920,6 +929,7 @@ contract ArbHook is
             (FlashLoanExecutionParams)
         );
         if (params.tokenA != token) revert("flash tokenA mismatch");
+        if (params.beneficiary == address(0)) revert("flash beneficiary=0");
 
         uint256 balanceBefore = IERC20(token).balanceOf(address(this));
 
