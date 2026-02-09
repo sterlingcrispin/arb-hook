@@ -55,6 +55,36 @@ contract ArbHookHarness is ArbHook {
         return abi.decode(returndata, (bool, int256, uint256));
     }
 
+    function runFlashArbWithContextForTest(
+        address sender,
+        bytes calldata hookData,
+        address poolA,
+        address poolB,
+        address tokenA,
+        address tokenB,
+        uint256 maxIter,
+        ArbUtils.PoolType poolAType,
+        ArbUtils.PoolType poolBType
+    ) external onlyOwner returns (bool success, int256 profit, uint256 iterations) {
+        // Mirrors _afterSwap recipient resolution for routing-focused tests.
+        activeAttemptProfitRecipient = _resolveProfitRecipient(sender, hookData);
+        (bool callOk, bytes memory returndata) = address(this).call(
+            abi.encodeWithSelector(
+                this.executeIterativeArbViaFlash.selector,
+                poolA,
+                poolB,
+                tokenA,
+                tokenB,
+                maxIter,
+                poolAType,
+                poolBType
+            )
+        );
+        activeAttemptProfitRecipient = address(0);
+        if (!callOk) return (false, 0, 0);
+        return abi.decode(returndata, (bool, int256, uint256));
+    }
+
     function setTestProfitBps(uint256 bps) external onlyOwner {
         testProfitBps = bps;
     }
