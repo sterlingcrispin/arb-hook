@@ -7,6 +7,8 @@
     "build": "forge build",
     "test": "forge test -v",
     "test:parity": "forge test --match-contract ArbHookParityTest -v",
+    "anvil:base:cached": "scripts/start_cached_base_anvil.sh",
+    "test:flash:fork:cached": "scripts/test_flash_fork_cached.sh",
     "size": "forge build --sizes",
     "fmt": "forge fmt"
   },

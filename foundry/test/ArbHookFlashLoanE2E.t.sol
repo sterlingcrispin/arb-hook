@@ -191,6 +191,8 @@ contract ArbHookFlashLoanE2ETest is Test {
         keccak256(
             "ArbitrageAttempted(address,address,address,address,uint256,int256,uint256)"
         );
+    bytes32 private constant FLASH_LOAN_REQUESTED_TOPIC =
+        keccak256("FlashLoanRequested(address,address,uint256,address)");
     bytes32 private constant FLASH_LOAN_SETTLED_TOPIC =
         keccak256(
             "FlashLoanSettled(address,address,uint256,uint256,int256,address)"
@@ -311,6 +313,66 @@ contract ArbHookFlashLoanE2ETest is Test {
             dataStorage.getTradeCount(),
             tradesBefore,
             "non-profitable run must not store trade data"
+        );
+    }
+
+    function testRunPairUsesQuoteBasedFlashPrincipalHint() public {
+        uint256 principalCap = 100_000e18;
+        MockERC3156Lender lender = new MockERC3156Lender(IERC20(address(token)), 5);
+        token.mint(address(lender), principalCap);
+
+        address[] memory pools = new address[](2);
+        uint24[] memory fees = new uint24[](2);
+        ArbUtils.PoolType[] memory types = new ArbUtils.PoolType[](2);
+        pools[0] = address(
+            new MockV2PricePair(
+                address(token),
+                address(counterToken),
+                1_000_000,
+                1_000_000
+            )
+        );
+        pools[1] = address(
+            new MockV2PricePair(
+                address(token),
+                address(counterToken),
+                1_000_000,
+                2_000_000
+            )
+        );
+        types[0] = ArbUtils.PoolType.V2;
+        types[1] = ArbUtils.PoolType.V2;
+        hook.addPools(address(token), pools, fees, types);
+
+        hook.setTrustedFlashLender(address(lender), true);
+        hook.setLenderForToken(address(token), address(lender));
+        hook.setFlashPrincipalForToken(address(token), principalCap);
+        hook.setMaxFlashFeeBpsForToken(address(token), 20);
+        hook.setTestProfitBps(100); // 1% gross in harness shortcut
+        hook.setTestInjectProfitAnyIterations(true);
+
+        vm.recordLogs();
+        (int256 cumulativeProfit, uint256 iterations) = hook.runPairForTest(
+            address(token),
+            address(counterToken),
+            1
+        );
+
+        uint256 requestedPrincipal = _extractRequestedPrincipal(vm.getRecordedLogs());
+        uint256 expectedPrincipal = (principalCap * 3500) / 10_000; // spread > 80 bps => 35%
+        assertEq(
+            requestedPrincipal,
+            expectedPrincipal,
+            "principal hint should be quote-tiered utilization"
+        );
+        assertEq(iterations, 1, "harness injected path should report one iteration");
+
+        uint256 fee = lender.flashFee(address(token), expectedPrincipal);
+        uint256 expectedNet = (expectedPrincipal / 100) - fee;
+        assertEq(
+            cumulativeProfit,
+            int256(expectedNet),
+            "net should be computed from hinted principal amount"
         );
     }
 
@@ -804,18 +866,23 @@ contract ArbHookFlashLoanE2ETest is Test {
         address senderRecipient = makeAddr("afterSwapSender");
         hook.setDefaultProfitRecipient(defaultRecipient);
 
-        uint256 fee = lender.flashFee(address(token), principal);
-        uint256 expectedGross = (principal * 100) / 10_000;
-        uint256 expectedNet = expectedGross - fee;
         uint256 senderBefore = token.balanceOf(senderRecipient);
         uint256 defaultBefore = token.balanceOf(defaultRecipient);
         uint256 tradesBefore = dataStorage.getTradeCount();
 
+        vm.recordLogs();
         (bytes4 selector, int128 delta) = poolManager.callAfterSwap(
             hook,
             senderRecipient,
             bytes("")
         );
+        Vm.Log[] memory entries = vm.getRecordedLogs();
+        uint256 borrowedPrincipal = _extractRequestedPrincipal(entries);
+        assertGt(borrowedPrincipal, 0, "callback path should request flash principal");
+
+        uint256 fee = lender.flashFee(address(token), borrowedPrincipal);
+        uint256 expectedGross = (borrowedPrincipal * 100) / 10_000;
+        uint256 expectedNet = expectedGross - fee;
 
         assertEq(selector, hook.afterSwap.selector, "afterSwap selector mismatch");
         assertEq(delta, int128(0), "afterSwap delta should be zero");
@@ -847,18 +914,23 @@ contract ArbHookFlashLoanE2ETest is Test {
         address overrideRecipient = makeAddr("afterSwapOverride");
         hook.setDefaultProfitRecipient(defaultRecipient);
 
-        uint256 fee = lender.flashFee(address(token), principal);
-        uint256 expectedGross = (principal * 100) / 10_000;
-        uint256 expectedNet = expectedGross - fee;
         uint256 senderBefore = token.balanceOf(sender);
         uint256 overrideBefore = token.balanceOf(overrideRecipient);
         uint256 defaultBefore = token.balanceOf(defaultRecipient);
 
+        vm.recordLogs();
         (bytes4 selector, int128 delta) = poolManager.callAfterSwap(
             hook,
             sender,
             abi.encode(overrideRecipient)
         );
+        Vm.Log[] memory entries = vm.getRecordedLogs();
+        uint256 borrowedPrincipal = _extractRequestedPrincipal(entries);
+        assertGt(borrowedPrincipal, 0, "callback path should request flash principal");
+
+        uint256 fee = lender.flashFee(address(token), borrowedPrincipal);
+        uint256 expectedGross = (borrowedPrincipal * 100) / 10_000;
+        uint256 expectedNet = expectedGross - fee;
 
         assertEq(selector, hook.afterSwap.selector, "afterSwap selector mismatch");
         assertEq(delta, int128(0), "afterSwap delta should be zero");
@@ -952,5 +1024,21 @@ contract ArbHookFlashLoanE2ETest is Test {
             "failed flash callback should not report profitable hook execution"
         );
         assertTrue(sawFlashLoanFailed, "expected FlashLoanFailed event");
+    }
+
+    function _extractRequestedPrincipal(
+        Vm.Log[] memory entries
+    ) private view returns (uint256 principal) {
+        for (uint256 i = 0; i < entries.length; i++) {
+            if (
+                entries[i].emitter == address(hook) &&
+                entries[i].topics.length > 0 &&
+                entries[i].topics[0] == FLASH_LOAN_REQUESTED_TOPIC
+            ) {
+                (principal, ) = abi.decode(entries[i].data, (uint256, address));
+                return principal;
+            }
+        }
+        return 0;
     }
 }

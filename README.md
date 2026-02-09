@@ -44,6 +44,33 @@ forge test --match-contract ArbHookFlash
 
 Legacy parity remains opt-in diagnostics only.
 
+## Cached Fork Workflow (Fast Re-runs)
+
+Fork-level tests are RPC-heavy on the first run because missing state is fetched lazily.
+To speed up repeated runs at the same fork block (`33942262`), use cached Anvil:
+
+```bash
+# Terminal 1: start a cached local Base fork
+BASE_RPC_URL="$BASE_RPC_URL" npm run anvil:base:cached
+```
+
+```bash
+# Terminal 2: run flash fork tests against local cached Anvil
+BASE_RPC_URL="$BASE_RPC_URL" npm run test:flash:fork:cached
+```
+
+`test:flash:fork:cached` defaults to:
+- `ArbHookFlashForkAaveTest`
+- `testForkAaveAttemptAllTracksLegacyRoundSequenceShape`
+
+You can pass any other forge test args:
+
+```bash
+BASE_RPC_URL="$BASE_RPC_URL" scripts/test_flash_fork_cached.sh --match-contract ArbHookFlashForkAaveTest -vv
+```
+
+Local cache/state artifacts are ignored by git (`.anvil-cache/`, `.anvil-state/`).
+
 ## Runtime Parameters Explained
 
 The main runtime knobs are owner-settable on `ArbHook`:
