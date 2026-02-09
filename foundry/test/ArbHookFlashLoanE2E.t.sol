@@ -248,5 +248,10 @@ contract ArbHookFlashLoanE2ETest is Test {
             tradesBefore + 1,
             "successful net-profit flash trade should be stored"
         );
+
+        uint256[] memory stored = dataStorage.fetchTradeData(tradesBefore);
+        assertEq(stored[0], uint256(uint160(address(0xD2))), "stored buy pool mismatch");
+        assertEq(stored[1], uint256(uint160(address(0xD1))), "stored sell pool mismatch");
+        assertEq(stored[5], expectedNet, "stored trade profit should be net");
     }
 }

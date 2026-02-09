@@ -3,6 +3,7 @@ pragma solidity ^0.8.20;
 
 import {ArbHook} from "../ArbHook.sol";
 import {ArbUtils} from "../ArbUtils.sol";
+import {IDataStorage} from "../interfaces/IDataStorage.sol";
 import {IPoolManager} from "@uniswap/v4-core/src/interfaces/IPoolManager.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 
@@ -85,6 +86,19 @@ contract ArbHookHarness is ArbHook {
                 );
                 require(ok, "test mint failed");
             }
+
+            lastTradeData = IDataStorage.TradeData({
+                tokenA: startToken,
+                tokenB: intermediateToken,
+                buyPool: poolB_addr,
+                sellPool: poolA_addr,
+                buyPoolIndex: _getPoolIndex(startToken, poolB_addr),
+                sellPoolIndex: _getPoolIndex(startToken, poolA_addr),
+                totalAmountSwapped: bal,
+                profit: mintAmount,
+                iterations: 1,
+                timestamp: block.timestamp
+            });
             return (true, int256(mintAmount), 1);
         }
 

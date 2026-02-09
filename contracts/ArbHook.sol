@@ -487,9 +487,6 @@ contract ArbHook is
 
         lastExecutionProfit = totalProfit;
         bool tradeWasProfitable = totalProfit > 0;
-        if (tradeWasProfitable && address(dataStorage) != address(0)) {
-            dataStorage.storeTradeData(lastTradeData);
-        }
         return tradeWasProfitable;
     }
 
@@ -987,7 +984,33 @@ contract ArbHook is
             address(dataStorage) != address(0) &&
             uint256(netProfit) >= minProfitToEmit
         ) {
-            dataStorage.storeTradeData(lastTradeData);
+            IDataStorage.TradeData memory persisted = lastTradeData;
+
+            // Fallback for test harnesses or edge paths that did not populate
+            // lastTradeData inside executeIterativeArb.
+            if (persisted.tokenA == address(0)) {
+                persisted.tokenA = params.tokenA;
+                persisted.tokenB = params.tokenB;
+                persisted.buyPool = params.buyPool;
+                persisted.sellPool = params.sellPool;
+                persisted.buyPoolIndex = _getPoolIndex(
+                    params.tokenA,
+                    params.buyPool
+                );
+                persisted.sellPoolIndex = _getPoolIndex(
+                    params.tokenA,
+                    params.sellPool
+                );
+                persisted.timestamp = block.timestamp;
+            }
+
+            // Persist net profit for flash-loan executions.
+            persisted.profit = uint256(netProfit);
+            if (persisted.iterations == 0) {
+                persisted.iterations = iters;
+            }
+            lastTradeData = persisted;
+            dataStorage.storeTradeData(persisted);
         }
 
         return ERC3156_CALLBACK_SUCCESS;
