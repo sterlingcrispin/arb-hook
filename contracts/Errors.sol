@@ -28,10 +28,7 @@ library ArbErrors {
     error IIAELoopToken0FailedPoolBPLCheck();
     error FeeFetchAFailed();
     error FeeFetchBFailed();
-    error IIAEUnprofitableSequence(
-        int256 cumulativeProfit,
-        int256 minCumulativeProfit
-    );
+    error IIAEUnprofitableSequence(int256 cumulativeProfit, int256 minCumulativeProfit);
     error SwapTokensMustBeDifferent();
     error SwapMismatchedTokens0To1();
     error SwapMismatchedTokens1To0();
@@ -39,27 +36,16 @@ library ArbErrors {
     error SwapInsufficientAllowance(uint256 allowance, uint256 amountIn);
     error SwapInsufficientBalance(uint256 balance, uint256 amountIn);
     error SwapAmountMustBePositive();
-    error CallbackCallerMismatch(
-        address decodedCaller,
-        address contractAddress
-    );
+    error CallbackCallerMismatch(address decodedCaller, address contractAddress);
     error CallbackCallerIsEOA();
     error CallbackUnexpectedPool(address caller, address expectedPool);
     error CallbackFailedToken0Fetch(address pool);
     error CallbackFailedToken1Fetch(address pool);
     error CallbackPoolTokensZeroAddress();
-    error CallbackDecodedTokenNotInPool(
-        address decodedTokenIn,
-        address token0,
-        address token1
-    );
+    error CallbackDecodedTokenNotInPool(address decodedTokenIn, address token0, address token1);
     error CallbackInvalidDelta0Sign();
     error CallbackInvalidDelta1Sign();
-    error CallbackTransferFailed(
-        address token,
-        address recipient,
-        uint256 amount
-    );
+    error CallbackTransferFailed(address token, address recipient, uint256 amount);
     error WithdrawToZeroAddress();
     error WithdrawZeroAddressToken();
     error WithdrawAmountExceedsBalance(uint256 amount, uint256 balance);
@@ -75,5 +61,11 @@ library ArbErrors {
     error HelperToken0Failed();
     error HelperToken1Failed();
     error InvalidArbitrageLogicAddress();
+    error InvalidDataStorageAddress();
+    error HookMaxIterationsExceeded(uint256 requested, uint256 maximum);
     error SwapOutputTokenNotInV2Pair();
+    error AtomicArbitrageExecutionFailed();
+    error V2CallbackContextMismatch();
+    error ExecutorOnlyDelegateCall();
+    error ExecutorAddressInvalid();
 }

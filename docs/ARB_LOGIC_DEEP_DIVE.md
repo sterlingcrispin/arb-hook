@@ -3,6 +3,7 @@
 This note explains the intent behind the main loops and sizing heuristics in:
 
 - `contracts/ArbHook.sol`
+- `contracts/ArbExecutor.sol`
 - `contracts/ArbUtils.sol`
 - `contracts/ArbitrageLogic.sol`
 
@@ -29,6 +30,11 @@ Because traversal order is deterministic, **pool registration order directly aff
 - Iterates base/counter pairs in order.
 - Calls `_runPair(base, counter, maxIterations)` for each.
 - Stops at the **first profitable pair**.
+
+`ArbHook` keeps this selector as a self-only wrapper and delegates the heavy
+implementation to its immutable `ArbExecutor`. The executor runs in the hook's
+storage context, so callback permissions, balances, approvals, and trade records
+stay tied to the hook address.
 
 Why this is done:
 
@@ -78,7 +84,10 @@ Per iteration:
 
 After loop:
 
-- Best-effort unwind of residual intermediate tokens (except USDC/WETH skip case).
+- Only intermediate-token residue created by this attempt is unwound; inventory
+  that existed before the attempt is never liquidated.
+- Any remaining residue, use of pre-existing intermediate inventory, failed leg,
+  or non-positive final P&L reverts the isolated self-call.
 - Emit/store trade only if positive and above `minProfitToEmit`.
 
 Why stop on non-positive marginal profit:
@@ -126,6 +135,8 @@ V2 callbacks (`uniswapV2Call`, `pancakeCall`) enforce:
 
 - pair address matches trusted factory lookup
 - pair is also registered in local metadata
-- repayment token is one of pair tokens
+- repayment token/output amounts match a one-shot execution context created
+  immediately before the canonical pair swap
+- the context is consumed before the repayment transfer
 
 These checks are defense-in-depth against forged callbacks.

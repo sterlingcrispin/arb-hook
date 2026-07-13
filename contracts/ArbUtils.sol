@@ -4,12 +4,9 @@ pragma solidity ^0.8.20;
 // --- External deps ──────────────────────────────────────────────────────
 import "@uniswap/v3-core/contracts/interfaces/IUniswapV3Pool.sol";
 import "@uniswap/v3-core/contracts/interfaces/IUniswapV3Factory.sol";
-import "./interfaces/IUniswapV2Factory.sol";
 import "./interfaces/IUniswapV2Pair.sol";
 import "./interfaces/IPancakeV3Pool.sol";
-import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import "@openzeppelin/contracts/token/ERC20/extensions/IERC20Metadata.sol";
-import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import {ArbErrors} from "./Errors.sol";
 import {ArbitrageLogic} from "./ArbitrageLogic.sol";
 import {IDataStorage} from "./interfaces/IDataStorage.sol";
@@ -21,7 +18,7 @@ import {IDataStorage} from "./interfaces/IDataStorage.sol";
 ///      `supportedTokens` (outer loop) -> `baseCounterList[base]` (inner loop).
 ///      Registration order therefore determines evaluation order in `attemptAllInternal`.
 abstract contract ArbUtils {
-    using SafeERC20 for IERC20;
+    uint8 internal constant MAX_SAFE_TOKEN_DECIMALS = 77;
 
     IDataStorage public dataStorage;
 
@@ -86,8 +83,6 @@ abstract contract ArbUtils {
     }
     mapping(bytes32 => FailedAttempt) internal lastFailedAttemptForPair;
 
-    mapping(address => uint256) internal poolActivityCache;
-
     /* ---------------- Pool-list helpers ---------------- */
     function _clearCountersForBase(address base) internal {
         address[] storage ctrs = baseCounterList[base];
@@ -99,14 +94,9 @@ abstract contract ArbUtils {
     }
 
     // Key is symmetric for (A,B) and (B,A) so both directions share one cache slot.
-    function _getPairKey(
-        address tokenA,
-        address tokenB
-    ) internal pure returns (bytes32) {
+    function _getPairKey(address tokenA, address tokenB) internal pure returns (bytes32) {
         return
-            tokenA < tokenB
-                ? keccak256(abi.encodePacked(tokenA, tokenB))
-                : keccak256(abi.encodePacked(tokenB, tokenA));
+            tokenA < tokenB ? keccak256(abi.encodePacked(tokenA, tokenB)) : keccak256(abi.encodePacked(tokenB, tokenA));
     }
 
     function _removeTokenFromSupported(address token) internal {
@@ -128,36 +118,28 @@ abstract contract ArbUtils {
         uint24[] memory fees,
         ArbUtils.PoolType[] memory poolTypes
     ) internal {
-        if (
-            poolAddresses.length != fees.length ||
-            poolAddresses.length != poolTypes.length
-        ) revert ArbErrors.InputArrayLengthMismatch();
+        if (poolAddresses.length != fees.length || poolAddresses.length != poolTypes.length) {
+            revert ArbErrors.InputArrayLengthMismatch();
+        }
 
         // Preserve first-seen ordering for deterministic traversal in attemptAll.
         bool tokenIsNew = true;
-        for (uint j; j < supportedTokens.length; ++j)
+        for (uint256 j; j < supportedTokens.length; ++j) {
             if (supportedTokens[j] == token) {
                 tokenIsNew = false;
                 break;
             }
+        }
         if (tokenIsNew) supportedTokens.push(token);
 
-        for (uint i; i < poolAddresses.length; ++i) {
-            _getAndValidateAndAddPool(
-                token,
-                poolAddresses[i],
-                fees[i],
-                poolTypes[i]
-            );
+        for (uint256 i; i < poolAddresses.length; ++i) {
+            _getAndValidateAndAddPool(token, poolAddresses[i], fees[i], poolTypes[i]);
         }
     }
 
-    function _getAndValidateAndAddPool(
-        address token,
-        address poolAddr,
-        uint24 providedFee,
-        PoolType poolType
-    ) internal {
+    function _getAndValidateAndAddPool(address token, address poolAddr, uint24 providedFee, PoolType poolType)
+        internal
+    {
         address t0;
         address t1;
         uint8 dec0;
@@ -175,42 +157,38 @@ abstract contract ArbUtils {
             } else {
                 // PANCAKESWAP_V3
                 IPancakeV3Pool pool = IPancakeV3Pool(poolAddr);
-                IUniswapV3Factory factory = IUniswapV3Factory(
-                    0x0BFbCF9fa4f9C56B0F40a671Ad40E0805A091865
-                );
+                IUniswapV3Factory factory = IUniswapV3Factory(0x0BFbCF9fa4f9C56B0F40a671Ad40E0805A091865);
                 t0 = pool.token0();
                 t1 = pool.token1();
                 actualFee = pool.fee();
                 tickSpacing = factory.feeAmountTickSpacing(actualFee);
             }
 
-            if (
-                !((token == t0 && t1 != address(0)) ||
-                    (token == t1 && t0 != address(0)))
-            ) revert ArbErrors.AddPoolsInputTokenNotInPool();
+            if (!((token == t0 && t1 != address(0)) || (token == t1 && t0 != address(0)))) {
+                revert ArbErrors.AddPoolsInputTokenNotInPool();
+            }
 
-            if (actualFee != providedFee)
+            if (actualFee != providedFee) {
                 revert ArbErrors.AddPoolsProvidedFeeMismatch();
+            }
         } else if (poolType == PoolType.V2) {
             actualFee = V2_POOL_FEE_PPM;
             IUniswapV2Pair pair = IUniswapV2Pair(poolAddr);
             t0 = pair.token0();
             t1 = pair.token1();
 
-            if (
-                !((token == t0 && t1 != address(0)) ||
-                    (token == t1 && t0 != address(0)))
-            ) revert ArbErrors.AddPoolsInputTokenNotInPool();
+            if (!((token == t0 && t1 != address(0)) || (token == t1 && t0 != address(0)))) {
+                revert ArbErrors.AddPoolsInputTokenNotInPool();
+            }
         } else if (poolType == PoolType.PANCAKESWAP_V2) {
             actualFee = PANCAKESWAP_V2_POOL_FEE_PPM;
             IUniswapV2Pair pair = IUniswapV2Pair(poolAddr);
             t0 = pair.token0();
             t1 = pair.token1();
 
-            if (
-                !((token == t0 && t1 != address(0)) ||
-                    (token == t1 && t0 != address(0)))
-            ) revert ArbErrors.AddPoolsInputTokenNotInPool();
+            if (!((token == t0 && t1 != address(0)) || (token == t1 && t0 != address(0)))) {
+                revert ArbErrors.AddPoolsInputTokenNotInPool();
+            }
         } else {
             revert("Unsupported Pool Type");
         }
@@ -218,33 +196,7 @@ abstract contract ArbUtils {
         dec0 = IERC20Metadata(t0).decimals();
         dec1 = IERC20Metadata(t1).decimals();
 
-        tokenPools[token].push(
-            PoolInfo(
-                poolAddr,
-                actualFee,
-                poolType,
-                t0,
-                t1,
-                dec0,
-                dec1,
-                tickSpacing
-            )
-        );
-
-        uint256 initialActivityIndicator;
-        if (poolType == PoolType.V3) {
-            (, , uint16 obsIndex, , , , ) = IUniswapV3Pool(poolAddr).slot0();
-            initialActivityIndicator = obsIndex;
-        } else if (poolType == PoolType.PANCAKESWAP_V3) {
-            // Use the specific IPancakeV3Pool interface to avoid ABI issues
-            (, , uint16 obsIndex, , , , ) = IPancakeV3Pool(poolAddr).slot0();
-            initialActivityIndicator = obsIndex;
-        } else {
-            // V2 or PCS V2
-            (, , uint32 timestamp) = IUniswapV2Pair(poolAddr).getReserves();
-            initialActivityIndicator = timestamp;
-        }
-        poolActivityCache[poolAddr] = initialActivityIndicator;
+        tokenPools[token].push(PoolInfo(poolAddr, actualFee, poolType, t0, t1, dec0, dec1, tickSpacing));
 
         // Build the base -> counter adjacency list used by attemptAll route scanning.
         address counter = (t0 == token) ? t1 : t0;
@@ -259,10 +211,6 @@ abstract contract ArbUtils {
         uint256 numPools = pools.length;
         if (numPools == 0) revert ArbErrors.TokenHasNoPools();
         if (poolIndex >= numPools) revert ArbErrors.PoolIndexOutOfBounds();
-
-        address poolAddr = pools[poolIndex].poolAddress;
-        (address t0, address t1) = _tokens(IUniswapV3Pool(poolAddr));
-        address counter = (t0 == token) ? t1 : t0;
 
         if (poolIndex != numPools - 1) pools[poolIndex] = pools[numPools - 1];
         pools.pop();
@@ -288,47 +236,16 @@ abstract contract ArbUtils {
         delete supportedTokens;
     }
 
-    /* ---------------- wallet / treasury helpers ---------------- */
-    function _withdrawTokens(address token, address to, uint256 amt) internal {
-        if (to == address(0)) revert ArbErrors.WithdrawToZeroAddress();
-        if (token == address(0)) revert ArbErrors.WithdrawZeroAddressToken();
-        uint256 bal = IERC20(token).balanceOf(address(this));
-        if (amt > bal) revert ArbErrors.WithdrawAmountExceedsBalance(amt, bal);
-        IERC20(token).safeTransfer(to, amt);
-    }
-
-    function _withdrawETH(address payable to, uint256 amt) internal {
-        if (to == address(0)) revert ArbErrors.WithdrawETHToZeroAddress();
-        uint256 bal = address(this).balance;
-        if (amt > bal)
-            revert ArbErrors.WithdrawETHAmountExceedsBalance(amt, bal);
-        (bool ok, ) = to.call{value: amt}("");
-        if (!ok) revert ArbErrors.ETHWithdrawalFailed(to, amt);
-    }
-
     // -------------------------------------------------------------------
     //  Constants
     // -------------------------------------------------------------------
     /// @dev Minimum meaningful trade size: 1 × 10⁻⁴ of one whole token.
     function _minChunk(address token) internal view virtual returns (uint256) {
         uint8 d = IERC20Metadata(token).decimals();
+        // 10**78 no longer fits in uint256. Returning an unexecutable chunk
+        // makes discovery fail closed for unsupported token representations.
+        if (d > MAX_SAFE_TOKEN_DECIMALS) return type(uint256).max;
         return d > 4 ? 10 ** (d - 4) : 1; // never below 1 wei
-    }
-
-    /// @dev Fetch token0 / token1 with uniform custom errors.
-    function _tokens(
-        IUniswapV3Pool p
-    ) internal view returns (address t0, address t1) {
-        try p.token0() returns (address _t0) {
-            t0 = _t0;
-        } catch {
-            revert ArbErrors.HelperToken0Failed();
-        }
-        try p.token1() returns (address _t1) {
-            t1 = _t1;
-        } catch {
-            revert ArbErrors.HelperToken1Failed();
-        }
     }
 
     // -------------------------------------------------------------------
@@ -337,11 +254,7 @@ abstract contract ArbUtils {
 
     // mirror of IterativeArbBot's event so the compiler can emit it here too
     event SwapExecuted(
-        address indexed pool,
-        address indexed tokenIn,
-        address indexed tokenOut,
-        uint256 amountIn,
-        uint256 amountOut
+        address indexed pool, address indexed tokenIn, address indexed tokenOut, uint256 amountIn, uint256 amountOut
     );
 
     // -------------------------------------------------------------------
@@ -363,8 +276,9 @@ abstract contract ArbUtils {
         address tokenToPay,
         uint256 amountToPay
     ) internal virtual returns (bool success) {
-        if (tokenToReceive == tokenToPay || amountToReceive == 0)
+        if (tokenToReceive == tokenToPay || amountToReceive == 0) {
             revert("Invalid V2 flash swap params");
+        }
 
         //console.log("... Executing V2 Flash Swap ...");
         //console.log("tokenToReceive:", tokenToReceive);
@@ -386,7 +300,7 @@ abstract contract ArbUtils {
         //console.log("trying to swap");
         try pair.swap(amount0Out, amount1Out, address(this), data) {
             success = true;
-        } catch (bytes memory reason) {
+        } catch {
             //console.log("!!! V2 FLASH SWAP FAILED !!!");
             // console.logBytes(reason);
             success = false;

@@ -20,6 +20,8 @@ interface IPancakeV3Pool {
 
     function fee() external view returns (uint24);
 
+    function liquidity() external view returns (uint128);
+
     function swap(
         address recipient,
         bool zeroForOne,
