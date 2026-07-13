@@ -3,8 +3,10 @@ pragma solidity ^0.8.20;
 
 // Executes bounded on-chain arbitrage attempts from Uniswap v4 swap callbacks.
 import "./ArbUtils.sol";
+import "./ArbExecutionStorage.sol";
 import "./ArbitrageLogic.sol";
 import {ArbErrors} from "./Errors.sol";
+import {IArbExecutor} from "./interfaces/IArbExecutor.sol";
 
 import {BaseHook} from "@uniswap/v4-periphery/src/utils/BaseHook.sol";
 import {Hooks} from "@uniswap/v4-core/src/libraries/Hooks.sol";
@@ -14,20 +16,12 @@ import {BalanceDelta} from "@uniswap/v4-core/src/types/BalanceDelta.sol";
 import {SwapParams} from "@uniswap/v4-core/src/types/PoolOperation.sol";
 
 import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
-import {
-    ReentrancyGuard
-} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
+import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
-import {
-    IERC20Metadata
-} from "@openzeppelin/contracts/token/ERC20/extensions/IERC20Metadata.sol";
-import {
-    SafeERC20
-} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
+import {IERC20Metadata} from "@openzeppelin/contracts/token/ERC20/extensions/IERC20Metadata.sol";
+import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 
-import {
-    IUniswapV3Pool
-} from "@uniswap/v3-core/contracts/interfaces/IUniswapV3Pool.sol";
+import {IUniswapV3Pool} from "@uniswap/v3-core/contracts/interfaces/IUniswapV3Pool.sol";
 
 import {IUniswapV2Factory} from "./interfaces/IUniswapV2Factory.sol";
 import {IUniswapV2Pair} from "./interfaces/IUniswapV2Pair.sol";
@@ -39,82 +33,39 @@ import {IDataStorage} from "./interfaces/IDataStorage.sol";
 ///         registered external pools during swap callbacks. It owns pool
 ///         registration, price discovery, sizing, execution, and callback safety
 ///         checks in one contract.
-contract ArbHook is BaseHook, ArbUtils, Ownable, ReentrancyGuard {
+contract ArbHook is BaseHook, ArbExecutionStorage, Ownable, ReentrancyGuard {
     using SafeERC20 for IERC20;
 
-    struct PoolMeta {
-        address token0;
-        address token1;
-        uint24 fee;
-        PoolType poolType;
-        bool exists;
-    }
+    /// @notice Immutable implementation used only through delegatecall by the
+    ///         self-only execution wrappers below.
+    IArbExecutor public immutable arbExecutor;
 
-    // Quick lookup for callbacks and validation without extra external calls
-    mapping(address => PoolMeta) private poolMetaByAddr;
+    /// @notice Pool keys for which afterSwap may trigger best-effort routing.
+    ///         Unlisted V4 pools always receive a no-op hook response.
+    mapping(bytes32 => bool) public hookPoolEnabled;
 
-    // Last winning pools for a pair; useful for telemetry and future warm-start heuristics.
-    mapping(bytes32 => address) private lastBestBuyPoolForPair;
-    mapping(bytes32 => address) private lastBestSellPoolForPair;
-
-    // Cache token decimals to make _minChunk cheaper
-    mapping(address => uint8) private cachedTokenDecimals;
-    // Only emit/store trades when profit ≥ this (in tokenA units)
-    uint256 public minProfitToEmit;
     // Default max iterations when attempting arb via hook callbacks (0 disables hook execution)
     uint256 public hookMaxIterations;
-
-    // Well-known tokens used by unwind heuristics
-    address private constant USDC = 0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913;
-    address private constant WETH = 0x4200000000000000000000000000000000000006;
+    uint256 public constant MAX_HOOK_ITERATIONS = 10;
 
     // Trusted factories for callback validation
-    IUniswapV2Factory private constant V2_FACTORY =
-        IUniswapV2Factory(0x8909Dc15e40173Ff4699343b6eB8132c65e18eC6);
+    IUniswapV2Factory private constant V2_FACTORY = IUniswapV2Factory(0x8909Dc15e40173Ff4699343b6eB8132c65e18eC6);
     IUniswapV2Factory private constant PANCAKESWAP_V2_FACTORY =
         IUniswapV2Factory(0x02a84c1b3BBD7401a5f7fa98a384EBC70bB5749E);
 
-    event ArbitrageAttempted(
-        address indexed tokenA,
-        address indexed tokenB,
-        address indexed buyPool,
-        address sellPool,
-        uint256 totalAmountSwapped,
-        int256 cumulativeProfit,
-        uint256 iterations
-    );
-
     event AttemptAllFailed(bytes revertData);
-    event PairExecutionFailed(
-        address tokenA,
-        address tokenB,
-        address buyPool,
-        address sellPool,
-        bytes revertData
-    );
+    event HookAttemptAll(uint256 iterations, bool callSuccess, bool tradeProfitable);
+    event HookPoolEnabled(bytes32 indexed poolKeyHash, bool enabled);
 
-    event PriceDiscoveryResult(
-        address indexed tokenA,
-        address indexed tokenB,
-        address indexed bestBuyPool,
-        address bestSellPool,
-        uint256 buyPrice,
-        uint256 sellPrice
-    );
+    function _afterSwap(address, PoolKey calldata key, SwapParams calldata, BalanceDelta, bytes calldata)
+        internal
+        override
+        returns (bytes4, int128)
+    {
+        if (!hookPoolEnabled[_poolKeyHash(key)]) {
+            return (BaseHook.afterSwap.selector, 0);
+        }
 
-    event HookAttemptAll(
-        uint256 iterations,
-        bool callSuccess,
-        bool tradeProfitable
-    );
-
-    function _afterSwap(
-        address,
-        PoolKey calldata,
-        SwapParams calldata,
-        BalanceDelta,
-        bytes calldata
-    ) internal override returns (bytes4, int128) {
         // Hook path is best-effort only: trade failure must never block user swap settlement.
         uint256 iterations = hookMaxIterations;
         if (iterations > 0) {
@@ -124,14 +75,11 @@ contract ArbHook is BaseHook, ArbUtils, Ownable, ReentrancyGuard {
         return (BaseHook.afterSwap.selector, 0);
     }
 
-    function _attemptAllViaSelfCall(
-        uint256 iterations
-    ) internal returns (bool) {
+    function _attemptAllViaSelfCall(uint256 iterations) internal returns (bool) {
         // Self-call gives us a hard failure boundary:
         // any revert in deep execution is captured as bytes and does not bubble.
-        (bool successCall, bytes memory returndata) = address(this).call(
-            abi.encodeWithSelector(this.attemptAllInternal.selector, iterations)
-        );
+        (bool successCall, bytes memory returndata) =
+            address(this).call(abi.encodeWithSelector(this.attemptAllInternal.selector, iterations));
 
         bool tradeSuccess = false;
         if (!successCall) {
@@ -144,50 +92,59 @@ contract ArbHook is BaseHook, ArbUtils, Ownable, ReentrancyGuard {
         return successCall && tradeSuccess;
     }
 
-    function getHookPermissions()
-        public
-        pure
-        override
-        returns (Hooks.Permissions memory)
-    {
-        return
-            Hooks.Permissions({
-                beforeInitialize: false,
-                afterInitialize: false,
-                beforeAddLiquidity: false,
-                afterAddLiquidity: false,
-                beforeRemoveLiquidity: false,
-                afterRemoveLiquidity: false,
-                beforeSwap: false,
-                afterSwap: true,
-                beforeDonate: false,
-                afterDonate: false,
-                beforeSwapReturnDelta: false,
-                afterSwapReturnDelta: false,
-                afterAddLiquidityReturnDelta: false,
-                afterRemoveLiquidityReturnDelta: false
-            });
+    function getHookPermissions() public pure override returns (Hooks.Permissions memory) {
+        return Hooks.Permissions({
+            beforeInitialize: false,
+            afterInitialize: false,
+            beforeAddLiquidity: false,
+            afterAddLiquidity: false,
+            beforeRemoveLiquidity: false,
+            afterRemoveLiquidity: false,
+            beforeSwap: false,
+            afterSwap: true,
+            beforeDonate: false,
+            afterDonate: false,
+            beforeSwapReturnDelta: false,
+            afterSwapReturnDelta: false,
+            afterAddLiquidityReturnDelta: false,
+            afterRemoveLiquidityReturnDelta: false
+        });
     }
 
-    function validateHookAddress(BaseHook) internal pure override {}
+    /// @dev Production deployments must use a CREATE2 address whose low bits
+    ///      encode this hook's permissions. Test harnesses may override this.
+    function validateHookAddress(BaseHook _this) internal pure virtual override {
+        super.validateHookAddress(_this);
+    }
 
     constructor(
         IPoolManager _poolManager,
         address initialOwner,
         address _arbLib,
-        address _dataStorage
+        address _dataStorage,
+        address _arbExecutor
     ) BaseHook(_poolManager) Ownable(initialOwner) {
         require(address(_poolManager) != address(0), "poolManager=0");
-        require(_arbLib != address(0), "arbLib=0");
-        require(_dataStorage != address(0), "dataStorage=0");
+        if (_arbLib == address(0) || _arbLib.code.length == 0) {
+            revert ArbErrors.InvalidArbitrageLogicAddress();
+        }
+        if (_dataStorage == address(0) || _dataStorage.code.length == 0) {
+            revert ArbErrors.InvalidDataStorageAddress();
+        }
+        if (_arbExecutor == address(0) || _arbExecutor.code.length == 0) {
+            revert ArbErrors.ExecutorAddressInvalid();
+        }
         arbLib = ArbitrageLogic(_arbLib);
         dataStorage = IDataStorage(_dataStorage);
+        arbExecutor = IArbExecutor(_arbExecutor);
         hookMaxIterations = 2;
     }
 
     // ------------------------------- Admin ---------------------------------
     function setDataStorage(address _dataStorage) external onlyOwner {
-        require(_dataStorage != address(0), "dataStorage=0");
+        if (_dataStorage == address(0) || _dataStorage.code.length == 0) {
+            revert ArbErrors.InvalidDataStorageAddress();
+        }
         dataStorage = IDataStorage(_dataStorage);
     }
 
@@ -195,9 +152,7 @@ contract ArbHook is BaseHook, ArbUtils, Ownable, ReentrancyGuard {
         minSpreadBps = _minSpreadBps;
     }
 
-    function setChunkSpreadConsumptionBps(
-        uint16 _chunkSpreadConsumptionBps
-    ) external onlyOwner {
+    function setChunkSpreadConsumptionBps(uint16 _chunkSpreadConsumptionBps) external onlyOwner {
         CHUNK_SPREAD_CONSUMPTION_BPS = _chunkSpreadConsumptionBps;
     }
 
@@ -210,7 +165,16 @@ contract ArbHook is BaseHook, ArbUtils, Ownable, ReentrancyGuard {
     }
 
     function setHookMaxIterations(uint256 newMaxIterations) external onlyOwner {
+        if (newMaxIterations > MAX_HOOK_ITERATIONS) {
+            revert ArbErrors.HookMaxIterationsExceeded(newMaxIterations, MAX_HOOK_ITERATIONS);
+        }
         hookMaxIterations = newMaxIterations;
+    }
+
+    function setHookPoolEnabled(PoolKey calldata key, bool enabled) external onlyOwner {
+        bytes32 keyHash = _poolKeyHash(key);
+        hookPoolEnabled[keyHash] = enabled;
+        emit HookPoolEnabled(keyHash, enabled);
     }
 
     // ------------------------- Pool-book API -------------------------------
@@ -256,17 +220,23 @@ contract ArbHook is BaseHook, ArbUtils, Ownable, ReentrancyGuard {
                 m.exists = true;
             }
 
+            unchecked {
+                ++poolRegistrationCount[p];
+            }
+
             // Cache decimals for both tokens to make _minChunk cheaper later
             if (m.token0 != address(0) && cachedTokenDecimals[m.token0] == 0) {
                 try IERC20Metadata(m.token0).decimals() returns (uint8 d0) {
-                    cachedTokenDecimals[m.token0] = d0 == 0 ? 18 : d0;
+                    // Preserve genuine zero-decimal tokens. `_minChunk` treats
+                    // an uncached/zero entry defensively and still returns 1.
+                    cachedTokenDecimals[m.token0] = d0;
                 } catch {
                     cachedTokenDecimals[m.token0] = 18;
                 }
             }
             if (m.token1 != address(0) && cachedTokenDecimals[m.token1] == 0) {
                 try IERC20Metadata(m.token1).decimals() returns (uint8 d1) {
-                    cachedTokenDecimals[m.token1] = d1 == 0 ? 18 : d1;
+                    cachedTokenDecimals[m.token1] = d1;
                 } catch {
                     cachedTokenDecimals[m.token1] = 18;
                 }
@@ -274,56 +244,37 @@ contract ArbHook is BaseHook, ArbUtils, Ownable, ReentrancyGuard {
         }
     }
 
-    function removePool(
-        address token,
-        uint256 idx
-    ) external onlyOwner nonReentrant {
-        // Clear meta before removal
+    function removePool(address token, uint256 idx) external onlyOwner nonReentrant {
+        // Keep metadata while the pool remains registered under another base.
         if (idx < tokenPools[token].length) {
             address p = tokenPools[token][idx].poolAddress;
-            delete poolMetaByAddr[p];
+            _releasePoolMeta(p);
         }
         _removePool(token, idx);
     }
 
     function resetTokenPools(address token) external onlyOwner nonReentrant {
-        // Clear metas for this token
+        // Release only this base token's registrations.
         ArbUtils.PoolInfo[] storage pools = tokenPools[token];
         for (uint256 i = 0; i < pools.length; i++) {
-            delete poolMetaByAddr[pools[i].poolAddress];
+            _releasePoolMeta(pools[i].poolAddress);
         }
         _resetTokenPools(token);
     }
 
     function resetAllPools() external onlyOwner nonReentrant {
-        // Clear metas for all tokens
+        // Release every registration before clearing the pool book.
         for (uint256 i = 0; i < supportedTokens.length; i++) {
             address t = supportedTokens[i];
             ArbUtils.PoolInfo[] storage pools = tokenPools[t];
             for (uint256 j = 0; j < pools.length; j++) {
-                delete poolMetaByAddr[pools[j].poolAddress];
+                _releasePoolMeta(pools[j].poolAddress);
             }
         }
         _resetAllPools();
     }
 
-    // Override to use cached decimals instead of external call each time
-    function _minChunk(address token) internal view override returns (uint256) {
-        uint8 d = cachedTokenDecimals[token];
-        if (d == 0) {
-            // Not cached yet: fallback read (view) – tests will warm this on first add
-            try IERC20Metadata(token).decimals() returns (uint8 dx) {
-                d = dx;
-            } catch {
-                d = 18; // assume 18 if unknown
-            }
-        }
-        return d > 4 ? 10 ** (d - 4) : 1;
-    }
-
-    function getPoolsForToken(
-        address token
-    ) external view returns (ArbUtils.PoolInfo[] memory) {
+    function getPoolsForToken(address token) external view returns (ArbUtils.PoolInfo[] memory) {
         return tokenPools[token];
     }
 
@@ -335,1077 +286,87 @@ contract ArbHook is BaseHook, ArbUtils, Ownable, ReentrancyGuard {
         return supportedTokens;
     }
 
-    function approvePools(
-        address tokenAddress,
-        address[] calldata poolAddresses,
-        uint256 amount
-    ) external onlyOwner nonReentrant {
+    function approvePools(address tokenAddress, address[] calldata poolAddresses, uint256 amount)
+        external
+        onlyOwner
+        nonReentrant
+    {
         for (uint256 i = 0; i < poolAddresses.length; i++) {
-            IERC20(tokenAddress).approve(poolAddresses[i], 0);
-            IERC20(tokenAddress).approve(poolAddresses[i], amount);
+            // Support USDT-style tokens that require a zero reset and reject
+            // false-returning approvals instead of silently leaving a route
+            // unusable.
+            IERC20(tokenAddress).forceApprove(poolAddresses[i], amount);
         }
     }
 
-    // -------------------------- Core entrypoint ----------------------------
-    /// @notice Evaluate arbitrage opportunities across all configured base/counter pairs.
-    /// @dev Must be executed via self-call. Individual pair attempts are isolated with
-    ///      low-level calls so a failing path does not revert the full cycle.
-    ///      This internal execution path may still revert on invariant or auth failures.
-    function attemptAllInternal(
-        uint256 maxIterations
-    ) external returns (bool success) {
-        require(msg.sender == address(this), "Only self");
-        lastExecutionProfit = 0; // reset mailbox
-
-        int256 totalProfit = 0;
-        uint256 baseCount = supportedTokens.length;
-        // Outer loop walks base tokens in registration order.
-        for (uint256 i = 0; i < baseCount; ++i) {
-            address baseToken = supportedTokens[i];
-            address[] storage counterTokens = baseCounterList[baseToken];
-            uint256 counterCount = counterTokens.length;
-
-            // Inner loop walks all counterpart tokens registered for this base.
-            for (uint256 j = 0; j < counterCount; ++j) {
-                address counterToken = counterTokens[j];
-                (int256 profit, ) = _runPair(
-                    baseToken,
-                    counterToken,
-                    maxIterations
-                );
-                if (profit > 0) {
-                    // Deliberately stop at the first profitable path to keep callback gas bounded.
-                    totalProfit = profit;
-                    break; // exit inner loop
-                }
-            }
-            if (totalProfit > 0) {
-                break; // exit outer loop
-            }
-        }
-
-        lastExecutionProfit = totalProfit;
-        bool tradeWasProfitable = totalProfit > 0;
-        if (tradeWasProfitable && address(dataStorage) != address(0)) {
-            dataStorage.storeTradeData(lastTradeData);
-        }
-        return tradeWasProfitable;
-    }
-
-    // ---------------------------- Pair runner ------------------------------
-    struct LoopState {
-        // Quote keys attempted during this _runPair invocation.
-        bytes32[10] tried;
-        uint8 triedCount;
-        // Bounded retry count for alternative pool combinations.
-        uint8 attempts;
-        // Tracks repeated failures for the same buy pool to force buy-pool rotation.
-        uint8 sellFailsForBuy;
-        // Pools excluded in the next discovery pass after a failed attempt.
-        address skipSellPool;
-        address skipBuyPool;
-        address lastBuyPool;
-    }
-
-    function _runPair(
-        address tokenA,
-        address tokenB,
-        uint256 maxIter
-    ) internal returns (int256 cumulativeProfit, uint256 iterations) {
-        LoopState memory state;
-        state.triedCount = 0;
-        state.attempts = 0;
-        state.sellFailsForBuy = 0;
-        state.skipSellPool = address(0);
-        state.skipBuyPool = address(0);
-        state.lastBuyPool = address(0);
-
-        bytes32 pairKey = _getPairKey(tokenA, tokenB);
-        FailedAttempt memory lastFail = lastFailedAttemptForPair[pairKey];
-
-        // Fast-path skip:
-        // if the last failing quote for this pair has not moved, do not spend gas retrying.
-        if (lastFail.buyPool != address(0)) {
-            (
-                ArbUtils.PoolInfo memory buyPoolInfo,
-                bool buyPoolFound
-            ) = _findPoolInBook(tokenA, lastFail.buyPool);
-            (
-                ArbUtils.PoolInfo memory sellPoolInfo,
-                bool sellPoolFound
-            ) = _findPoolInBook(tokenA, lastFail.sellPool);
-
-            if (buyPoolFound && sellPoolFound) {
-                (uint256 currentBuyPrice, , bool buyPriceSuccess) = arbLib
-                    ._getSinglePoolPrices(tokenA, tokenB, buyPoolInfo);
-                (, uint256 currentSellPrice, bool sellPriceSuccess) = arbLib
-                    ._getSinglePoolPrices(tokenA, tokenB, sellPoolInfo);
-
-                if (buyPriceSuccess && sellPriceSuccess) {
-                    uint128 qBuyNow = arbLib.quantise(currentBuyPrice);
-                    uint128 qSellNow = arbLib.quantise(currentSellPrice);
-                    if (
-                        qBuyNow == lastFail.qBuy && qSellNow == lastFail.qSell
-                    ) {
-                        return (0, 0); // Prices unchanged, skip
-                    }
-                }
-            }
-        }
-
-        // Up to two discovery/execute attempts:
-        // first on best quote, then one fallback excluding previously failing side(s).
-        while (state.attempts < 2) {
-            (
-                address buyPool,
-                address sellPool,
-                uint256 buyPrice,
-                uint256 sellPrice,
-                ArbUtils.PoolType buyPoolType,
-                ArbUtils.PoolType sellPoolType
-            ) = findBestPools(
-                    tokenA,
-                    tokenB,
-                    state.skipBuyPool,
-                    state.skipSellPool
-                );
-
-            if (buyPool == address(0)) return (0, 0);
-            if (buyPool == sellPool) {
-                ++state.attempts;
-                state.skipSellPool = sellPool;
-                continue;
-            }
-
-            uint128 qBuy = arbLib.quantise(buyPrice);
-            uint128 qSell = arbLib.quantise(sellPrice);
-            bytes32 quoteKey = arbLib.quoteKey(tokenA, tokenB, qBuy, qSell);
-
-            // Prevent duplicate execution attempts for identical quantised quotes in one pass.
-            bool alreadyTried = false;
-            for (uint8 k = 0; k < state.triedCount; ) {
-                if (state.tried[k] == quoteKey) {
-                    alreadyTried = true;
-                    break;
-                }
-                unchecked {
-                    ++k;
-                }
-            }
-            if (alreadyTried) {
-                unchecked {
-                    ++state.attempts;
-                }
-                state.skipSellPool = sellPool;
-                continue;
-            }
-
-            FailedQuote memory fq = lastFailedQuote[quoteKey];
-            if (fq.qBuy == qBuy && fq.qSell == qSell) {
-                // Quote-level cache says this exact price pair already failed recently.
-                // Skip quickly and rotate away from repeated buy-pool failures.
-                ++state.attempts;
-                state.skipSellPool = sellPool;
-                if (buyPool == state.lastBuyPool) {
-                    if (++state.sellFailsForBuy >= 2) {
-                        state.skipBuyPool = buyPool;
-                        state.sellFailsForBuy = 0;
-                        state.lastBuyPool = address(0);
-                    }
-                } else {
-                    state.lastBuyPool = buyPool;
-                    state.sellFailsForBuy = 1;
-                }
-                continue;
-            }
-
-            // Isolate pair execution failure from the outer scanner.
-            (bool successCall, bytes memory returndata) = address(this).call(
-                abi.encodeWithSelector(
-                    this.executeIterativeArb.selector,
-                    sellPool,
-                    buyPool,
-                    tokenA,
-                    tokenB,
-                    maxIter,
-                    sellPoolType,
-                    buyPoolType
-                )
-            );
-
-            if (!successCall) {
-                emit PairExecutionFailed(
-                    tokenA,
-                    tokenB,
-                    buyPool,
-                    sellPool,
-                    returndata
-                );
-                // Mark as tried to avoid infinite loops
-                if (state.triedCount < 5) {
-                    state.tried[state.triedCount] = quoteKey;
-                    state.triedCount++;
-                }
-                state.attempts++;
-                continue;
-            }
-
-            (bool tradeSuccess, int256 profit, uint256 iters) = abi.decode(
-                returndata,
-                (bool, int256, uint256)
-            );
-
-            cumulativeProfit += profit;
-            iterations += iters;
-
-            if (tradeSuccess && profit > 0) {
-                delete lastFailedQuote[quoteKey];
-                return (cumulativeProfit, iterations);
-            }
-
-            lastFailedQuote[quoteKey] = FailedQuote(qBuy, qSell);
-            // Pair-level cache helps skip stale failing route combos on subsequent callbacks.
-            lastFailedAttemptForPair[pairKey] = FailedAttempt(
-                buyPool,
-                sellPool,
-                qBuy,
-                qSell
-            );
-
-            if (state.triedCount < 5) {
-                state.tried[state.triedCount] = quoteKey;
-                unchecked {
-                    ++state.triedCount;
-                }
-            }
-            unchecked {
-                ++state.attempts;
-            }
-            state.skipSellPool = sellPool;
-            if (buyPool == state.lastBuyPool) {
-                if (++state.sellFailsForBuy >= 2) {
-                    state.skipBuyPool = buyPool;
-                    state.sellFailsForBuy = 0;
-                    state.lastBuyPool = address(0);
-                }
-            } else {
-                state.lastBuyPool = buyPool;
-                state.sellFailsForBuy = 1;
-            }
-        }
-        return (cumulativeProfit, iterations);
-    }
-
-    // ------------------------- Pool discovery helper -----------------------
-    function findBestPools(
-        address tokenA,
-        address tokenB,
-        address skipBuyPool,
-        address skipSellPool
-    )
-        internal
-        returns (
-            address bestBuyPool,
-            address bestSellPool,
-            uint256 bestBuyPrice,
-            uint256 bestSellPrice,
-            ArbUtils.PoolType bestBuyPoolType,
-            ArbUtils.PoolType bestSellPoolType
-        )
-    {
-        // Iterate storage directly to avoid copying the entire pool array to memory
-        // Pool universe is "all pools registered under tokenA as base".
-        ArbUtils.PoolInfo[] storage pools = tokenPools[tokenA];
-        uint256 n = pools.length;
-        if (n == 0) {
-            return (
-                address(0),
-                address(0),
-                0,
-                0,
-                ArbUtils.PoolType.V3,
-                ArbUtils.PoolType.V3
-            );
-        }
-
-        bestBuyPrice = type(uint256).max;
-        bestSellPrice = 0;
-
-        // One pass picks:
-        // - cheapest pool to buy tokenA (lowest effective buy price),
-        // - richest pool to sell tokenA (highest effective sell price).
-        for (uint256 i = 0; i < n; ) {
-            ArbUtils.PoolInfo storage ps = pools[i];
-            address pa = ps.poolAddress;
-            // Skip invalid or skipped pools
-            if (pa != address(0) && pa != skipBuyPool && pa != skipSellPool) {
-                // Check pair matches
-                if (
-                    (ps.token0 == tokenA && ps.token1 == tokenB) ||
-                    (ps.token0 == tokenB && ps.token1 == tokenA)
-                ) {
-                    // Single-pool price fetch (includes slot0/reserves checks)
-                    ArbUtils.PoolInfo memory pm = ps; // copy one struct to memory
-                    (uint256 bPrice, uint256 sPrice, bool ok) = arbLib
-                        ._getSinglePoolPrices(tokenA, tokenB, pm);
-                    if (ok) {
-                        if (bPrice < bestBuyPrice) {
-                            bestBuyPrice = bPrice;
-                            bestBuyPool = pa;
-                            bestBuyPoolType = ps.poolType;
-                        }
-                        if (sPrice > bestSellPrice) {
-                            bestSellPrice = sPrice;
-                            bestSellPool = pa;
-                            bestSellPoolType = ps.poolType;
-                        }
-                    }
-                }
-            }
-            unchecked {
-                ++i;
-            }
-        }
-
-        if (
-            bestBuyPool == address(0) ||
-            bestSellPool == address(0) ||
-            bestBuyPool == bestSellPool ||
-            bestSellPrice <= bestBuyPrice
-        ) {
-            // No executable spread after fees, or only one usable pool.
-            return (
-                address(0),
-                address(0),
-                0,
-                0,
-                ArbUtils.PoolType.V3,
-                ArbUtils.PoolType.V3
-            );
-        }
-
-        // Cache winners for the pair to bias subsequent discovery
-        bytes32 pKeyStore = _getPairKey(tokenA, tokenB);
-        lastBestBuyPoolForPair[pKeyStore] = bestBuyPool;
-        lastBestSellPoolForPair[pKeyStore] = bestSellPool;
-        return (
-            bestBuyPool,
-            bestSellPool,
-            bestBuyPrice,
-            bestSellPrice,
-            bestBuyPoolType,
-            bestSellPoolType
-        );
-    }
-
-    // ---------------------------- Core executor ----------------------------
-    /// @notice Execute bounded iterative arbitrage for one chosen buy/sell pool pair.
-    /// @dev Loop shape:
-    ///      1) choose chunk size for current pool types (V3-V3, V2-V2, or mixed),
-    ///      2) execute startToken->intermediateToken then reverse leg,
-    ///      3) stop as soon as marginal iteration profit is non-positive.
-    ///      This greedy early-stop avoids paying gas to chase diminishing edge.
-    function executeIterativeArb(
-        address poolA_addr,
-        address poolB_addr,
-        address startToken,
-        address intermediateToken,
-        uint256 maxIterations,
-        ArbUtils.PoolType poolAType,
-        ArbUtils.PoolType poolBType
-    )
-        public
-        returns (bool success, int256 cumulativeProfit, uint256 iterations)
-    {
+    // -------------------------- Execution wrappers -------------------------
+    /// @notice Evaluates configured pairs through the immutable execution
+    ///         implementation. Only a self-call may enter this boundary.
+    function attemptAllInternal(uint256 maxIterations) external returns (bool success) {
         if (msg.sender != address(this)) revert ArbErrors.WrapperOnlySelf();
-        if (maxIterations == 0) return (false, 0, 0);
-        if (poolA_addr == poolB_addr) return (false, 0, 0);
-
-        IERC20 startTokenContract = IERC20(startToken);
-        IERC20 intermediateTokenContract = IERC20(intermediateToken);
-        // Minimum practical trade size for this token precision (e.g. 1e14 for 18-dec tokens).
-        uint256 minChunkStartToken = _minChunk(startToken);
-        // Guardrail to avoid "winning tiny amount after prior losses" situations.
-        int256 minCumulativeProfit = int256(minChunkStartToken) / 10;
-
-        bool isPoolAV3 = (poolAType == ArbUtils.PoolType.V3 ||
-            poolAType == ArbUtils.PoolType.PANCAKESWAP_V3);
-        bool isPoolBV3 = (poolBType == ArbUtils.PoolType.V3 ||
-            poolBType == ArbUtils.PoolType.PANCAKESWAP_V3);
-
-        int24 initialAbsSpreadForThisArbOpportunity = 0;
-
-        if (isPoolAV3 && isPoolBV3) {
-            // For V3/V3 paths we anchor dynamic sizing to the initial tick spread.
-            IUniswapV3Pool pA_v3_check = IUniswapV3Pool(poolA_addr);
-            IUniswapV3Pool pB_v3_check = IUniswapV3Pool(poolB_addr);
-            int24 initialTickA_check;
-            int24 initialTickB_check;
-            address initialTokenA0_check;
-            if (poolAType == ArbUtils.PoolType.V3) {
-                try pA_v3_check.slot0() returns (
-                    uint160,
-                    int24 tA,
-                    uint16,
-                    uint16,
-                    uint16,
-                    uint8,
-                    bool
-                ) {
-                    initialTickA_check = tA;
-                } catch {
-                    return (false, 0, 0);
-                }
-            } else {
-                try IPancakeV3Pool(poolA_addr).slot0() returns (
-                    uint160,
-                    int24 tA,
-                    uint16,
-                    uint16,
-                    uint16,
-                    uint32,
-                    bool
-                ) {
-                    initialTickA_check = tA;
-                } catch {
-                    return (false, 0, 0);
-                }
-            }
-
-            if (poolBType == ArbUtils.PoolType.V3) {
-                try pB_v3_check.slot0() returns (
-                    uint160,
-                    int24 tB,
-                    uint16,
-                    uint16,
-                    uint16,
-                    uint8,
-                    bool
-                ) {
-                    initialTickB_check = tB;
-                } catch {
-                    return (false, 0, 0);
-                }
-            } else {
-                try IPancakeV3Pool(poolB_addr).slot0() returns (
-                    uint160,
-                    int24 tB,
-                    uint16,
-                    uint16,
-                    uint16,
-                    uint32,
-                    bool
-                ) {
-                    initialTickB_check = tB;
-                } catch {
-                    return (false, 0, 0);
-                }
-            }
-
-            try pA_v3_check.token0() returns (address t0A) {
-                initialTokenA0_check = t0A;
-            } catch {
-                return (false, 0, 0);
-            }
-            int24 initialSignedSpread_check = (initialTokenA0_check ==
-                startToken)
-                ? (initialTickA_check - initialTickB_check)
-                : (initialTickB_check - initialTickA_check);
-            initialAbsSpreadForThisArbOpportunity = initialSignedSpread_check >=
-                0
-                ? initialSignedSpread_check
-                : -initialSignedSpread_check;
-
-            if (
-                initialAbsSpreadForThisArbOpportunity <
-                int24(uint24(minSpreadBps))
-            ) {
-                // Spread already too tight; treat as clean no-op success.
-                return (true, 0, 0);
-            }
-        }
-
-        uint256 totalAmountSwapped = 0;
-        // Outer execution loop: each pass recomputes a fresh chunk from live state.
-        for (uint256 i = 0; i < maxIterations; ) {
-            uint256 balanceBeforeIteration = startTokenContract.balanceOf(
-                address(this)
-            );
-
-            uint256 chunkToSwap = 0;
-            uint160 sqrtPriceLimitA_v3 = 0;
-            uint160 sqrtPriceLimitB_v3 = 0;
-
-            if (isPoolAV3 && isPoolBV3) {
-                // V3/V3 path:
-                // - derive a rough chunk from spread/liquidity,
-                // - refine with profit search.
-                ArbitrageLogic.IterationConfig memory iterConfig;
-                iterConfig.minSpreadBps = minSpreadBps;
-                iterConfig
-                    .chunkSpreadConsumptionBps = CHUNK_SPREAD_CONSUMPTION_BPS;
-                iterConfig.bpsDivisor = BPS_DIVISOR;
-                iterConfig.maxImpactBps = _MAX_IMPACT_BPS;
-                iterConfig.minChunkForStartToken = minChunkStartToken;
-                iterConfig.currentStartTokenBalance = balanceBeforeIteration;
-                iterConfig
-                    .initialAbsSpread = initialAbsSpreadForThisArbOpportunity;
-
-                ArbitrageLogic.V3SwapParams memory v3Params = arbLib
-                    .getV3SwapParameters(
-                        poolA_addr,
-                        poolB_addr,
-                        startToken,
-                        intermediateToken,
-                        iterConfig,
-                        poolAType,
-                        poolBType
-                    );
-
-                if (!v3Params.shouldContinue) {
-                    break;
-                }
-
-                chunkToSwap = arbLib.findBestV3Chunk(
-                    v3Params,
-                    iterConfig.minChunkForStartToken
-                );
-
-                if (chunkToSwap == 0) {
-                    break;
-                }
-
-                sqrtPriceLimitA_v3 = v3Params.sqrtPriceLimitA;
-                sqrtPriceLimitB_v3 = v3Params.sqrtPriceLimitB;
-            } else if (!isPoolAV3 && !isPoolBV3) {
-                // V2/V2 path:
-                // start from heuristic candidate, then halve until a profitable chunk survives.
-                ArbitrageLogic.V2TradeParams memory v2Params = arbLib
-                    .calculateV2TradeParams(
-                        poolA_addr,
-                        poolB_addr,
-                        startToken,
-                        intermediateToken,
-                        balanceBeforeIteration,
-                        minChunkStartToken,
-                        _v2FeeForPoolType(poolAType),
-                        _v2FeeForPoolType(poolBType)
-                    );
-
-                if (!v2Params.opportunityExists) break;
-                chunkToSwap = v2Params.estimatedChunkToSwap;
-
-                uint256 initialChunkForV2Halving = chunkToSwap;
-                if (initialChunkForV2Halving > 0) {
-                    // Start from the largest heuristic chunk first.
-                    // If too aggressive, halve quickly instead of doing many tiny upward probes.
-                    uint8 v2Halvings = 0;
-                    uint256 testV2Chunk = initialChunkForV2Halving;
-                    bool profitableV2ChunkFound = false;
-                    int256 lastEstPLFullV2Halving = 0;
-
-                    (uint112 rA_s, uint112 rA_i, ) = arbLib
-                        ._getV2ReservesForTokens(
-                            IUniswapV2Pair(poolA_addr),
-                            startToken,
-                            intermediateToken
-                        );
-                    (uint112 rB_i, uint112 rB_s, ) = arbLib
-                        ._getV2ReservesForTokens(
-                            IUniswapV2Pair(poolB_addr),
-                            intermediateToken,
-                            startToken
-                        );
-
-                    if (rA_s > 0 && rA_i > 0 && rB_i > 0 && rB_s > 0) {
-                        // Monotonic backoff: the first chunk that clears profit thresholds wins.
-                        while (true) {
-                            lastEstPLFullV2Halving = arbLib.simulateV2V2Profit(
-                                testV2Chunk,
-                                IUniswapV2Pair(poolA_addr),
-                                IUniswapV2Pair(poolB_addr),
-                                startToken,
-                                intermediateToken,
-                                rA_s,
-                                rA_i,
-                                rB_i,
-                                rB_s,
-                                _v2FeeForPoolType(poolAType),
-                                _v2FeeForPoolType(poolBType)
-                            );
-
-                            if (
-                                lastEstPLFullV2Halving > 0 &&
-                                cumulativeProfit + lastEstPLFullV2Halving >=
-                                minCumulativeProfit
-                            ) {
-                                chunkToSwap = testV2Chunk;
-                                profitableV2ChunkFound = true;
-                                break;
-                            }
-                            if (v2Halvings >= 9) break;
-                            testV2Chunk >>= 1;
-                            if (testV2Chunk < minChunkStartToken) break;
-                            unchecked {
-                                v2Halvings++;
-                            }
-                        }
-                        if (!profitableV2ChunkFound) break;
-                    } else {
-                        break;
-                    }
-                } else {
-                    break;
-                }
-            } else {
-                // Mixed V2/V3 path:
-                // exact optimum is expensive on-chain, so probe from half-balance downward.
-                uint256 currentBal = balanceBeforeIteration;
-                if (currentBal == 0) break;
-
-                // Half-balance is a practical "large first probe":
-                // it converges quickly with halving while avoiding full-balance over-commit.
-                uint256 initialTestChunk = currentBal / 2;
-                if (initialTestChunk > 0) {
-                    chunkToSwap = arbLib.findBestMixedPairChunk(
-                        poolA_addr,
-                        poolB_addr,
-                        poolAType,
-                        poolBType,
-                        startToken,
-                        intermediateToken,
-                        initialTestChunk,
-                        minChunkStartToken,
-                        cumulativeProfit,
-                        int256(minChunkStartToken) / 10
-                    );
-                }
-                if (chunkToSwap == 0) break;
-
-                if (
-                    poolAType == ArbUtils.PoolType.V3 ||
-                    poolAType == ArbUtils.PoolType.PANCAKESWAP_V3
-                ) {
-                    address cachedT0A = poolMetaByAddr[poolA_addr].token0;
-                    bool zeroForOne_V3A = cachedT0A == startToken;
-                    sqrtPriceLimitA_v3 = zeroForOne_V3A
-                        ? uint160(4295128739) /* TickMath.MIN_SQRT_RATIO */ + 1
-                        : uint160(
-                            1461446703485210103287273052203988822378723970342
-                        ) /* MAX */ - 1;
-                }
-            }
-
-            if (chunkToSwap == 0) break;
-
-            uint256 intermediateBalanceBefore = intermediateTokenContract
-                .balanceOf(address(this));
-            uint256 intermediateReceived = 0;
-
-            // Leg 1: startToken -> intermediateToken on pool A.
-            bool swap1Success = false;
-            if (
-                poolAType == ArbUtils.PoolType.V3 ||
-                poolAType == ArbUtils.PoolType.PANCAKESWAP_V3
-            ) {
-                swap1Success = _executeSwapInternal_noBalanceCheck(
-                    poolA_addr,
-                    poolAType,
-                    startToken,
-                    intermediateToken,
-                    chunkToSwap,
-                    sqrtPriceLimitA_v3
-                );
-            } else {
-                (uint112 rA_start, uint112 rA_interm, ) = arbLib
-                    ._getV2ReservesForTokens(
-                        IUniswapV2Pair(poolA_addr),
-                        startToken,
-                        intermediateToken
-                    );
-                uint256 amountToReceive = arbLib.getAmountOut(
-                    chunkToSwap,
-                    rA_start,
-                    rA_interm,
-                    _v2FeeForPoolType(poolAType)
-                );
-                if (
-                    poolBType == ArbUtils.PoolType.V3 ||
-                    poolBType == ArbUtils.PoolType.PANCAKESWAP_V3
-                ) {
-                    uint256 estimatedImpactB = arbLib.estimateImpactBps(
-                        poolB_addr,
-                        intermediateToken,
-                        amountToReceive
-                    );
-                    if (estimatedImpactB > _MAX_IMPACT_BPS) break;
-                }
-                swap1Success = _executeV2FlashSwap(
-                    IUniswapV2Pair(poolA_addr),
-                    intermediateToken,
-                    amountToReceive,
-                    startToken,
-                    chunkToSwap
-                );
-            }
-            if (!swap1Success) {
-                break;
-            }
-
-            uint256 intermediateBalanceAfter = intermediateTokenContract
-                .balanceOf(address(this));
-            if (intermediateBalanceAfter > intermediateBalanceBefore) {
-                intermediateReceived =
-                    intermediateBalanceAfter -
-                    intermediateBalanceBefore;
-            } else {
-                intermediateReceived = 0;
-            }
-
-            bool swap2Success = false;
-            // Leg 2: intermediateToken -> startToken on pool B.
-            if (
-                poolBType == ArbUtils.PoolType.V3 ||
-                poolBType == ArbUtils.PoolType.PANCAKESWAP_V3
-            ) {
-                uint160 actualSqrtPriceLimitB_v3 = sqrtPriceLimitB_v3; // V3-V3 default
-                if (
-                    (poolAType == ArbUtils.PoolType.V2 ||
-                        poolAType == ArbUtils.PoolType.PANCAKESWAP_V2) &&
-                    (poolBType == ArbUtils.PoolType.V3 ||
-                        poolBType == ArbUtils.PoolType.PANCAKESWAP_V3)
-                ) {
-                    actualSqrtPriceLimitB_v3 = arbLib
-                        .calculateV3SqrtPriceLimitForAmountIn(
-                            IUniswapV3Pool(poolB_addr),
-                            intermediateToken,
-                            intermediateReceived,
-                            50
-                        );
-                }
-                swap2Success = _executeSwapInternal_noBalanceCheck(
-                    poolB_addr,
-                    poolBType,
-                    intermediateToken,
-                    startToken,
-                    intermediateReceived,
-                    actualSqrtPriceLimitB_v3
-                );
-            } else {
-                (uint112 rB_interm, uint112 rB_start, ) = arbLib
-                    ._getV2ReservesForTokens(
-                        IUniswapV2Pair(poolB_addr),
-                        intermediateToken,
-                        startToken
-                    );
-                uint256 amountToReceive2 = arbLib.getAmountOut(
-                    intermediateReceived,
-                    rB_interm,
-                    rB_start,
-                    _v2FeeForPoolType(poolBType)
-                );
-                swap2Success = _executeV2FlashSwap(
-                    IUniswapV2Pair(poolB_addr),
-                    startToken,
-                    amountToReceive2,
-                    intermediateToken,
-                    intermediateReceived
-                );
-            }
-            if (!swap2Success) {
-                break;
-            }
-
-            uint256 balanceAfterIteration = startTokenContract.balanceOf(
-                address(this)
-            );
-            int256 currentIterationProfit = int256(balanceAfterIteration) -
-                int256(balanceBeforeIteration);
-
-            cumulativeProfit += currentIterationProfit;
-            totalAmountSwapped += chunkToSwap;
-
-            unchecked {
-                iterations++;
-            }
-
-            // Greedy stop: once marginal iteration profit turns non-positive,
-            // additional size usually worsens execution due to local curve impact.
-            if (currentIterationProfit <= 0) break;
-            unchecked {
-                ++i;
-            }
-        }
-        uint256 balanceBeforeUnwind = IERC20(startToken).balanceOf(
-            address(this)
+        return abi.decode(
+            _delegateToExecutor(abi.encodeWithSelector(IArbExecutor.attemptAllInternal.selector, maxIterations)), (bool)
         );
-
-        uint256 remainingInterm = IERC20(intermediateToken).balanceOf(
-            address(this)
-        );
-        if (
-            remainingInterm > 0 &&
-            intermediateToken != USDC &&
-            intermediateToken != WETH &&
-            cumulativeProfit > 0
-        ) {
-            // Best-effort unwind:
-            // if we ended with residual intermediate token and are still net profitable,
-            // try converting leftovers back to start token before final accounting.
-            uint160 unwindLimitB = 0;
-            if (
-                poolBType == ArbUtils.PoolType.V3 ||
-                poolBType == ArbUtils.PoolType.PANCAKESWAP_V3
-            ) {
-                address cachedT0B = poolMetaByAddr[poolB_addr].token0;
-                bool zeroForOneUnwind = cachedT0B == intermediateToken;
-                unwindLimitB = zeroForOneUnwind
-                    ? uint160(4295128739) + 1
-                    : uint160(
-                        1461446703485210103287273052203988822378723970342
-                    ) - 1;
-            }
-            _executeSwapInternal_noBalanceCheck(
-                poolB_addr,
-                poolBType,
-                intermediateToken,
-                startToken,
-                remainingInterm,
-                unwindLimitB
-            );
-
-            remainingInterm = IERC20(intermediateToken).balanceOf(
-                address(this)
-            );
-            if (remainingInterm > 0) {
-                uint160 unwindLimitA = 0;
-                if (
-                    poolAType == ArbUtils.PoolType.V3 ||
-                    poolAType == ArbUtils.PoolType.PANCAKESWAP_V3
-                ) {
-                    address cachedT0A2 = poolMetaByAddr[poolA_addr].token0;
-                    bool zeroForOneUnwindA = cachedT0A2 == intermediateToken;
-                    unwindLimitA = zeroForOneUnwindA
-                        ? uint160(4295128739) + 1
-                        : uint160(
-                            1461446703485210103287273052203988822378723970342
-                        ) - 1;
-                }
-                _executeSwapInternal_noBalanceCheck(
-                    poolA_addr,
-                    poolAType,
-                    intermediateToken,
-                    startToken,
-                    remainingInterm,
-                    unwindLimitA
-                );
-            }
-
-            remainingInterm = IERC20(intermediateToken).balanceOf(
-                address(this)
-            );
-            if (remainingInterm > 0) {
-                revert("Unwind failed, tokens stuck");
-            }
-        }
-
-        uint256 balanceAfterUnwind = IERC20(startToken).balanceOf(
-            address(this)
-        );
-        if (balanceAfterUnwind != balanceBeforeUnwind) {
-            int256 unwindProfit = int256(balanceAfterUnwind) -
-                int256(balanceBeforeUnwind);
-            cumulativeProfit += unwindProfit;
-        }
-
-        if (
-            iterations > 0 &&
-            cumulativeProfit > 0 &&
-            uint256(cumulativeProfit) >= minProfitToEmit
-        ) {
-            emit ArbitrageAttempted(
-                startToken,
-                intermediateToken,
-                poolB_addr,
-                poolA_addr,
-                totalAmountSwapped,
-                cumulativeProfit,
-                iterations
-            );
-
-            uint256 buyPoolIndex = _getPoolIndex(startToken, poolB_addr);
-            uint256 sellPoolIndex = _getPoolIndex(startToken, poolA_addr);
-
-            lastTradeData = IDataStorage.TradeData({
-                tokenA: startToken,
-                tokenB: intermediateToken,
-                buyPool: poolB_addr,
-                sellPool: poolA_addr,
-                buyPoolIndex: buyPoolIndex,
-                sellPoolIndex: sellPoolIndex,
-                totalAmountSwapped: totalAmountSwapped,
-                profit: uint256(cumulativeProfit),
-                iterations: iterations,
-                timestamp: block.timestamp
-            });
-        }
-        return (true, cumulativeProfit, iterations);
     }
 
-    // Inlined version of executeIterativeArb to avoid external call overhead
-    function _executeIterativeArbInline(
-        address poolA_addr,
-        address poolB_addr,
+    /// @notice Preserves the legacy hook ABI while routing the heavy execution
+    ///         code through the delegatecalled executor.
+    function executeIterativeArb(
+        address poolA,
+        address poolB,
         address startToken,
         address intermediateToken,
         uint256 maxIterations,
         ArbUtils.PoolType poolAType,
         ArbUtils.PoolType poolBType
-    )
-        internal
-        returns (bool success, int256 cumulativeProfit, uint256 iterations)
-    {
-        (success, cumulativeProfit, iterations) = executeIterativeArb(
-            poolA_addr,
-            poolB_addr,
-            startToken,
-            intermediateToken,
-            maxIterations,
-            poolAType,
-            poolBType
+    ) external returns (bool success, int256 cumulativeProfit, uint256 iterations) {
+        if (msg.sender != address(this)) revert ArbErrors.WrapperOnlySelf();
+        return abi.decode(
+            _delegateToExecutor(
+                abi.encodeWithSelector(
+                    IArbExecutor.executeIterativeArb.selector,
+                    poolA,
+                    poolB,
+                    startToken,
+                    intermediateToken,
+                    maxIterations,
+                    poolAType,
+                    poolBType
+                )
+            ),
+            (bool, int256, uint256)
         );
     }
 
-    // ----------------------- Swap helpers (V3/V2) --------------------------
-    function _executeSwapInternal_noBalanceCheck(
-        address poolAddress,
-        ArbUtils.PoolType poolType,
-        address tokenIn,
-        address tokenOut,
-        uint256 amountIn,
-        uint160 sqrtPriceLimitX96
-    ) private returns (bool success) {
-        if (tokenIn == tokenOut) revert ArbErrors.SwapTokensMustBeDifferent();
-
-        bool zeroForOne;
-        address poolToken0;
-        address poolToken1;
-        {
-            PoolMeta storage pm = poolMetaByAddr[poolAddress];
-            if (pm.exists) {
-                poolToken0 = pm.token0;
-                poolToken1 = pm.token1;
-            } else {
-                IUniswapV3Pool pool = IUniswapV3Pool(poolAddress);
-                poolToken0 = pool.token0();
-                poolToken1 = pool.token1();
+    function _delegateToExecutor(bytes memory callData) private returns (bytes memory result) {
+        (bool ok, bytes memory returndata) = address(arbExecutor).delegatecall(callData);
+        if (!ok) {
+            assembly ("memory-safe") {
+                revert(add(returndata, 0x20), mload(returndata))
             }
         }
-
-        if (tokenIn == poolToken0) {
-            if (tokenOut != poolToken1)
-                revert ArbErrors.SwapMismatchedTokens0To1();
-            zeroForOne = true;
-        } else if (tokenIn == poolToken1) {
-            if (tokenOut != poolToken0)
-                revert ArbErrors.SwapMismatchedTokens1To0();
-            zeroForOne = false;
-        } else {
-            revert ArbErrors.SwapInputTokenNotInPool();
-        }
-
-        bytes memory data = abi.encode(
-            tokenIn,
-            address(this),
-            amountIn,
-            poolAddress
-        );
-
-        // Assume approvals are set up front; avoid allowance SLOAD and branch
-
-        if (poolType == ArbUtils.PoolType.V3) {
-            try
-                IUniswapV3Pool(poolAddress).swap(
-                    address(this),
-                    zeroForOne,
-                    int256(amountIn),
-                    sqrtPriceLimitX96,
-                    data
-                )
-            returns (int256 amount0, int256 amount1) {
-                emit SwapExecuted(
-                    poolAddress,
-                    tokenIn,
-                    tokenOut,
-                    amountIn,
-                    uint256(zeroForOne ? -amount1 : -amount0)
-                );
-                success = true;
-            } catch {
-                success = false;
-            }
-        } else if (poolType == ArbUtils.PoolType.PANCAKESWAP_V3) {
-            try
-                IPancakeV3Pool(poolAddress).swap(
-                    address(this),
-                    zeroForOne,
-                    int256(amountIn),
-                    sqrtPriceLimitX96,
-                    data
-                )
-            returns (int256 amount0, int256 amount1) {
-                emit SwapExecuted(
-                    poolAddress,
-                    tokenIn,
-                    tokenOut,
-                    amountIn,
-                    uint256(zeroForOne ? -amount1 : -amount0)
-                );
-                success = true;
-            } catch {
-                success = false;
-            }
-        }
+        return returndata;
     }
 
     // ----------------------------- Callbacks -------------------------------
-    function uniswapV3SwapCallback(
-        int256 amount0Delta,
-        int256 amount1Delta,
-        bytes calldata data
-    ) external {
+    function uniswapV3SwapCallback(int256 amount0Delta, int256 amount1Delta, bytes calldata data) external {
         _v3SwapCallbackLogic(amount0Delta, amount1Delta, data);
     }
 
-    function pancakeV3SwapCallback(
-        int256 amount0Delta,
-        int256 amount1Delta,
-        bytes calldata data
-    ) external {
+    function pancakeV3SwapCallback(int256 amount0Delta, int256 amount1Delta, bytes calldata data) external {
         _v3SwapCallbackLogic(amount0Delta, amount1Delta, data);
     }
 
-    function _v3SwapCallbackLogic(
-        int256 amount0Delta,
-        int256 amount1Delta,
-        bytes calldata data
-    ) internal {
-        (
-            address decodedTokenIn,
-            address decodedCaller,
-            ,
-            address expectedPool
-        ) = abi.decode(data, (address, address, uint256, address));
+    function _v3SwapCallbackLogic(int256 amount0Delta, int256 amount1Delta, bytes calldata data) internal {
+        (address decodedTokenIn, address decodedCaller,, address expectedPool) =
+            abi.decode(data, (address, address, uint256, address));
 
         // Callback hardening:
         // - call must originate from this contract's initiated swap payload,
         // - caller must be the exact pool we encoded,
         // - pool must be registered in our pool book.
         if (decodedCaller != address(this)) {
-            revert ArbErrors.CallbackCallerMismatch(
-                decodedCaller,
-                address(this)
-            );
+            revert ArbErrors.CallbackCallerMismatch(decodedCaller, address(this));
         }
         if (msg.sender == tx.origin) {
             revert ArbErrors.CallbackCallerIsEOA();
@@ -1420,17 +381,14 @@ contract ArbHook is BaseHook, ArbUtils, Ownable, ReentrancyGuard {
 
         // Use cached pool metadata instead of fresh external reads.
         PoolMeta storage pm = poolMetaByAddr[pool];
-        if (!pm.exists)
+        if (!pm.exists) {
             revert ArbErrors.CallbackUnexpectedPool(pool, expectedPool);
+        }
         token0 = pm.token0;
         token1 = pm.token1;
 
         if (decodedTokenIn != token0 && decodedTokenIn != token1) {
-            revert ArbErrors.CallbackDecodedTokenNotInPool(
-                decodedTokenIn,
-                token0,
-                token1
-            );
+            revert ArbErrors.CallbackDecodedTokenNotInPool(decodedTokenIn, token0, token1);
         }
 
         uint256 amountToPay;
@@ -1448,122 +406,77 @@ contract ArbHook is BaseHook, ArbUtils, Ownable, ReentrancyGuard {
         }
 
         if (amountToPay > 0) {
-            bool ok = IERC20(tokenToPay).transfer(pool, amountToPay);
-            if (!ok) revert("ERC20 transfer failed");
+            if (!IERC20(tokenToPay).trySafeTransfer(pool, amountToPay)) {
+                revert ArbErrors.CallbackTransferFailed(tokenToPay, pool, amountToPay);
+            }
         }
     }
 
-    function uniswapV2Call(
-        address /*sender*/,
-        uint256 /*amount0*/,
-        uint256 /*amount1*/,
-        bytes calldata data
-    ) external {
-        (address tokenToPay, uint256 amountToPay) = abi.decode(
-            data,
-            (address, uint256)
-        );
-
-        IUniswapV2Pair pair = IUniswapV2Pair(msg.sender);
-        address t0 = pair.token0();
-        address t1 = pair.token1();
-        // Verify msg.sender is a canonical pair from one of the trusted factories.
-        address uniPair = V2_FACTORY.getPair(t0, t1);
-        address pcsPair = PANCAKESWAP_V2_FACTORY.getPair(t0, t1);
-        if (msg.sender != uniPair && msg.sender != pcsPair) {
-            revert ArbErrors.CallbackUnexpectedPool(msg.sender, address(0));
-        }
-        _requireRegisteredV2CallbackPool(msg.sender, t0, t1);
-        if (tokenToPay != t0 && tokenToPay != t1) {
-            revert ArbErrors.CallbackDecodedTokenNotInPool(tokenToPay, t0, t1);
-        }
-        if (amountToPay > 0) {
-            bool ok = IERC20(tokenToPay).transfer(msg.sender, amountToPay);
-            if (!ok) revert("ERC20 transfer failed");
-        }
+    function uniswapV2Call(address sender, uint256 amount0, uint256 amount1, bytes calldata data) external {
+        _v2SwapCallbackLogic(sender, amount0, amount1, data, ArbUtils.PoolType.V2);
     }
 
-    function pancakeCall(
-        address /*sender*/,
-        uint256 /*amount0*/,
-        uint256 /*amount1*/,
-        bytes calldata data
-    ) external {
-        (address tokenToPay, uint256 amountToPay) = abi.decode(
-            data,
-            (address, uint256)
-        );
+    function pancakeCall(address sender, uint256 amount0, uint256 amount1, bytes calldata data) external {
+        _v2SwapCallbackLogic(sender, amount0, amount1, data, ArbUtils.PoolType.PANCAKESWAP_V2);
+    }
 
-        IUniswapV2Pair pair = IUniswapV2Pair(msg.sender);
-        address t0 = pair.token0();
-        address t1 = pair.token1();
-        // Same factory and registration checks as uniswapV2Call; Pancake uses a distinct callback selector.
-        address uniPair = V2_FACTORY.getPair(t0, t1);
-        address pcsPair = PANCAKESWAP_V2_FACTORY.getPair(t0, t1);
-        if (msg.sender != uniPair && msg.sender != pcsPair) {
+    /// @dev Canonical V2 pairs call a user-selected `to` address. Verify both
+    ///      the pair's original caller and the one-shot context created by
+    ///      _executeV2FlashSwap before repaying anything from the treasury.
+    function _v2SwapCallbackLogic(
+        address sender,
+        uint256 amount0,
+        uint256 amount1,
+        bytes calldata data,
+        ArbUtils.PoolType expectedPoolType
+    ) private {
+        if (sender != address(this)) {
+            revert ArbErrors.CallbackCallerMismatch(sender, address(this));
+        }
+
+        PoolMeta storage pm = poolMetaByAddr[msg.sender];
+        if (!pm.exists || pm.poolType != expectedPoolType) {
             revert ArbErrors.CallbackUnexpectedPool(msg.sender, address(0));
         }
-        _requireRegisteredV2CallbackPool(msg.sender, t0, t1);
-        if (tokenToPay != t0 && tokenToPay != t1) {
-            revert ArbErrors.CallbackDecodedTokenNotInPool(tokenToPay, t0, t1);
+
+        (address tokenToPay, uint256 amountToPay) = abi.decode(data, (address, uint256));
+
+        bytes32 expectedContext =
+            _v2SwapContextHash(msg.sender, expectedPoolType, tokenToPay, amountToPay, amount0, amount1);
+        if (activeV2SwapContext == bytes32(0) || activeV2SwapContext != expectedContext) {
+            revert ArbErrors.V2CallbackContextMismatch();
         }
-        if (amountToPay > 0) {
-            IERC20(tokenToPay).safeTransfer(msg.sender, amountToPay);
+
+        address canonicalPair = expectedPoolType == ArbUtils.PoolType.V2
+            ? V2_FACTORY.getPair(pm.token0, pm.token1)
+            : PANCAKESWAP_V2_FACTORY.getPair(pm.token0, pm.token1);
+        if (msg.sender != canonicalPair) {
+            revert ArbErrors.CallbackUnexpectedPool(msg.sender, canonicalPair);
         }
+
+        // Consume before the external token call. A malicious token cannot
+        // replay the still-active context during transfer reentrancy.
+        delete activeV2SwapContext;
+        IERC20(tokenToPay).safeTransfer(msg.sender, amountToPay);
     }
 
     // ----------------------- Internal helpers ------------------------------
-    function _findPoolInBook(
-        address token,
-        address poolAddr
-    ) internal view returns (ArbUtils.PoolInfo memory poolInfo, bool found) {
-        ArbUtils.PoolInfo[] storage pools = tokenPools[token];
-        uint256 numPools = pools.length;
-        for (uint256 i = 0; i < numPools; i++) {
-            if (pools[i].poolAddress == poolAddr) {
-                return (pools[i], true);
-            }
+    function _poolKeyHash(PoolKey calldata key) private pure returns (bytes32) {
+        return keccak256(abi.encode(key.currency0, key.currency1, key.fee, key.tickSpacing, key.hooks));
+    }
+
+    function _releasePoolMeta(address pool) private {
+        uint256 registrations = poolRegistrationCount[pool];
+        if (registrations <= 1) {
+            // `registrations == 0` is retained as a safe fallback for state
+            // created before reference counts existed.
+            delete poolRegistrationCount[pool];
+            delete poolMetaByAddr[pool];
+            return;
         }
-        return (poolInfo, false);
-    }
 
-    function _getPoolIndex(
-        address token,
-        address poolAddr
-    ) internal view returns (uint256) {
-        ArbUtils.PoolInfo[] storage pools = tokenPools[token];
-        uint256 numPools = pools.length;
-        for (uint256 i = 0; i < numPools; i++) {
-            if (pools[i].poolAddress == poolAddr) {
-                return i;
-            }
-        }
-        return type(uint256).max;
-    }
-
-    function _v2FeeForPoolType(
-        ArbUtils.PoolType poolType
-    ) private pure returns (uint24) {
-        return
-            poolType == ArbUtils.PoolType.PANCAKESWAP_V2
-                ? PANCAKESWAP_V2_POOL_FEE_PPM
-                : V2_POOL_FEE_PPM;
-    }
-
-    function _requireRegisteredV2CallbackPool(
-        address pool,
-        address token0,
-        address token1
-    ) private view {
-        PoolMeta storage pm = poolMetaByAddr[pool];
-        if (
-            !pm.exists ||
-            (pm.poolType != ArbUtils.PoolType.V2 &&
-                pm.poolType != ArbUtils.PoolType.PANCAKESWAP_V2) ||
-            pm.token0 != token0 ||
-            pm.token1 != token1
-        ) {
-            revert ArbErrors.CallbackUnexpectedPool(pool, address(0));
+        unchecked {
+            poolRegistrationCount[pool] = registrations - 1;
         }
     }
 
@@ -1571,13 +484,12 @@ contract ArbHook is BaseHook, ArbUtils, Ownable, ReentrancyGuard {
     receive() external payable {}
 
     function removeEth() external onlyOwner {
-        payable(msg.sender).transfer(address(this).balance);
+        uint256 amount = address(this).balance;
+        (bool ok,) = payable(msg.sender).call{value: amount}("");
+        if (!ok) revert ArbErrors.ETHWithdrawalFailed(msg.sender, amount);
     }
 
     function removeTokens(address token) external onlyOwner {
-        IERC20(token).transfer(
-            msg.sender,
-            IERC20(token).balanceOf(address(this))
-        );
+        IERC20(token).safeTransfer(msg.sender, IERC20(token).balanceOf(address(this)));
     }
 }

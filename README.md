@@ -10,6 +10,36 @@ If yes, it executes atomically inside the same transaction. If not, it does noth
 
 The current implementation executes arbitrage from hook callbacks only. There is no manual owner-triggered `attemptAll` entrypoint in `ArbHook`.
 
+## Deployment Architecture
+
+`ArbHook` is intentionally a small V4-facing shell. Its immutable `ArbExecutor`
+implementation performs discovery and execution through `delegatecall`, so state,
+inventory, approvals, callbacks, and `DataStorage` authorization all remain at the
+hook address. This keeps every deployable runtime below the EIP-170 24,576-byte
+limit while preserving the existing hook entrypoints.
+
+This is a fresh-deployment architecture, not an upgrade path: deploy
+`ArbitrageLogic`, `DataStorage`, and `ArbExecutor`, then mine and deploy the
+five-argument hook constructor. The hook must be mined for exactly
+`Hooks.AFTER_SWAP_FLAG`, and `DataStorage.setWriter` must target the hook—not the
+executor.
+
+`ArbMath` is an externally linked library. The documented `forge script` command
+automatically deploys and links it; do not deploy raw, unlinked artifacts by hand.
+
+Use the included Foundry script for a production deployment:
+
+```bash
+PRIVATE_KEY=... V4_POOL_MANAGER=... \
+  forge script script/DeployArbHook.s.sol:DeployArbHook \
+  --rpc-url "$BASE_RPC_URL" --broadcast --always-use-create-2-factory
+```
+
+The script verifies the canonical CREATE2 factory, mines using the exact
+constructor arguments, verifies the deployed hook address, and authorizes it as
+the trade-data writer. `ARB_HOOK_OWNER` is optional, but when provided it must be
+the broadcasting account.
+
 ## Big Picture
 
 Instead of constantly scanning markets or competing in gas wars, we wait for real trades to happen and then ask:
@@ -29,7 +59,8 @@ There is still required operator setup off-chain: pool registration, approvals, 
 The main runtime knobs are owner-settable on `ArbHook`:
 
 - `setHookMaxIterations(uint256)`  
-  Limits how many iterative chunks can execute in one trigger.
+  Limits how many iterative chunks can execute in one trigger (0 disables hook
+  execution; the production cap is 10).
   Higher values can capture more residual spread, but increase gas and can over-trade into diminishing returns.
   Lower values are safer/cheaper but may leave profit on the table.
 
@@ -43,12 +74,19 @@ The main runtime knobs are owner-settable on `ArbHook`:
   Lower values are more conservative (more, smaller chunks; less impact risk).
 
 - `setMaxImpactBps(uint256)`  
-  Maximum estimated price impact allowed for guarded paths before skipping.
-  This prevents trading when impact is likely to destroy expected edge.
+  Maximum estimated price impact allowed for guarded V2-to-V3 paths before
+  skipping. V3-to-V3 sizing uses bounded price-limit windows and realized P&L
+  checks instead, because a coarse current-range estimate can incorrectly reject
+  a route that crosses an initialized tick.
 
 - `setMinProfitToEmit(uint256)`  
   Minimum cumulative profit required before emitting/storing trade data.
   Unit is raw `tokenA` units (not 1e18 normalized).
+
+- `setHookPoolEnabled(PoolKey,bool)`
+  Opts a specific V4 pool key into callback-driven arbitrage. Unlisted pools
+  always receive a no-op `afterSwap` response, so registering a hook address on a
+  pool cannot accidentally enable costly execution.
 
 ### Parity Test Profile (Current)
 
@@ -125,11 +163,29 @@ Why these values are used for parity:
 
 The parity suite in `foundry/test/ArbHookParity.t.sol` is a regression target against a **previous non-hook arbitrage implementation**, not a comparison between two hook designs.
 
-The expected behavior is defined by the legacy reference artifacts in `ParityTest/`:
-- `ParityTest/ArbLightweight.sol` (original non-hook contract)
-- `ParityTest/ArbLightweight.attemptAll.js` (legacy harness logic)
-- `ParityTest/attemptAllOutput.txt` (golden per-round pool/profit sequence)
+The expected behavior is defined by legacy reference artifacts in the external
+arb-bot project's `ExampleTests/` directory:
+
+- `ExampleTests/ArbLightweight.sol` (original non-hook contract)
+- `ExampleTests/ArbLightweight.attemptAll.js` (legacy harness logic)
+- `ExampleTests/attemptAllOutput.txt` (golden per-round pool/profit sequence)
 
 Legacy comments that referred to a "worker bot" or "worker deployment" were describing that earlier non-hook implementation.
 
 The purpose of the parity test is to confirm the current Uniswap v4 hook path reproduces that same outcome sequence and total profit profile, including per-round buy/sell pool choices and profit values.
+
+## Local Verification
+
+```bash
+npm ci --ignore-scripts
+forge build --sizes
+forge test -vvv
+```
+
+The fork-parity suite automatically skips when `BASE_RPC_URL` is absent; run it
+explicitly with an archive-capable Base endpoint when validating the golden
+round-by-round output:
+
+```bash
+BASE_RPC_URL=... forge test --match-contract ArbHookParityTest -vv
+```
