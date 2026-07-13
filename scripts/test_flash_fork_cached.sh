@@ -14,6 +14,9 @@ ANVIL_PORT="${ANVIL_PORT:-8546}"
 CACHE_PATH="${ANVIL_CACHE_PATH:-${ROOT_DIR}/.anvil-cache/base-${FORK_BLOCK}}"
 ANVIL_LOG_PATH="${ANVIL_LOG_PATH:-${ROOT_DIR}/.anvil-cache/anvil-${FORK_BLOCK}.log}"
 LOCAL_RPC_URL="http://${ANVIL_HOST}:${ANVIL_PORT}"
+ANVIL_QUIET="${ANVIL_QUIET:-1}"
+ANVIL_NO_RATE_LIMIT="${ANVIL_NO_RATE_LIMIT:-1}"
+ANVIL_CUPS="${ANVIL_CUPS:-5000}"
 
 mkdir -p "${CACHE_PATH}"
 
@@ -39,14 +42,25 @@ if rpc_ready; then
   echo "Using existing anvil at ${LOCAL_RPC_URL}"
 else
   echo "Starting cached anvil at ${LOCAL_RPC_URL} (log: ${ANVIL_LOG_PATH})"
-  anvil \
-    --fork-url "${BASE_RPC_URL}" \
-    --fork-block-number "${FORK_BLOCK}" \
-    --fork-chain-id 8453 \
-    --host "${ANVIL_HOST}" \
-    --port "${ANVIL_PORT}" \
-    --cache-path "${CACHE_PATH}" \
-    >"${ANVIL_LOG_PATH}" 2>&1 &
+  anvil_args=(
+    --fork-url "${BASE_RPC_URL}"
+    --fork-block-number "${FORK_BLOCK}"
+    --fork-chain-id 8453
+    --host "${ANVIL_HOST}"
+    --port "${ANVIL_PORT}"
+    --cache-path "${CACHE_PATH}"
+  )
+  if [[ "${ANVIL_QUIET}" == "1" ]]; then
+    anvil_args+=(--quiet)
+  fi
+  if [[ "${ANVIL_NO_RATE_LIMIT}" == "1" ]]; then
+    anvil_args+=(--no-rate-limit)
+  fi
+  if [[ -n "${ANVIL_CUPS}" ]]; then
+    anvil_args+=(--compute-units-per-second "${ANVIL_CUPS}")
+  fi
+
+  anvil "${anvil_args[@]}" >"${ANVIL_LOG_PATH}" 2>&1 &
   anvil_pid="$!"
   anvil_started_by_script=1
 

@@ -125,6 +125,7 @@ contract ArbHookFlashForkAaveTest is Test {
     uint256 internal constant PARITY_MAX_ITER = 2;
     uint256 internal constant PARITY_FLASH_CAP_USDC = 100_000e6;
     uint256 internal constant PARITY_ROUNDS = 10;
+    uint256 internal constant PARITY_ROUNDS_SMOKE = 3;
     bytes32 internal constant FLASH_REQUESTED_TOPIC0 =
         keccak256("FlashLoanRequested(address,address,uint256,address)");
 
@@ -308,7 +309,19 @@ contract ArbHookFlashForkAaveTest is Test {
     }
 
     function testForkAaveAttemptAllTracksLegacyRoundSequenceShape() public {
+        _runLegacyRoundSequence(PARITY_ROUNDS, true);
+    }
+
+    function testForkAaveAttemptAllTracksLegacyRoundSequenceShapeFirst3() public {
+        _runLegacyRoundSequence(PARITY_ROUNDS_SMOKE, false);
+    }
+
+    function _runLegacyRoundSequence(
+        uint256 roundsToRun,
+        bool requirePrincipalVariance
+    ) private {
         if (!forkEnabled) return;
+        assertLe(roundsToRun, PARITY_ROUNDS, "round cap exceeds legacy sequence");
 
         _configureParityPoolBook();
         _replicateParityFundingState();
@@ -325,7 +338,7 @@ contract ArbHookFlashForkAaveTest is Test {
         bool sawPrincipalVariance;
 
         emit log("===== Flash AttemptAll vs Legacy Round Sequence =====");
-        for (uint256 round = 0; round < PARITY_ROUNDS; ++round) {
+        for (uint256 round = 0; round < roundsToRun; ++round) {
             vm.recordLogs();
             bool success = hook.attemptAllForTest(PARITY_MAX_ITER);
             assertTrue(success, "legacy-profitable round should remain profitable");
@@ -367,9 +380,11 @@ contract ArbHookFlashForkAaveTest is Test {
         emit log_named_uint("route matches vs legacy", routeMatches);
         emit log("====================================================");
 
-        assertEq(profitableRounds, PARITY_ROUNDS, "all legacy-profitable rounds should stay profitable");
+        assertEq(profitableRounds, roundsToRun, "all tested rounds should remain profitable");
         assertGt(routeMatches, 0, "expected at least some route alignment with legacy order");
-        assertTrue(sawPrincipalVariance, "flash principal should adapt across rounds");
+        if (requirePrincipalVariance && roundsToRun > 1) {
+            assertTrue(sawPrincipalVariance, "flash principal should adapt across rounds");
+        }
     }
 
     function _configureParityPoolBook() private {
