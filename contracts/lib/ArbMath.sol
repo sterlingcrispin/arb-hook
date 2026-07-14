@@ -37,24 +37,45 @@ library ArbMath {
     {
         if (sqrtPriceX96 == 0) return 0;
 
-        uint256 amountIn = _pow10(aIsToken0 ? dec0 : dec1);
-        if (amountIn == 0) return 0;
+        // Keep 128 fractional bits until after decimal normalization. Quoting
+        // one whole token in raw units first loses every price below one raw
+        // output unit (for example, a sub-micro-USDC token).
+        uint256 q128 = uint256(1) << 128;
+        uint256 ratioX128 = FullMath.mulDiv(sqrtPriceX96, sqrtPriceX96, uint256(1) << 64);
+        if (ratioX128 == 0) return 0;
 
-        uint256 amountOut;
-        uint256 sqrtP = uint256(sqrtPriceX96);
-        if (sqrtPriceX96 <= type(uint128).max) {
-            uint256 ratioX192 = sqrtP * sqrtP;
-            amountOut = aIsToken0
-                ? _mulDivOrZero(ratioX192, amountIn, uint256(1) << 192)
-                : _mulDivOrZero(uint256(1) << 192, amountIn, ratioX192);
-        } else {
-            uint256 ratioX128 = FullMath.mulDiv(sqrtP, sqrtP, uint256(1) << 64);
-            amountOut = aIsToken0
-                ? _mulDivOrZero(ratioX128, amountIn, uint256(1) << 128)
-                : _mulDivOrZero(uint256(1) << 128, amountIn, ratioX128);
+        return aIsToken0
+            ? _rawRatioToPrice1e18(ratioX128, q128, dec0, dec1)
+            : _rawRatioToPrice1e18(q128, ratioX128, dec1, dec0);
+    }
+
+    /// @dev Converts a raw-unit ratio (numerator / denominator) to whole-token
+    ///      price scaled by 1e18 without first rounding to a raw output unit.
+    function _rawRatioToPrice1e18(
+        uint256 numerator,
+        uint256 denominator,
+        uint8 inputTokenDecimals,
+        uint8 outputTokenDecimals
+    ) internal pure returns (uint256) {
+        if (
+            numerator == 0 || denominator == 0 || inputTokenDecimals > MAX_SAFE_TOKEN_DECIMALS
+                || outputTokenDecimals > MAX_SAFE_TOKEN_DECIMALS
+        ) return 0;
+
+        int256 decimalExponent = int256(uint256(inputTokenDecimals)) + 18 - int256(uint256(outputTokenDecimals));
+        if (decimalExponent >= 0) {
+            uint256 exponent = uint256(decimalExponent);
+            if (exponent > MAX_SAFE_TOKEN_DECIMALS) return 0;
+            return _mulDivOrZero(numerator, _pow10(uint8(exponent)), denominator);
         }
 
-        return _scaleRawAmountTo1e18(amountOut, aIsToken0 ? dec1 : dec0);
+        uint256 divisorExponent = uint256(-decimalExponent);
+        if (divisorExponent > MAX_SAFE_TOKEN_DECIMALS) return 0;
+        uint256 decimalDivisor = _pow10(uint8(divisorExponent));
+        // If the combined denominator is not representable, it is larger than
+        // the numerator and the correctly floored uint256 quote is zero.
+        if (denominator > type(uint256).max / decimalDivisor) return 0;
+        return numerator / (denominator * decimalDivisor);
     }
 
     function _pow10(uint8 decimals) internal pure returns (uint256) {
@@ -393,6 +414,7 @@ library ArbMath {
         returns (uint256)
     {
         if (dx == 0) return 0;
+        if (dx > uint256(type(int256).max)) return type(uint256).max;
         IUniswapV3Pool v3Pool = IUniswapV3Pool(pool);
         uint160 sqrtP;
         int24 currentTick;
@@ -411,7 +433,9 @@ library ArbMath {
                 return type(uint256).max;
             }
         }
-        if (sqrtP == 0) return type(uint256).max;
+        if (sqrtP < TickMath.MIN_SQRT_RATIO || sqrtP >= TickMath.MAX_SQRT_RATIO) {
+            return type(uint256).max;
+        }
         address t0;
         address t1;
         try v3Pool.token0() returns (address token0) {
@@ -438,33 +462,74 @@ library ArbMath {
         } catch {
             return type(uint256).max;
         }
-        if (tickSpacing <= 0) return type(uint256).max;
+        if (tickSpacing <= 0 || currentTick < TickMath.MIN_TICK || currentTick > TickMath.MAX_TICK) {
+            return type(uint256).max;
+        }
+        uint24 feePips;
+        try v3Pool.fee() returns (uint24 fee) {
+            feePips = fee;
+        } catch {
+            return type(uint256).max;
+        }
+        if (feePips >= 1_000_000) return type(uint256).max;
         bool zeroForOne = tokenIn == t0;
         if ((zeroForOne && currentTick <= TickMath.MIN_TICK) || (!zeroForOne && currentTick >= TickMath.MAX_TICK)) {
             return type(uint256).max;
         }
-        (int24 nextTick, bool initialized) =
-            _nextInitializedTickWithinOneWordInternal(v3Pool, currentTick, tickSpacing, zeroForOne);
-        // At an initialized tick, a zero-for-one swap crosses that tick
-        // before consuming input. Measure the first non-zero liquidity range
-        // instead of treating its zero-width boundary as infinite impact.
-        if (nextTick == currentTick) {
-            if (!initialized) return type(uint256).max;
-            (uint128 crossedLiquidity, bool crossed) = _crossInitializedTick(v3Pool, nextTick, liquidity, zeroForOne);
-            if (!crossed || crossedLiquidity == 0) {
+
+        uint160 sqrtStart = sqrtP;
+        uint256 amountRemaining = dx;
+        for (uint8 step; step < MAX_CAPACITY_STEPS && amountRemaining != 0; ++step) {
+            int24 tickBefore = currentTick;
+            uint160 sqrtBefore = sqrtP;
+            (int24 nextTick, bool initialized) =
+                _nextInitializedTickWithinOneWordInternal(v3Pool, currentTick, tickSpacing, zeroForOne);
+            uint160 sqrtNextTick = TickMath.getSqrtRatioAtTick(nextTick);
+
+            (uint160 sqrtAfter, uint256 amountIn,, uint256 feeAmount) =
+                SwapMath.computeSwapStep(sqrtP, sqrtNextTick, liquidity, int256(amountRemaining), feePips);
+            if (amountIn > type(uint256).max - feeAmount) return type(uint256).max;
+            uint256 consumed = amountIn + feeAmount;
+            if (consumed > amountRemaining) return type(uint256).max;
+            amountRemaining -= consumed;
+            sqrtP = sqrtAfter;
+
+            if (sqrtP == sqrtNextTick) {
+                if (initialized) {
+                    bool crossed;
+                    (liquidity, crossed) = _crossInitializedTick(v3Pool, nextTick, liquidity, zeroForOne);
+                    if (!crossed || liquidity == 0) return type(uint256).max;
+                }
+                currentTick = _tickAfterCrossing(nextTick, zeroForOne);
+            } else if (sqrtP != sqrtBefore) {
+                currentTick = TickMath.getTickAtSqrtRatio(sqrtP);
+            }
+
+            // A malformed/nonstandard pool must not make the bounded quote
+            // loop spin and return an understated policy value.
+            if (consumed == 0 && sqrtP == sqrtBefore && currentTick == tickBefore) {
                 return type(uint256).max;
             }
-            liquidity = crossedLiquidity;
-            currentTick = _tickAfterCrossing(nextTick, zeroForOne);
-            (nextTick,) = _nextInitializedTickWithinOneWordInternal(v3Pool, currentTick, tickSpacing, zeroForOne);
         }
-        uint160 sqrtPNextTick = TickMath.getSqrtRatioAtTick(nextTick);
-        if ((zeroForOne && sqrtPNextTick >= sqrtP) || (!zeroForOne && sqrtPNextTick <= sqrtP)) {
-            return type(uint256).max;
+        if (amountRemaining != 0) return type(uint256).max;
+        return _priceMovementBps(sqrtStart, sqrtP, zeroForOne);
+    }
+
+    function _priceMovementBps(uint160 sqrtBefore, uint160 sqrtAfter, bool zeroForOne) private pure returns (uint256) {
+        uint256 q128 = uint256(1) << 128;
+        if (zeroForOne) {
+            if (sqrtAfter >= sqrtBefore) return 0;
+            uint256 decreasingSqrtX128 = FullMath.mulDiv(sqrtAfter, q128, sqrtBefore);
+            uint256 decreasingPriceX128 = FullMath.mulDiv(decreasingSqrtX128, decreasingSqrtX128, q128);
+            return _mulDivRoundingUpOrMax(q128 - decreasingPriceX128, 10_000, q128);
         }
-        (uint256 amountInToBoundary,) = _deltaAmounts(zeroForOne, sqrtP, sqrtPNextTick, liquidity);
-        if (amountInToBoundary == 0) return type(uint256).max;
-        return _mulDivRoundingUpOrMax(dx, 10_000, amountInToBoundary);
+
+        if (sqrtAfter <= sqrtBefore) return 0;
+        uint256 relativeSqrtX128 = _mulDivRoundingUpOrMax(sqrtAfter, q128, sqrtBefore);
+        if (relativeSqrtX128 == type(uint256).max) return type(uint256).max;
+        uint256 relativePriceX128 = _mulDivRoundingUpOrMax(relativeSqrtX128, relativeSqrtX128, q128);
+        if (relativePriceX128 == type(uint256).max) return type(uint256).max;
+        return _mulDivRoundingUpOrMax(relativePriceX128 - q128, 10_000, q128);
     }
 
     /// @dev Uses SwapMath.computeSwapStep and initialized tick liquidity.
@@ -476,7 +541,11 @@ library ArbMath {
         int24 tick,
         uint128 liquidity
     ) external view returns (uint256 inCap) {
-        if (liquidity == 0 || sqrtP == 0 || sqrtLimit == 0) return 0;
+        if (
+            liquidity == 0 || sqrtP < TickMath.MIN_SQRT_RATIO || sqrtP >= TickMath.MAX_SQRT_RATIO
+                || sqrtLimit < TickMath.MIN_SQRT_RATIO || sqrtLimit > TickMath.MAX_SQRT_RATIO
+                || tick < TickMath.MIN_TICK || tick > TickMath.MAX_TICK
+        ) return 0;
         if ((zeroForOne && sqrtLimit >= sqrtP) || (!zeroForOne && sqrtLimit <= sqrtP)) return 0;
         IUniswapV3Pool pool = IUniswapV3Pool(poolAddr);
         uint24 feePips;
@@ -493,6 +562,20 @@ library ArbMath {
             return 0;
         }
         if (tickSpacing <= 0) return 0;
+
+        // A zero-for-one swap whose slot0 price is exactly an initialized
+        // current tick crosses that boundary before consuming any input. The
+        // strict-next-tick cadence below would otherwise size the first range
+        // using the pre-cross liquidity.
+        if (zeroForOne && sqrtP == TickMath.getSqrtRatioAtTick(tick)) {
+            (int24 boundaryTick, bool initialized) =
+                _nextInitializedTickWithinOneWordInternal(pool, tick, tickSpacing, true);
+            if (initialized && boundaryTick == tick) {
+                bool crossed;
+                (liquidity, crossed) = _crossInitializedTick(pool, tick, liquidity, true);
+                if (!crossed || liquidity == 0) return 0;
+            }
+        }
 
         for (uint8 step; step < MAX_CAPACITY_STEPS && sqrtP != sqrtLimit; ++step) {
             // Preserve the sizing cadence used by the reference executor:
