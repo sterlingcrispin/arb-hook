@@ -56,6 +56,7 @@ contract ArbHook is BaseHook, ArbExecutionStorage, Ownable, ReentrancyGuard {
     event AttemptAllFailed(bytes revertData);
     event HookAttemptAll(uint256 iterations, bool callSuccess, bool tradeProfitable);
     event HookPoolEnabled(bytes32 indexed poolKeyHash, bool enabled);
+    event MaxFlashTradeAmountSet(address indexed token, uint256 amount);
 
     function _afterSwap(address, PoolKey calldata key, SwapParams calldata, BalanceDelta, bytes calldata)
         internal
@@ -162,6 +163,14 @@ contract ArbHook is BaseHook, ArbExecutionStorage, Ownable, ReentrancyGuard {
 
     function setMinProfitToEmit(uint256 newMinProfit) external onlyOwner {
         minProfitToEmit = newMinProfit;
+    }
+
+    /// @notice Enables pool-native flash settlement for a start token and caps
+    ///         the virtual inventory used by the sizing logic. Set to zero to
+    ///         retain the legacy treasury-funded path.
+    function setMaxFlashTradeAmount(address token, uint256 amount) external onlyOwner {
+        maxFlashTradeAmount[token] = amount;
+        emit MaxFlashTradeAmountSet(token, amount);
     }
 
     function setHookMaxIterations(uint256 newMaxIterations) external onlyOwner {
@@ -370,8 +379,13 @@ contract ArbHook is BaseHook, ArbExecutionStorage, Ownable, ReentrancyGuard {
         ArbUtils.PoolType expectedPoolType,
         bytes4 expectedCallbackSelector
     ) internal {
-        (address decodedTokenIn, address decodedCaller, uint256 maximumAmountIn, address expectedPool) =
-            abi.decode(data, (address, address, uint256, address));
+        (
+            address decodedTokenIn,
+            address decodedCaller,
+            uint256 maximumAmountIn,
+            address expectedPool,
+            FlashSecondLeg memory secondLeg
+        ) = abi.decode(data, (address, address, uint256, address, FlashSecondLeg));
 
         // Callback hardening:
         // - call must originate from this contract's initiated swap payload,
@@ -405,7 +419,13 @@ contract ArbHook is BaseHook, ArbExecutionStorage, Ownable, ReentrancyGuard {
 
         bool zeroForOne = decodedTokenIn == token0;
         bytes32 expectedContext = _v3SwapContextHash(
-            pool, expectedPoolType, expectedCallbackSelector, decodedTokenIn, zeroForOne, maximumAmountIn
+            pool,
+            expectedPoolType,
+            expectedCallbackSelector,
+            decodedTokenIn,
+            zeroForOne,
+            maximumAmountIn,
+            keccak256(data)
         );
         if (activeV3SwapContext == bytes32(0) || activeV3SwapContext != expectedContext) {
             revert ArbErrors.V3CallbackContextMismatch();
@@ -432,6 +452,17 @@ contract ArbHook is BaseHook, ArbExecutionStorage, Ownable, ReentrancyGuard {
         // Consume before the external token call. A reentrant token or pool
         // cannot replay the capability while repayment is in progress.
         delete activeV3SwapContext;
+
+        if (secondLeg.pool != address(0)) {
+            int256 outputDelta = zeroForOne ? amount1Delta : amount0Delta;
+            if (outputDelta >= 0 || outputDelta == type(int256).min) {
+                revert ArbErrors.AtomicArbitrageExecutionFailed();
+            }
+            _settleFlashSecondLeg(
+                secondLeg, pool, zeroForOne ? token1 : token0, tokenToPay, uint256(-outputDelta), amountToPay
+            );
+        }
+
         if (!IERC20(tokenToPay).trySafeTransfer(pool, amountToPay)) {
             revert ArbErrors.CallbackTransferFailed(tokenToPay, pool, amountToPay);
         }
@@ -447,7 +478,7 @@ contract ArbHook is BaseHook, ArbExecutionStorage, Ownable, ReentrancyGuard {
 
     /// @dev Canonical V2 pairs call a user-selected `to` address. Verify both
     ///      the pair's original caller and the one-shot context created by
-    ///      _executeV2FlashSwap before repaying anything from the treasury.
+    ///      _executeV2FlashSwap before settling the initiating pool.
     function _v2SwapCallbackLogic(
         address sender,
         uint256 amount0,
@@ -464,10 +495,12 @@ contract ArbHook is BaseHook, ArbExecutionStorage, Ownable, ReentrancyGuard {
             revert ArbErrors.CallbackUnexpectedPool(msg.sender, address(0));
         }
 
-        (address tokenToPay, uint256 amountToPay) = abi.decode(data, (address, uint256));
+        (address tokenToPay, uint256 amountToPay, FlashSecondLeg memory secondLeg) =
+            abi.decode(data, (address, uint256, FlashSecondLeg));
 
-        bytes32 expectedContext =
-            _v2SwapContextHash(msg.sender, expectedPoolType, tokenToPay, amountToPay, amount0, amount1);
+        bytes32 expectedContext = _v2SwapContextHash(
+            msg.sender, expectedPoolType, tokenToPay, amountToPay, amount0, amount1, keccak256(data)
+        );
         if (activeV2SwapContext == bytes32(0) || activeV2SwapContext != expectedContext) {
             revert ArbErrors.V2CallbackContextMismatch();
         }
@@ -482,7 +515,52 @@ contract ArbHook is BaseHook, ArbExecutionStorage, Ownable, ReentrancyGuard {
         // Consume before the external token call. A malicious token cannot
         // replay the still-active context during transfer reentrancy.
         delete activeV2SwapContext;
+
+        if (secondLeg.pool != address(0)) {
+            address tokenReceived;
+            uint256 amountReceived;
+            if (tokenToPay == pm.token0 && amount0 == 0) {
+                tokenReceived = pm.token1;
+                amountReceived = amount1;
+            } else if (tokenToPay == pm.token1 && amount1 == 0) {
+                tokenReceived = pm.token0;
+                amountReceived = amount0;
+            } else {
+                revert ArbErrors.AtomicArbitrageExecutionFailed();
+            }
+            _settleFlashSecondLeg(secondLeg, msg.sender, tokenReceived, tokenToPay, amountReceived, amountToPay);
+        }
+
         IERC20(tokenToPay).safeTransfer(msg.sender, amountToPay);
+    }
+
+    /// @dev Execute the reverse swap while the first pool is waiting for
+    ///      payment, then prove that leg alone returned enough to repay it.
+    function _settleFlashSecondLeg(
+        FlashSecondLeg memory secondLeg,
+        address firstPool,
+        address tokenIn,
+        address tokenOut,
+        uint256 amountIn,
+        uint256 amountOwed
+    ) private {
+        if (secondLeg.pool == firstPool) revert ArbErrors.AtomicArbitrageExecutionFailed();
+
+        uint256 amountOut = abi.decode(
+            _delegateToExecutor(
+                abi.encodeWithSelector(
+                    IArbExecutor.executeFlashSecondLeg.selector,
+                    secondLeg.pool,
+                    secondLeg.poolType,
+                    tokenIn,
+                    tokenOut,
+                    amountIn,
+                    secondLeg.sqrtPriceLimitX96
+                )
+            ),
+            (uint256)
+        );
+        if (amountOut <= amountOwed) revert ArbErrors.FlashSecondLegUnprofitable(amountOut, amountOwed);
     }
 
     // ----------------------- Internal helpers ------------------------------

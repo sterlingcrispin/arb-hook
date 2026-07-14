@@ -71,4 +71,6 @@ library ArbErrors {
     error V3CallbackAmountExceedsMaximum(uint256 amountToPay, uint256 maximumAmount);
     error ExecutorOnlyDelegateCall();
     error ExecutorAddressInvalid();
+    error FlashSecondLegUnprofitable(uint256 amountOut, uint256 amountOwed);
+    error FlashSecondLegInputNotFullyConsumed(uint256 expected, uint256 consumed);
 }

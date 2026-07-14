@@ -18,4 +18,15 @@ interface IArbExecutor {
         ArbUtils.PoolType poolAType,
         ArbUtils.PoolType poolBType
     ) external returns (bool success, int256 cumulativeProfit, uint256 iterations);
+
+    /// @notice Completes the reverse leg while the initiating pool is waiting
+    ///         for repayment in its synchronous swap callback.
+    function executeFlashSecondLeg(
+        address pool,
+        ArbUtils.PoolType poolType,
+        address tokenIn,
+        address tokenOut,
+        uint256 amountIn,
+        uint160 sqrtPriceLimitX96
+    ) external returns (uint256 amountOut);
 }

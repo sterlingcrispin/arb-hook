@@ -4,6 +4,7 @@ pragma solidity ^0.8.20;
 import {Test} from "forge-std/Test.sol";
 
 import {ArbHookHarness} from "../../contracts/test/ArbHookHarness.sol";
+import {ArbExecutionStorage} from "../../contracts/ArbExecutionStorage.sol";
 import {ArbitrageLogic} from "../../contracts/ArbitrageLogic.sol";
 import {ArbExecutor} from "../../contracts/ArbExecutor.sol";
 import {DataStorage} from "../../contracts/DataStorage.sol";
@@ -176,7 +177,7 @@ contract ArbHookSecurityRegressionTest is Test {
 
         vm.expectRevert(ArbErrors.V2CallbackContextMismatch.selector);
         vm.prank(address(pair));
-        hook.uniswapV2Call(address(hook), 1, 0, abi.encode(address(token0), theftAmount));
+        hook.uniswapV2Call(address(hook), 1, 0, _v2CallbackData(address(token0), theftAmount));
 
         assertEq(
             token0.balanceOf(address(hook)), theftAmount, "an unsolicited V2 callback must not transfer treasury funds"
@@ -191,7 +192,7 @@ contract ArbHookSecurityRegressionTest is Test {
 
         vm.expectRevert(ArbErrors.V2CallbackContextMismatch.selector);
         vm.prank(address(pair));
-        hook.pancakeCall(address(hook), 0, 1, abi.encode(address(token1), theftAmount));
+        hook.pancakeCall(address(hook), 0, 1, _v2CallbackData(address(token1), theftAmount));
 
         assertEq(
             token1.balanceOf(address(hook)),
@@ -211,14 +212,14 @@ contract ArbHookSecurityRegressionTest is Test {
 
         vm.expectRevert(ArbErrors.V2CallbackContextMismatch.selector);
         vm.prank(address(pair));
-        hook.uniswapV2Call(address(hook), 0, 0, abi.encode(address(token0), uint256(1)));
+        hook.uniswapV2Call(address(hook), 0, 0, _v2CallbackData(address(token0), 1));
 
         // Once the final registration is removed, the pair is no longer a
         // recognized callback source at all.
         hook.removePool(address(token1), 0);
         vm.expectRevert(abi.encodeWithSelector(ArbErrors.CallbackUnexpectedPool.selector, address(pair), address(0)));
         vm.prank(address(pair));
-        hook.uniswapV2Call(address(hook), 0, 0, abi.encode(address(token0), uint256(1)));
+        hook.uniswapV2Call(address(hook), 0, 0, _v2CallbackData(address(token0), 1));
     }
 
     function testConflictingPoolTypeCannotOverwriteLiveCallbackMetadata() public {
@@ -233,7 +234,7 @@ contract ArbHookSecurityRegressionTest is Test {
         // The surviving registration keeps its original family metadata.
         vm.expectRevert(ArbErrors.V2CallbackContextMismatch.selector);
         vm.prank(address(pair));
-        hook.uniswapV2Call(address(hook), 0, 0, abi.encode(address(token0), uint256(1)));
+        hook.uniswapV2Call(address(hook), 0, 0, _v2CallbackData(address(token0), 1));
     }
 
     function testV3PriceUsesWholeTokenDecimalsAndCorrectOrientation() public view {
@@ -549,6 +550,14 @@ contract ArbHookSecurityRegressionTest is Test {
         executor.executeIterativeArb(
             address(0), address(0), address(0), address(0), 1, ArbUtils.PoolType.V3, ArbUtils.PoolType.V3
         );
+
+        vm.expectRevert(ArbErrors.ExecutorOnlyDelegateCall.selector);
+        executor.executeFlashSecondLeg(address(0), ArbUtils.PoolType.V3, address(0), address(0), 1, uint160(0));
+    }
+
+    function _v2CallbackData(address tokenToPay, uint256 amountToPay) private pure returns (bytes memory) {
+        ArbExecutionStorage.FlashSecondLeg memory noSecondLeg;
+        return abi.encode(tokenToPay, amountToPay, noSecondLeg);
     }
 
     function _deployAndRegisterPair(ArbUtils.PoolType poolType, address base)

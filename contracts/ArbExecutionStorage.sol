@@ -23,6 +23,15 @@ abstract contract ArbExecutionStorage is ArbUtils {
         bool exists;
     }
 
+    /// @dev A nonzero pool turns the initiating swap into a pool-native flash
+    ///      swap: its callback executes this reverse leg before repaying the
+    ///      initiating pool. A zero pool preserves ordinary treasury settlement.
+    struct FlashSecondLeg {
+        address pool;
+        PoolType poolType;
+        uint160 sqrtPriceLimitX96;
+    }
+
     // Callback validation and execution both require the same pool metadata.
     mapping(address => PoolMeta) internal poolMetaByAddr;
 
@@ -46,6 +55,10 @@ abstract contract ArbExecutionStorage is ArbUtils {
     // A positive execution below this threshold remains economically valid but
     // is intentionally not persisted/emitted.
     uint256 public minProfitToEmit;
+
+    /// @notice Virtual start-token capacity used for pool-native flash swaps.
+    /// @dev A zero value preserves the legacy treasury-funded execution path.
+    mapping(address => uint256) public maxFlashTradeAmount;
 
     event ArbitrageAttempted(
         address indexed tokenA,
@@ -80,9 +93,10 @@ abstract contract ArbExecutionStorage is ArbUtils {
         address tokenToPay,
         uint256 amountToPay,
         uint256 amount0Out,
-        uint256 amount1Out
+        uint256 amount1Out,
+        bytes32 callbackDataHash
     ) internal pure returns (bytes32) {
-        return keccak256(abi.encode(pool, poolType, tokenToPay, amountToPay, amount0Out, amount1Out));
+        return keccak256(abi.encode(pool, poolType, tokenToPay, amountToPay, amount0Out, amount1Out, callbackDataHash));
     }
 
     function _v3SwapContextHash(
@@ -91,8 +105,11 @@ abstract contract ArbExecutionStorage is ArbUtils {
         bytes4 callbackSelector,
         address tokenIn,
         bool zeroForOne,
-        uint256 amountInMaximum
+        uint256 amountInMaximum,
+        bytes32 callbackDataHash
     ) internal pure returns (bytes32) {
-        return keccak256(abi.encode(pool, poolType, callbackSelector, tokenIn, zeroForOne, amountInMaximum));
+        return keccak256(
+            abi.encode(pool, poolType, callbackSelector, tokenIn, zeroForOne, amountInMaximum, callbackDataHash)
+        );
     }
 }
