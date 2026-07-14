@@ -9,6 +9,7 @@ import {ArbitrageLogic} from "../../contracts/ArbitrageLogic.sol";
 import {ArbExecutor} from "../../contracts/ArbExecutor.sol";
 import {DataStorage} from "../../contracts/DataStorage.sol";
 import {ArbErrors} from "../../contracts/Errors.sol";
+import {DeployArbHook} from "../../script/DeployArbHook.s.sol";
 import {PoolManagerHarness} from "../../contracts/test/PoolManagerHarness.sol";
 import {PoolModifyLiquidityTestWrapper} from "../../contracts/test/PoolModifyLiquidityTestWrapper.sol";
 import {PoolSwapTestWrapper} from "../../contracts/test/PoolSwapTestWrapper.sol";
@@ -56,6 +57,65 @@ contract ArbHookDeploymentTest is Test {
 
         vm.expectRevert(ArbErrors.ExecutorOnlyDelegateCall.selector);
         executor.attemptAllInternal(1);
+    }
+
+    function testDeploymentScriptRequiresExplicitNonBaseManagerOverride() public {
+        DeployArbHook deployment = new DeployArbHook();
+        PoolManagerHarness localManager = new PoolManagerHarness(address(this));
+        vm.chainId(31_337);
+
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                DeployArbHook.UnverifiedPoolManagerOverrideRequired.selector, block.chainid, address(localManager)
+            )
+        );
+        deployment.validatePoolManager(address(localManager), false);
+
+        deployment.validatePoolManager(address(localManager), true);
+    }
+
+    function testDeploymentScriptNeverOverridesBaseCanonicalAddress() public {
+        DeployArbHook deployment = new DeployArbHook();
+        PoolManagerHarness wrongManager = new PoolManagerHarness(address(this));
+        vm.chainId(deployment.BASE_CHAIN_ID());
+
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                DeployArbHook.UnexpectedPoolManager.selector,
+                block.chainid,
+                address(wrongManager),
+                deployment.BASE_POOL_MANAGER()
+            )
+        );
+        deployment.validatePoolManager(address(wrongManager), true);
+    }
+
+    function testDeploymentScriptChecksBaseManagerRuntimeHash() public {
+        DeployArbHook deployment = new DeployArbHook();
+        PoolManagerHarness wrongManager = new PoolManagerHarness(address(this));
+        address canonicalManager = deployment.BASE_POOL_MANAGER();
+        vm.chainId(deployment.BASE_CHAIN_ID());
+        vm.etch(canonicalManager, address(wrongManager).code);
+
+        bytes32 actualCodeHash = canonicalManager.codehash;
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                DeployArbHook.UnexpectedPoolManagerCodeHash.selector,
+                canonicalManager,
+                actualCodeHash,
+                deployment.BASE_POOL_MANAGER_CODE_HASH()
+            )
+        );
+        deployment.validatePoolManager(canonicalManager, false);
+    }
+
+    function testDeploymentScriptRejectsNoCodeManagerEvenWithOverride() public {
+        DeployArbHook deployment = new DeployArbHook();
+        address noCodeManager = makeAddr("no-code-manager");
+        vm.chainId(31_337);
+
+        vm.expectRevert(abi.encodeWithSelector(DeployArbHook.InvalidPoolManager.selector, noCodeManager));
+        deployment.validatePoolManager(noCodeManager, true);
     }
 
     function testHarnessRejectsExecutorWithoutCode() public {
