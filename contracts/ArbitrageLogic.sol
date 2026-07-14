@@ -214,7 +214,8 @@ contract ArbitrageLogic {
      * @return qPrice The quantized 128-bit price.
      */
     function quantise(uint256 price) public pure returns (uint128 qPrice) {
-        return uint128(price / PRICE_GRANULARITY);
+        uint256 quantized = price / PRICE_GRANULARITY;
+        return quantized > type(uint128).max ? type(uint128).max : uint128(quantized);
     }
 
     /**
@@ -254,7 +255,7 @@ contract ArbitrageLogic {
         uint256 chunkToSwap; // Coarse upper bound; refined by findBestV3Chunk.
         uint160 sqrtPriceLimitA; // Price limit for swap in pool A
         uint160 sqrtPriceLimitB; // Price limit for swap in pool B
-        uint256 intermediateAmountPotentiallyFromA; // intermOutA before pool-B capacity clamp
+        uint256 intermediateAmountPotentiallyFromA; // reference full-window output heuristic
         uint256 intermediateCapacityOfB; // max intermediate token pool B can absorb in-window
         PoolStatesForIteration poolAState;
         PoolStatesForIteration poolBState;
@@ -282,6 +283,65 @@ contract ArbitrageLogic {
         if (target < int256(TickMath.MIN_TICK)) return TickMath.MIN_TICK;
         if (target > int256(TickMath.MAX_TICK)) return TickMath.MAX_TICK;
         return int24(target);
+    }
+
+    /// @dev Price impact is monotonic for an exact-input V3 swap. Use a
+    ///      bounded search to retain the largest safe chunk found without
+    ///      letting the configured policy become a diagnostic-only value.
+    function _capV3ChunkByImpact(
+        address pool,
+        address tokenIn,
+        uint256 requestedChunk,
+        uint256 maxImpactBps,
+        uint256 minimumChunk,
+        bool isPancakeV3
+    ) private view returns (uint256 safeChunk, uint256 safeImpactBps) {
+        safeImpactBps = ArbMath._estImpactBps(pool, tokenIn, requestedChunk, isPancakeV3);
+        if (safeImpactBps <= maxImpactBps) return (requestedChunk, safeImpactBps);
+
+        // Establish a known-safe nonzero lower bound before refining. A binary
+        // search rooted at zero can otherwise miss every useful raw-unit chunk.
+        uint256 floorChunk = minimumChunk == 0 ? 1 : minimumChunk;
+        if (floorChunk > requestedChunk) return (0, 0);
+        uint256 unsafeChunk = requestedChunk;
+        uint256 probe = requestedChunk;
+        for (uint8 step; step < 32; ++step) {
+            probe >>= 1;
+            if (probe < floorChunk) break;
+            uint256 probeImpact = ArbMath._estImpactBps(pool, tokenIn, probe, isPancakeV3);
+            if (probeImpact <= maxImpactBps) {
+                safeChunk = probe;
+                safeImpactBps = probeImpact;
+                break;
+            }
+            unsafeChunk = probe;
+        }
+
+        // The bounded halving phase may not reach an extreme configured
+        // minimum, so probe that minimum explicitly before rejecting it.
+        if (safeChunk == 0) {
+            uint256 floorImpact = ArbMath._estImpactBps(pool, tokenIn, floorChunk, isPancakeV3);
+            if (floorImpact > maxImpactBps) return (0, 0);
+            safeChunk = floorChunk;
+            safeImpactBps = floorImpact;
+        }
+
+        uint256 low = safeChunk;
+        uint256 high = unsafeChunk;
+        for (uint8 step; step < 16 && high - low > 1; ++step) {
+            uint256 mid = low + ((high - low) >> 1);
+            uint256 candidateImpact = ArbMath._estImpactBps(pool, tokenIn, mid, isPancakeV3);
+            if (candidateImpact <= maxImpactBps) {
+                low = mid;
+                safeImpactBps = candidateImpact;
+            } else {
+                high = mid;
+            }
+        }
+
+        safeChunk = low;
+        safeImpactBps = ArbMath._estImpactBps(pool, tokenIn, safeChunk, isPancakeV3);
+        if (safeImpactBps > maxImpactBps) return (0, 0);
     }
 
     function _readV3PoolSnapshot(address pool, ArbUtils.PoolType poolType)
@@ -366,26 +426,31 @@ contract ArbitrageLogic {
     function _binarySearchBestChunk(
         uint256 hi, // upper bound (already ≤ balance, ≤ capacity-derived)
         uint256 lo, // lower bound (= _minChunk)
-        uint256 intermOut_full, // intermOutA produced by `hi`
+        uint256 intermOut_full, // reference full-window output used by the golden sizing cadence
         uint256 intermCapB, // exactCapacity of pool B
         uint256 poolB_maxIn, // ΔB.in to reach sqrtPriceLimitB
         uint256 poolB_maxStartOut, // ΔA.out obtainable at sqrtPriceLimitB
         uint24 feeA,
         uint24 feeB // pool B fee
     ) public pure returns (uint256 bestChunk, int256 bestPL) {
-        if (hi == 0 || hi < lo || poolB_maxIn == 0 || feeA >= 1_000_000 || feeB >= 1_000_000) return (0, 0);
+        if (
+            hi == 0 || hi < lo || hi > uint256(type(int256).max) || poolB_maxIn == 0 || feeA >= 1_000_000
+                || feeB >= 1_000_000
+        ) return (0, 0);
 
+        uint256 upperBound = hi;
+        uint256 lowerBound = lo;
         bestPL = -type(int256).max;
         bestChunk = 0;
 
         for (uint8 iter; iter < 16 && lo <= hi; ++iter) {
             // Bounded binary search keeps execution predictable inside hook callbacks.
             // 16 rounds is enough once `hi` is already a narrow, liquidity-derived bound.
-            uint256 mid = (lo + hi) >> 1; // mid = (lo+hi)/2
+            uint256 mid = lo + ((hi - lo) >> 1);
 
-            // Approximate scaling in the local execution window.
-            // This is intentionally heuristic; exact tick-by-tick simulation is too costly here.
-            uint256 intermOut_mid = FullMath.mulDiv(intermOut_full, mid, hi);
+            // Approximate scaling in the local execution window. Keep the
+            // denominator fixed to the original upper bound as `hi` narrows.
+            uint256 intermOut_mid = FullMath.mulDiv(intermOut_full, mid, upperBound);
             uint256 intermInB_mid = intermOut_mid > intermCapB ? intermCapB : intermOut_mid;
             if (intermInB_mid == 0) {
                 if (mid > 0) {
@@ -396,7 +461,8 @@ contract ArbitrageLogic {
                 continue;
             }
 
-            uint256 startOut_mid = FullMath.mulDiv(poolB_maxStartOut, intermInB_mid, poolB_maxIn);
+            uint256 startOut_mid = ArbMath._mulDivOrZero(poolB_maxStartOut, intermInB_mid, poolB_maxIn);
+            if (startOut_mid > uint256(type(int256).max)) return (0, 0);
             int256 plMid = ArbMath._simulatedPL(mid, intermOut_mid, intermCapB, feeB, intermInB_mid, startOut_mid);
 
             if (plMid > bestPL) {
@@ -414,7 +480,109 @@ contract ArbitrageLogic {
             }
         }
 
-        if (bestPL <= 0) bestChunk = 0; // nothing profitable after search
+        if (bestPL <= 0) {
+            bestChunk = 0;
+            return (bestChunk, bestPL);
+        }
+
+        // Preserve the parity-sensitive search cadence, then validate its
+        // selected chunk with pool A's fee included. This prevents a nominal
+        // spread from becoming a false-positive trade without perturbing a
+        // chunk whose fee-adjusted result remains profitable.
+        bestPL = _feeAdjustedV3PL(
+            bestChunk, upperBound, intermOut_full, intermCapB, poolB_maxIn, poolB_maxStartOut, feeA, feeB
+        );
+        if (bestPL > 0) return (bestChunk, bestPL);
+
+        // Fee-blind ranking preserves the reference cadence for normal-sized
+        // chunks, but raw-unit flooring can make its chosen dust candidate
+        // fail even when a slightly larger candidate is fee-aware profitable.
+        // Only on that failure, run bounded analytical probes with fee A
+        // included at every candidate.
+        return _feeAwareBestChunk(
+            lowerBound, upperBound, intermOut_full, intermCapB, poolB_maxIn, poolB_maxStartOut, feeA, feeB
+        );
+    }
+
+    function _feeAwareBestChunk(
+        uint256 lowerBound,
+        uint256 upperBound,
+        uint256 intermOutFull,
+        uint256 intermCapB,
+        uint256 poolBMaxIn,
+        uint256 poolBMaxStartOut,
+        uint24 feeA,
+        uint24 feeB
+    ) private pure returns (uint256 bestChunk, int256 bestPL) {
+        bestPL = -type(int256).max;
+
+        // The bounded linear model can peak at either endpoint or where pool
+        // B first reaches its capacity clamp. Probe those analytical regions
+        // directly so a narrow raw-unit profit is never skipped by a coarse
+        // ternary search over a large interval.
+        uint256[11] memory candidates;
+        uint8 candidateCount = 2;
+        candidates[0] = lowerBound;
+        candidates[1] = upperBound;
+
+        if (intermOutFull != 0) {
+            uint256 preFeeOutputAtCapacity = ArbMath._mulDivRoundingUpOrMax(intermCapB, 1_000_000, 1_000_000 - feeA);
+            uint256 capacityBreakpoint = preFeeOutputAtCapacity == type(uint256).max
+                ? type(uint256).max
+                : ArbMath._mulDivRoundingUpOrMax(preFeeOutputAtCapacity, upperBound, intermOutFull);
+
+            if (capacityBreakpoint != type(uint256).max) {
+                uint256 firstCandidate = capacityBreakpoint > 4 ? capacityBreakpoint - 4 : 0;
+                if (firstCandidate < lowerBound) firstCandidate = lowerBound;
+                uint256 lastCandidate;
+                if (capacityBreakpoint >= upperBound) {
+                    lastCandidate = upperBound;
+                } else {
+                    uint256 room = upperBound - capacityBreakpoint;
+                    lastCandidate = room > 4 ? capacityBreakpoint + 4 : upperBound;
+                }
+
+                if (firstCandidate <= lastCandidate) {
+                    for (uint256 candidate = firstCandidate;; ++candidate) {
+                        candidates[candidateCount++] = candidate;
+                        if (candidate == lastCandidate) break;
+                    }
+                }
+            }
+        }
+
+        for (uint8 i; i < candidateCount; ++i) {
+            uint256 candidate = candidates[i];
+            if (candidate < lowerBound || candidate > upperBound) continue;
+            int256 candidatePL = _feeAdjustedV3PL(
+                candidate, upperBound, intermOutFull, intermCapB, poolBMaxIn, poolBMaxStartOut, feeA, feeB
+            );
+            if (candidatePL > bestPL) {
+                bestPL = candidatePL;
+                bestChunk = candidate;
+            }
+        }
+
+        if (bestPL <= 0) return (0, bestPL);
+    }
+
+    function _feeAdjustedV3PL(
+        uint256 candidate,
+        uint256 upperBound,
+        uint256 intermOutFull,
+        uint256 intermCapB,
+        uint256 poolBMaxIn,
+        uint256 poolBMaxStartOut,
+        uint24 feeA,
+        uint24 feeB
+    ) private pure returns (int256) {
+        uint256 intermOut = FullMath.mulDiv(intermOutFull, candidate, upperBound);
+        intermOut = FullMath.mulDiv(intermOut, 1_000_000 - feeA, 1_000_000);
+        uint256 intermIn = intermOut > intermCapB ? intermCapB : intermOut;
+        if (intermIn == 0 || candidate > uint256(type(int256).max)) return -type(int256).max;
+        uint256 startOut = ArbMath._mulDivOrZero(poolBMaxStartOut, intermIn, poolBMaxIn);
+        if (startOut > uint256(type(int256).max)) return -type(int256).max;
+        return ArbMath._simulatedPL(candidate, intermOut, intermCapB, feeB, intermIn, startOut);
     }
 
     // Part 1 of V3 sizing:
@@ -545,7 +713,6 @@ contract ArbitrageLogic {
             params.sqrtPriceLimitA, // Target sqrtPrice for pool A based on move
             params.poolAState.liquidity
         );
-        params.intermediateAmountPotentiallyFromA = intermOutA;
         if (startInA == 0 || intermOutA == 0) return params;
 
         params.intermediateCapacityOfB = ArbMath._exactCapacity(
@@ -568,6 +735,9 @@ contract ArbitrageLogic {
             }
             chunkBalanced = FullMath.mulDiv(startInA, params.intermediateCapacityOfB * 102, intermOutA * 100);
         }
+        // The first-leg price limit cannot produce more than intermOutA. Do
+        // not let the 2% capacity margin extrapolate input beyond startInA.
+        chunkBalanced = Math.min(chunkBalanced, startInA);
 
         // --- Apply Balance Cap ---
         uint256 currentChunkPreImpact = Math.min(chunkBalanced, config.currentStartTokenBalance);
@@ -575,17 +745,25 @@ contract ArbitrageLogic {
             return params; // shouldContinue is false
         }
 
-        // Nearest-range utilization is diagnostic only: it is not price
-        // impact, and a valid swap can cross an initialized tick.
-        uint256 impactOnA_forChunkPreImpact = ArbMath._estImpactBps(
-            poolA_address, startToken, currentChunkPreImpact, poolAType == ArbUtils.PoolType.PANCAKESWAP_V3
+        // Constrain the first leg with actual tick-aware price movement.
+        (uint256 roughChunk, uint256 impactOnA_forChunkPreImpact) = _capV3ChunkByImpact(
+            poolA_address,
+            startToken,
+            currentChunkPreImpact,
+            config.maxImpactBps,
+            config.minChunkForStartToken,
+            poolAType == ArbUtils.PoolType.PANCAKESWAP_V3
         );
-        uint256 roughChunk = currentChunkPreImpact;
         params.calculatedSellImpactBps = impactOnA_forChunkPreImpact;
 
         if (roughChunk < config.minChunkForStartToken) {
             return params; // still false
         }
+
+        // Keep the reference harness's full-window output heuristic for exact
+        // parity. Isolated execution validates realized balances and reverts
+        // atomically if a capped chunk produces less than the model assumes.
+        params.intermediateAmountPotentiallyFromA = intermOutA;
 
         // Binary-search refinement happens in findBestV3Chunk.
 
@@ -701,10 +879,7 @@ contract ArbitrageLogic {
 
         if (rA == 0) return 0; // Avoid division by zero, though covered by initial reserve check
 
-        uint256 oneTokenA = ArbMath._pow10(decimalsA);
-        if (oneTokenA == 0) return 0;
-        uint256 rawTokenB = ArbMath._mulDivOrZero(rB, oneTokenA, rA);
-        return ArbMath._scaleRawAmountTo1e18(rawTokenB, decimalsB);
+        return ArbMath._rawRatioToPrice1e18(rB, rA, decimalsA, decimalsB);
     }
 
     /**
@@ -1127,7 +1302,7 @@ contract ArbitrageLogic {
         int256 amountRemaining = int256(amountIn);
         uint160 sqrtP = snapshot.sqrtPrice;
         for (uint8 step; step < 5 && amountRemaining > 0; ++step) {
-            (uint160 sqrtQ, uint256 stepAmountIn,,) = SwapMath.computeSwapStep(
+            (uint160 sqrtQ, uint256 stepAmountIn,, uint256 feeAmount) = SwapMath.computeSwapStep(
                 sqrtP,
                 zeroForOne ? TickMath.MIN_SQRT_RATIO + 1 : TickMath.MAX_SQRT_RATIO - 1,
                 snapshot.liquidity,
@@ -1135,9 +1310,11 @@ contract ArbitrageLogic {
                 snapshot.fee
             );
             sqrtP = sqrtQ;
-            if (stepAmountIn == 0) break;
-            if (stepAmountIn > uint256(amountRemaining)) return 0;
-            amountRemaining -= int256(stepAmountIn);
+            if (stepAmountIn > type(uint256).max - feeAmount) return 0;
+            uint256 consumed = stepAmountIn + feeAmount;
+            if (consumed == 0) break;
+            if (consumed > uint256(amountRemaining)) return 0;
+            amountRemaining -= int256(consumed);
         }
 
         uint256 slippageFactor = zeroForOne ? 10_000 - slippageBps : 10_000 + slippageBps;
