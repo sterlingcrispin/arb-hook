@@ -1,7 +1,7 @@
 # Repository Guidelines
 
 ## Project Overview
-This is a **generic multi-DEX arbitrage system** that runs on Base network. It detects price discrepancies for any registered token pairs across multiple liquidity pools and executes atomic arbitrage swaps to capture profits. The system supports Uniswap V2/V3/V4, PancakeSwap V2/V3, and Aerodrome.
+This is a **generic multi-DEX arbitrage system** that runs on Base network. It detects price discrepancies for any registered token pairs across multiple liquidity pools and executes atomic arbitrage swaps to capture profits. The current external execution venues are Uniswap V2/V3 and PancakeSwap V2/V3. Uniswap V4 supplies the swap callback that triggers discovery; V4 is not currently an arbitrage execution leg. Aerodrome and V4 router interfaces are scaffolding only and are not wired into pool registration or execution.
 
 The current test suite focuses on **cbBTC/USDC and WETH/USDC** pairs as the primary validation case, but the architecture is token-agnostic—any token pairs can be registered via `addPools()`.
 

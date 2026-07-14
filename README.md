@@ -30,15 +30,33 @@ automatically deploys and links it; do not deploy raw, unlinked artifacts by han
 Use the included Foundry script for a production deployment:
 
 ```bash
-PRIVATE_KEY=... V4_POOL_MANAGER=... \
+PRIVATE_KEY=... \
+V4_POOL_MANAGER=0x498581fF718922c3f8e6A244956aF099B2652b2b \
+ARB_HOOK_OWNER=0xYourMultisig \
   forge script script/DeployArbHook.s.sol:DeployArbHook \
   --rpc-url "$BASE_RPC_URL" --broadcast --always-use-create-2-factory
 ```
 
-The script verifies the canonical CREATE2 factory, mines using the exact
-constructor arguments, verifies the deployed hook address, and authorizes it as
-the trade-data writer. `ARB_HOOK_OWNER` is optional, but when provided it must be
-the broadcasting account.
+On Base (chain ID 8453), the script requires Uniswap's
+[canonical PoolManager](https://docs.uniswap.org/contracts/v4/deployments),
+`0x498581fF718922c3f8e6A244956aF099B2652b2b`, and verifies its runtime code
+hash. The validation cannot be bypassed on Base. A non-Base local or test
+deployment must explicitly set `ALLOW_UNVERIFIED_POOL_MANAGER=true`; the target
+must still contain contract code.
+
+The broadcaster initially owns `ArbHook` and `DataStorage` so it can authorize
+the hook as the trade-data writer. If `ARB_HOOK_OWNER` is provided, the script
+then transfers both contracts to that address, which should normally be an
+operator multisig. It defaults to the broadcaster when omitted. Verify the
+`owner()` of both contracts, `DataStorage.authorizedWriter()`, the immutable
+PoolManager, and the hook permission bits before funding or approving pools.
+
+This deployment is a sequence of independent transactions, not an atomic
+factory deployment. A partially failed broadcast is not rolled back. Inspect
+Foundry's `broadcast/DeployArbHook.s.sol/8453/run-latest.json` artifact and the
+individual transaction receipts before retrying or using any deployed address.
+The script itself does not create an aggregate on-chain deployment event; its
+return values and broadcast artifact are the deployment record.
 
 ## Big Picture
 
@@ -49,6 +67,8 @@ Instead of constantly scanning markets or competing in gas wars, we wait for rea
 Most of the time the answer is no, and the hook exits almost immediately. When the answer is yes, the hook can act instantly, without latency or MEV competition.
 
 The hook doesn't assume the arbitrage leg happens on another Uniswap v4 pool. Today the implemented external pool types are Uniswap V2/V3 and PancakeSwap V2/V3, so the v4 hook is acting as an observation point for broader cross-venue price discovery.
+The Aerodrome and V4 router interfaces in `contracts/interfaces/` are unused
+scaffolding, not supported execution venues.
 
 The current code assumes the hook contract holds its own funds for arbitrage execution. For now, this simplifies control flow during swaps. In the future I imagine this would be done with flash loans instead to remove capital constraints. That also opens a clearer path to allow profits from arbitrages to be shared with the user that started the transaction.
 
@@ -179,13 +199,21 @@ The purpose of the parity test is to confirm the current Uniswap v4 hook path re
 ```bash
 npm ci --ignore-scripts
 forge build --sizes
-forge test -vvv
+forge test --no-match-contract ArbHookParityTest -vvv
 ```
 
-The fork-parity suite automatically skips when `BASE_RPC_URL` is absent; run it
-explicitly with an archive-capable Base endpoint when validating the golden
-round-by-round output:
+Run the fork-parity suite separately with an archive-capable Base endpoint when
+validating the golden round-by-round output:
 
 ```bash
 BASE_RPC_URL=... forge test --match-contract ArbHookParityTest -vv
 ```
+
+CI deliberately excludes the RPC-dependent contract from its deterministic
+job instead of counting skipped fork tests as success. Exact ten-round parity is
+a separate CI job on every push, pull request, and manual workflow run.
+It prefers the protected `BASE_RPC_URL` repository secret and falls back to
+Base's public `https://mainnet.base.org` endpoint when secrets are unavailable
+(including fork pull requests). The job fails if the endpoint is unavailable,
+does not resolve to chain ID 8453, the canonical PoolManager code hash changes,
+or any golden parity assertion fails.

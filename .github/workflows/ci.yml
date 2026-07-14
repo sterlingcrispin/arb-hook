@@ -3,29 +3,85 @@ name: CI
 on:
   push:
   pull_request:
+  workflow_dispatch:
 
 permissions:
   contents: read
 
 jobs:
   forge:
-    name: Forge build and tests
+    name: Deterministic build and tests
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
-          node-version: 22
+          node-version: 22.17.1
           cache: npm
 
       - name: Install pinned Solidity dependencies
         run: npm ci --ignore-scripts
 
-      - uses: foundry-rs/foundry-toolchain@v1
+      - name: Audit production dependencies
+        run: npm audit --omit=dev --audit-level=high
+
+      - uses: foundry-rs/foundry-toolchain@b00af27efadbc7b4ca8b82abbd903b17cc874d2a # v1.9.0
+        with:
+          version: v1.7.1
 
       - name: Check deployed bytecode sizes
         run: forge build --sizes
 
-      - name: Run unit and integration tests
-        run: forge test -vvv
+      - name: Run deterministic unit and integration tests
+        run: forge test --no-match-contract ArbHookParityTest -vvv
+
+  base-parity:
+    name: Base fork golden parity
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      BASE_RPC_URL: ${{ secrets.BASE_RPC_URL }}
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22.17.1
+          cache: npm
+
+      - name: Install pinned Solidity dependencies
+        run: npm ci --ignore-scripts
+
+      - uses: foundry-rs/foundry-toolchain@b00af27efadbc7b4ca8b82abbd903b17cc874d2a # v1.9.0
+        with:
+          version: v1.7.1
+
+      - name: Select Base archive RPC
+        shell: bash
+        run: |
+          if [[ -z "$BASE_RPC_URL" ]]; then
+            echo "BASE_RPC_URL=https://mainnet.base.org" >> "$GITHUB_ENV"
+            echo "Using the public Base RPC fallback; configure BASE_RPC_URL as a repository secret for higher limits."
+          else
+            echo "Using the protected BASE_RPC_URL repository secret."
+          fi
+
+      - name: Verify canonical Base V4 PoolManager
+        shell: bash
+        run: |
+          chain_id="$(cast chain-id --rpc-url "$BASE_RPC_URL")"
+          if [[ "$chain_id" != "8453" ]]; then
+            echo "::error::BASE_RPC_URL resolved to chain ID $chain_id instead of 8453"
+            exit 1
+          fi
+          actual_hash="$(cast codehash 0x498581ff718922c3f8e6a244956af099b2652b2b --rpc-url "$BASE_RPC_URL")"
+          expected_hash="0x83b2af6e9f3158defc2811cbcb0db71ecf8b2ba2abea39c39e370ac5c6f43eb6"
+          if [[ "$actual_hash" != "$expected_hash" ]]; then
+            echo "::error::Unexpected canonical Base PoolManager runtime hash: $actual_hash"
+            exit 1
+          fi
+
+      - name: Enforce exact ten-round parity
+        run: forge test --match-contract ArbHookParityTest --fail-fast -vv
