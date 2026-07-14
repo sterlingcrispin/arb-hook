@@ -189,40 +189,44 @@ contract ArbHook is BaseHook, ArbExecutionStorage, Ownable, ReentrancyGuard {
         // Populate pool meta for callbacks and cheaper checks
         for (uint256 i = 0; i < poolAddresses.length; i++) {
             address p = poolAddresses[i];
-            PoolMeta storage m = poolMetaByAddr[p];
+            address token0;
+            address token1;
+            uint24 actualFee;
             if (poolTypes[i] == ArbUtils.PoolType.V3) {
                 IUniswapV3Pool vp = IUniswapV3Pool(p);
-                m.token0 = vp.token0();
-                m.token1 = vp.token1();
-                m.fee = vp.fee();
-                m.poolType = ArbUtils.PoolType.V3;
-                m.exists = true;
+                token0 = vp.token0();
+                token1 = vp.token1();
+                actualFee = vp.fee();
             } else if (poolTypes[i] == ArbUtils.PoolType.PANCAKESWAP_V3) {
                 IPancakeV3Pool vp = IPancakeV3Pool(p);
-                m.token0 = vp.token0();
-                m.token1 = vp.token1();
-                m.fee = vp.fee();
-                m.poolType = ArbUtils.PoolType.PANCAKESWAP_V3;
-                m.exists = true;
-            } else if (poolTypes[i] == ArbUtils.PoolType.V2) {
+                token0 = vp.token0();
+                token1 = vp.token1();
+                actualFee = vp.fee();
+            } else {
                 IUniswapV2Pair vp = IUniswapV2Pair(p);
-                m.token0 = vp.token0();
-                m.token1 = vp.token1();
-                m.fee = fees[i];
-                m.poolType = ArbUtils.PoolType.V2;
-                m.exists = true;
-            } else if (poolTypes[i] == ArbUtils.PoolType.PANCAKESWAP_V2) {
-                IUniswapV2Pair vp = IUniswapV2Pair(p);
-                m.token0 = vp.token0();
-                m.token1 = vp.token1();
-                m.fee = fees[i];
-                m.poolType = ArbUtils.PoolType.PANCAKESWAP_V2;
-                m.exists = true;
+                token0 = vp.token0();
+                token1 = vp.token1();
+                actualFee = poolTypes[i] == ArbUtils.PoolType.V2 ? V2_POOL_FEE_PPM : PANCAKESWAP_V2_POOL_FEE_PPM;
             }
 
-            unchecked {
-                ++poolRegistrationCount[p];
+            PoolMeta storage m = poolMetaByAddr[p];
+            if (poolRegistrationCount[p] == 0) {
+                m.token0 = token0;
+                m.token1 = token1;
+                m.fee = actualFee;
+                m.poolType = poolTypes[i];
+                m.exists = true;
+            } else if (
+                !m.exists || m.token0 != token0 || m.token1 != token1 || m.fee != actualFee
+                    || m.poolType != poolTypes[i]
+            ) {
+                // One physical pool has one immutable callback ABI. Allowing a
+                // second registration to overwrite its type would corrupt the
+                // metadata still required by the first registration.
+                revert ArbErrors.PoolRegistrationMetadataConflict(p);
             }
+
+            ++poolRegistrationCount[p];
 
             // Cache decimals for both tokens to make _minChunk cheaper later
             if (m.token0 != address(0) && cachedTokenDecimals[m.token0] == 0) {
@@ -350,15 +354,23 @@ contract ArbHook is BaseHook, ArbExecutionStorage, Ownable, ReentrancyGuard {
 
     // ----------------------------- Callbacks -------------------------------
     function uniswapV3SwapCallback(int256 amount0Delta, int256 amount1Delta, bytes calldata data) external {
-        _v3SwapCallbackLogic(amount0Delta, amount1Delta, data);
+        _v3SwapCallbackLogic(amount0Delta, amount1Delta, data, ArbUtils.PoolType.V3, UNISWAP_V3_SWAP_CALLBACK_SELECTOR);
     }
 
     function pancakeV3SwapCallback(int256 amount0Delta, int256 amount1Delta, bytes calldata data) external {
-        _v3SwapCallbackLogic(amount0Delta, amount1Delta, data);
+        _v3SwapCallbackLogic(
+            amount0Delta, amount1Delta, data, ArbUtils.PoolType.PANCAKESWAP_V3, PANCAKESWAP_V3_SWAP_CALLBACK_SELECTOR
+        );
     }
 
-    function _v3SwapCallbackLogic(int256 amount0Delta, int256 amount1Delta, bytes calldata data) internal {
-        (address decodedTokenIn, address decodedCaller,, address expectedPool) =
+    function _v3SwapCallbackLogic(
+        int256 amount0Delta,
+        int256 amount1Delta,
+        bytes calldata data,
+        ArbUtils.PoolType expectedPoolType,
+        bytes4 expectedCallbackSelector
+    ) internal {
+        (address decodedTokenIn, address decodedCaller, uint256 maximumAmountIn, address expectedPool) =
             abi.decode(data, (address, address, uint256, address));
 
         // Callback hardening:
@@ -381,7 +393,7 @@ contract ArbHook is BaseHook, ArbExecutionStorage, Ownable, ReentrancyGuard {
 
         // Use cached pool metadata instead of fresh external reads.
         PoolMeta storage pm = poolMetaByAddr[pool];
-        if (!pm.exists) {
+        if (!pm.exists || pm.poolType != expectedPoolType) {
             revert ArbErrors.CallbackUnexpectedPool(pool, expectedPool);
         }
         token0 = pm.token0;
@@ -391,9 +403,17 @@ contract ArbHook is BaseHook, ArbExecutionStorage, Ownable, ReentrancyGuard {
             revert ArbErrors.CallbackDecodedTokenNotInPool(decodedTokenIn, token0, token1);
         }
 
+        bool zeroForOne = decodedTokenIn == token0;
+        bytes32 expectedContext = _v3SwapContextHash(
+            pool, expectedPoolType, expectedCallbackSelector, decodedTokenIn, zeroForOne, maximumAmountIn
+        );
+        if (activeV3SwapContext == bytes32(0) || activeV3SwapContext != expectedContext) {
+            revert ArbErrors.V3CallbackContextMismatch();
+        }
+
         uint256 amountToPay;
         address tokenToPay;
-        if (decodedTokenIn == token0) {
+        if (zeroForOne) {
             // Positive amount0Delta means pool expects token0 repayment from this callback.
             if (amount0Delta <= 0) revert ArbErrors.CallbackInvalidDelta0Sign();
             amountToPay = uint256(amount0Delta);
@@ -405,10 +425,15 @@ contract ArbHook is BaseHook, ArbExecutionStorage, Ownable, ReentrancyGuard {
             tokenToPay = token1;
         }
 
-        if (amountToPay > 0) {
-            if (!IERC20(tokenToPay).trySafeTransfer(pool, amountToPay)) {
-                revert ArbErrors.CallbackTransferFailed(tokenToPay, pool, amountToPay);
-            }
+        if (amountToPay > maximumAmountIn) {
+            revert ArbErrors.V3CallbackAmountExceedsMaximum(amountToPay, maximumAmountIn);
+        }
+
+        // Consume before the external token call. A reentrant token or pool
+        // cannot replay the capability while repayment is in progress.
+        delete activeV3SwapContext;
+        if (!IERC20(tokenToPay).trySafeTransfer(pool, amountToPay)) {
+            revert ArbErrors.CallbackTransferFailed(tokenToPay, pool, amountToPay);
         }
     }
 

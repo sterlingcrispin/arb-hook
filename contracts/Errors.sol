@@ -10,6 +10,7 @@ library ArbErrors {
     error PoolFeeFetchFailed();
     error AddPoolsProvidedFeeMismatch();
     error AddPoolsPoolVerificationFailed();
+    error PoolRegistrationMetadataConflict(address pool);
     error TokenHasNoPools();
     error PoolIndexOutOfBounds();
     error Slot0FetchFailed(string reason);
@@ -66,6 +67,8 @@ library ArbErrors {
     error SwapOutputTokenNotInV2Pair();
     error AtomicArbitrageExecutionFailed();
     error V2CallbackContextMismatch();
+    error V3CallbackContextMismatch();
+    error V3CallbackAmountExceedsMaximum(uint256 amountToPay, uint256 maximumAmount);
     error ExecutorOnlyDelegateCall();
     error ExecutorAddressInvalid();
 }

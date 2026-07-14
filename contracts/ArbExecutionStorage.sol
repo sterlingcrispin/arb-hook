@@ -10,6 +10,11 @@ import {IERC20Metadata} from "@openzeppelin/contracts/token/ERC20/extensions/IER
 ///      base. The executor is never called directly: when delegatecalled, every
 ///      field below resolves against the hook's storage.
 abstract contract ArbExecutionStorage is ArbUtils {
+    bytes4 internal constant UNISWAP_V3_SWAP_CALLBACK_SELECTOR =
+        bytes4(keccak256("uniswapV3SwapCallback(int256,int256,bytes)"));
+    bytes4 internal constant PANCAKESWAP_V3_SWAP_CALLBACK_SELECTOR =
+        bytes4(keccak256("pancakeV3SwapCallback(int256,int256,bytes)"));
+
     struct PoolMeta {
         address token0;
         address token1;
@@ -24,6 +29,12 @@ abstract contract ArbExecutionStorage is ArbUtils {
     // One-shot V2 flash-swap callback capability. V2 pairs invoke the `to`
     // address, unlike V3 pools, so factory validation alone is insufficient.
     bytes32 internal activeV2SwapContext;
+
+    // One-shot V3 callback capability. The hash binds the exact pool, pool
+    // family/callback selector, input token and direction, plus the maximum
+    // amount that the callback may debit. A callback consumes it before any
+    // external token transfer.
+    bytes32 internal activeV3SwapContext;
 
     // A physical pool can be registered under multiple base tokens. Keep its
     // callback metadata alive until its final registration is removed.
@@ -72,5 +83,16 @@ abstract contract ArbExecutionStorage is ArbUtils {
         uint256 amount1Out
     ) internal pure returns (bytes32) {
         return keccak256(abi.encode(pool, poolType, tokenToPay, amountToPay, amount0Out, amount1Out));
+    }
+
+    function _v3SwapContextHash(
+        address pool,
+        PoolType poolType,
+        bytes4 callbackSelector,
+        address tokenIn,
+        bool zeroForOne,
+        uint256 amountInMaximum
+    ) internal pure returns (bytes32) {
+        return keccak256(abi.encode(pool, poolType, callbackSelector, tokenIn, zeroForOne, amountInMaximum));
     }
 }
