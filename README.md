@@ -14,7 +14,7 @@ The current implementation executes arbitrage from hook callbacks only. There is
 
 `ArbHook` is intentionally a small V4-facing shell. Its immutable `ArbExecutor`
 implementation performs discovery and execution through `delegatecall`, so state,
-inventory, approvals, callbacks, and `DataStorage` authorization all remain at the
+configuration, callbacks, and `DataStorage` authorization all remain at the
 hook address. This keeps every deployable runtime below the EIP-170 24,576-byte
 limit while preserving the existing hook entrypoints.
 
@@ -49,7 +49,8 @@ the hook as the trade-data writer. If `ARB_HOOK_OWNER` is provided, the script
 then transfers both contracts to that address, which should normally be an
 operator multisig. It defaults to the broadcaster when omitted. Verify the
 `owner()` of both contracts, `DataStorage.authorizedWriter()`, the immutable
-PoolManager, and the hook permission bits before funding or approving pools.
+PoolManager, and the hook permission bits before registering pools or enabling
+flash-settlement capacity.
 
 This deployment is a sequence of independent transactions, not an atomic
 factory deployment. A partially failed broadcast is not rolled back. Inspect
@@ -70,9 +71,17 @@ The hook doesn't assume the arbitrage leg happens on another Uniswap v4 pool. To
 The Aerodrome and V4 router interfaces in `contracts/interfaces/` are unused
 scaffolding, not supported execution venues.
 
-The current code assumes the hook contract holds its own funds for arbitrage execution. For now, this simplifies control flow during swaps. In the future I imagine this would be done with flash loans instead to remove capital constraints. That also opens a clearer path to allow profits from arbitrages to be shared with the user that started the transaction.
+The preferred execution mode uses pool-native flash swaps and does not require
+the hook to custody working capital. The first arbitrage pool fronts the
+intermediate asset, the second leg executes inside its callback, and the first
+pool is repaid atomically from the second leg's output. Realized profit is sent
+to the hook owner instead of accumulating as operating inventory.
 
-There is still required operator setup off-chain: pool registration, approvals, and inventory funding.
+The owner enables this mode per start token with
+`setMaxFlashTradeAmount(token, amount)`. The amount is a sizing cap, not a token
+deposit. A zero cap preserves the legacy treasury-funded path for compatibility.
+Required operator setup is therefore pool registration and a nonzero cap for
+each start token that should use flash settlement; hook funding is not required.
 
 ## Runtime Parameters Explained
 
@@ -102,6 +111,11 @@ The main runtime knobs are owner-settable on `ArbHook`:
 - `setMinProfitToEmit(uint256)`  
   Minimum cumulative profit required before emitting/storing trade data.
   Unit is raw `tokenA` units (not 1e18 normalized).
+
+- `setMaxFlashTradeAmount(address,uint256)`
+  Sets the maximum pool-native flash trade size for a start token, in that
+  token's raw units. A nonzero value enables atomic flash settlement for that
+  token without pre-funding the hook; `0` retains legacy treasury mode.
 
 - `setHookPoolEnabled(PoolKey,bool)`
   Opts a specific V4 pool key into callback-driven arbitrage. Unlisted pools
@@ -146,12 +160,16 @@ Why these values are used for parity:
    - Accounts for fees, slippage, rounding, and impact
    - Avoids naive “max size” execution
 
-6. The arbitrage is executed via a self-call pattern:
+6. The arbitrage is executed via a self-call and nested flash-swap pattern:
    - Failures are expected and isolated
+   - The first pool sends the intermediate asset before collecting payment
+   - The second leg executes inside the first pool's callback
+   - Its output repays the first pool in the same transaction
    - Reverts do not affect the user’s swap
    - State remains clean
 
-7. If the arb clears profit after costs, it commits.
+7. If the arb clears profit after costs, it commits and sends the realized
+   start-token profit to the hook owner.
    If not, it reverts internally and becomes a no-op.
 
 8. The user’s swap completes regardless.
@@ -175,6 +193,10 @@ Why these values are used for parity:
 
 - Self-call execution  
   Arbitrage is treated as speculative and allowed to fail safely without polluting hook state, so the users swap will succeed even if our arb fails.
+
+- Pool-native flash settlement
+  The execution pools provide the temporary inventory and settle both legs
+  atomically, so deployed capital does not need to sit idle in the hook.
 
 - Parity as the real invariant  
   Current parity tests target exact sequence matching against the legacy non-hook reference (pool picks and profit amounts), not just "some profitable trade happened."

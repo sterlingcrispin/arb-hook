@@ -1,6 +1,6 @@
 # Audit Remediation Status
 
-Last updated: 2026-07-13
+Last updated: 2026-07-14
 
 The deployability and execution-safety findings recorded for this repository are
 resolved in the current branch.
@@ -24,10 +24,17 @@ resolved in the current branch.
    - Every callback capability is consumed before any token transfer, preventing
      unsolicited calls, replay, cross-family use, and reentrant reuse.
 
-3. **Partial arbitrage execution / treasury residue — resolved**
-   - Failed legs and non-positive final P&L revert the isolated self-call.
-   - Residual cleanup is based on entry-balance snapshots and cannot liquidate
-     pre-existing intermediate-token inventory.
+3. **Atomic flash settlement / treasury residue — resolved**
+   - A nonzero owner-set `maxFlashTradeAmount` enables pool-native flash
+     settlement per start token; the cap controls sizing and is not deposited
+     into the hook. A zero cap preserves the legacy treasury-funded path.
+   - The first pool fronts the intermediate token, the second leg executes
+     inside its callback, and the second leg's output repays the first pool
+     atomically. Failed legs and non-positive final P&L revert the isolated
+     self-call without consuming pre-existing hook balances.
+   - Successful flash-settled trades forward realized start-token profit to the
+     hook owner. Entry-balance invariants prevent working inventory or residue
+     from accumulating at the hook address.
 
 4. **Price and sizing math — resolved**
    - V2/V3 prices use whole-token decimal orientation, preserve normalized
@@ -95,12 +102,15 @@ resolved in the current branch.
    - Deployment uses multiple independent transactions. There is no aggregate
      on-chain deployment event or cross-transaction rollback; operators must
      verify the Foundry broadcast artifact, receipts, ownership, writer, and
-     immutable manager before funding the hook.
+     immutable manager before registering pools and setting per-token flash
+     trade caps.
 
 9. **Fork parity and fixture fidelity — resolved**
    - The parity fixture registers only the reference USDC-base pool sequence,
-     avoids the WETH-as-tokenA decimal-underflow path, and funds inventory with
-     the same two WETH-to-USDC swaps as the JS harness.
+     avoids the WETH-as-tokenA decimal-underflow path, and retains the same two
+     WETH-to-USDC market-shaping swaps as the JS harness. The resulting USDC is
+     not deposited into the hook; a 100,000 USDC flash-trade cap reproduces the
+     reference sizing while the hook begins and ends without working inventory.
    - The ten-round fork test asserts every buy/sell pool and raw profit, totaling
      exactly 18,679,602 USDC base units (18.679602 USDC).
 

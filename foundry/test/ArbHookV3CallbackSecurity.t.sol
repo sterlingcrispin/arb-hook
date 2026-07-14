@@ -4,6 +4,7 @@ pragma solidity ^0.8.20;
 import {Test} from "forge-std/Test.sol";
 
 import {ArbHook} from "../../contracts/ArbHook.sol";
+import {ArbExecutionStorage} from "../../contracts/ArbExecutionStorage.sol";
 import {ArbitrageLogic} from "../../contracts/ArbitrageLogic.sol";
 import {ArbExecutor} from "../../contracts/ArbExecutor.sol";
 import {DataStorage} from "../../contracts/DataStorage.sol";
@@ -49,10 +50,13 @@ contract V3CallbackSecurityHarness is ArbHook {
 
     function validateHookAddress(BaseHook) internal pure override {}
 
-    function armV3CallbackForTest(address pool, ArbUtils.PoolType poolType, address tokenIn, uint256 maximumAmountIn)
-        external
-        onlyOwner
-    {
+    function armV3CallbackForTest(
+        address pool,
+        ArbUtils.PoolType poolType,
+        address tokenIn,
+        uint256 maximumAmountIn,
+        bytes32 callbackDataHash
+    ) external onlyOwner {
         PoolMeta storage meta = poolMetaByAddr[pool];
         require(meta.exists && meta.poolType == poolType, "pool not registered");
         require(tokenIn == meta.token0 || tokenIn == meta.token1, "token not in pool");
@@ -61,7 +65,8 @@ contract V3CallbackSecurityHarness is ArbHook {
         bytes4 selector = poolType == ArbUtils.PoolType.V3
             ? UNISWAP_V3_SWAP_CALLBACK_SELECTOR
             : PANCAKESWAP_V3_SWAP_CALLBACK_SELECTOR;
-        activeV3SwapContext = _v3SwapContextHash(pool, poolType, selector, tokenIn, zeroForOne, maximumAmountIn);
+        activeV3SwapContext =
+            _v3SwapContextHash(pool, poolType, selector, tokenIn, zeroForOne, maximumAmountIn, callbackDataHash);
     }
 
     function activeV3CallbackForTest() external view returns (bytes32) {
@@ -113,11 +118,10 @@ contract ArbHookV3CallbackSecurityTest is Test {
         uint256 treasuryBalance = 100 ether;
         token0.mint(address(hook), treasuryBalance);
 
+        bytes memory callbackData = _callbackData(address(token0), treasuryBalance);
         vm.expectRevert(ArbErrors.V3CallbackContextMismatch.selector);
         vm.prank(address(pool));
-        hook.uniswapV3SwapCallback(
-            int256(treasuryBalance), -1, abi.encode(address(token0), address(hook), treasuryBalance, address(pool))
-        );
+        hook.uniswapV3SwapCallback(int256(treasuryBalance), -1, callbackData);
 
         assertEq(token0.balanceOf(address(hook)), treasuryBalance);
         assertEq(token0.balanceOf(address(pool)), 0);
@@ -130,9 +134,11 @@ contract ArbHookV3CallbackSecurityTest is Test {
         uint256 maximumAmountIn = 100 ether;
         uint256 amountToPay = 80 ether;
         token0.mint(address(hook), maximumAmountIn);
-        hook.armV3CallbackForTest(address(pool), ArbUtils.PoolType.V3, address(token0), maximumAmountIn);
 
-        bytes memory callbackData = abi.encode(address(token0), address(hook), maximumAmountIn, address(pool));
+        bytes memory callbackData = _callbackData(address(token0), maximumAmountIn);
+        hook.armV3CallbackForTest(
+            address(pool), ArbUtils.PoolType.V3, address(token0), maximumAmountIn, keccak256(callbackData)
+        );
         vm.prank(address(pool));
         hook.uniswapV3SwapCallback(int256(amountToPay), -1, callbackData);
 
@@ -152,12 +158,13 @@ contract ArbHookV3CallbackSecurityTest is Test {
         uint256 maximumAmountIn = 50 ether;
         uint256 amountToPay = 20 ether;
         token1.mint(address(hook), maximumAmountIn);
-        hook.armV3CallbackForTest(address(pool), ArbUtils.PoolType.PANCAKESWAP_V3, address(token1), maximumAmountIn);
 
-        vm.prank(address(pool));
-        hook.pancakeV3SwapCallback(
-            -1, int256(amountToPay), abi.encode(address(token1), address(hook), maximumAmountIn, address(pool))
+        bytes memory callbackData = _callbackData(address(token1), maximumAmountIn);
+        hook.armV3CallbackForTest(
+            address(pool), ArbUtils.PoolType.PANCAKESWAP_V3, address(token1), maximumAmountIn, keccak256(callbackData)
         );
+        vm.prank(address(pool));
+        hook.pancakeV3SwapCallback(-1, int256(amountToPay), callbackData);
 
         assertEq(token1.balanceOf(address(hook)), maximumAmountIn - amountToPay);
         assertEq(token1.balanceOf(address(pool)), amountToPay);
@@ -171,18 +178,54 @@ contract ArbHookV3CallbackSecurityTest is Test {
         uint256 maximumAmountIn = 10 ether;
         uint256 amountToPay = maximumAmountIn + 1;
         token0.mint(address(hook), amountToPay);
-        hook.armV3CallbackForTest(address(pool), ArbUtils.PoolType.V3, address(token0), maximumAmountIn);
+        bytes memory callbackData = _callbackData(address(token0), maximumAmountIn);
+        hook.armV3CallbackForTest(
+            address(pool), ArbUtils.PoolType.V3, address(token0), maximumAmountIn, keccak256(callbackData)
+        );
 
         vm.expectRevert(
             abi.encodeWithSelector(ArbErrors.V3CallbackAmountExceedsMaximum.selector, amountToPay, maximumAmountIn)
         );
         vm.prank(address(pool));
-        hook.uniswapV3SwapCallback(
-            int256(amountToPay), -1, abi.encode(address(token0), address(hook), maximumAmountIn, address(pool))
-        );
+        hook.uniswapV3SwapCallback(int256(amountToPay), -1, callbackData);
 
         assertEq(token0.balanceOf(address(hook)), amountToPay);
         assertEq(token0.balanceOf(address(pool)), 0);
+    }
+
+    function testActiveV3CallbackRejectsTamperedSecondLegPayload() public {
+        _mockFactoryPool(ArbUtils.PoolType.V3, address(pool));
+        _register(ArbUtils.PoolType.V3);
+
+        uint256 maximumAmountIn = 10 ether;
+        ArbExecutionStorage.FlashSecondLeg memory intendedSecondLeg = ArbExecutionStorage.FlashSecondLeg({
+            pool: address(0xBEEF), poolType: ArbUtils.PoolType.V2, sqrtPriceLimitX96: 1
+        });
+        bytes memory intendedData = _callbackData(address(token0), maximumAmountIn, intendedSecondLeg);
+        hook.armV3CallbackForTest(
+            address(pool), ArbUtils.PoolType.V3, address(token0), maximumAmountIn, keccak256(intendedData)
+        );
+
+        ArbExecutionStorage.FlashSecondLeg memory tamperedSecondLeg = intendedSecondLeg;
+        tamperedSecondLeg.sqrtPriceLimitX96 = 2;
+        bytes memory tamperedData = _callbackData(address(token0), maximumAmountIn, tamperedSecondLeg);
+
+        vm.expectRevert(ArbErrors.V3CallbackContextMismatch.selector);
+        vm.prank(address(pool));
+        hook.uniswapV3SwapCallback(int256(maximumAmountIn), -1, tamperedData);
+    }
+
+    function _callbackData(address tokenIn, uint256 maximumAmountIn) private view returns (bytes memory) {
+        ArbExecutionStorage.FlashSecondLeg memory noSecondLeg;
+        return _callbackData(tokenIn, maximumAmountIn, noSecondLeg);
+    }
+
+    function _callbackData(
+        address tokenIn,
+        uint256 maximumAmountIn,
+        ArbExecutionStorage.FlashSecondLeg memory secondLeg
+    ) private view returns (bytes memory) {
+        return abi.encode(tokenIn, address(hook), maximumAmountIn, address(pool), secondLeg);
     }
 
     function _mockFactoryPool(ArbUtils.PoolType poolType, address canonicalPool) private {

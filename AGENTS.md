@@ -67,10 +67,15 @@ await arbLight.addPools(usdcAddress, [lowLiqPool, highLiqPool], [100, 500], [V3,
 
 The `poolsByToken` Map iteration order determines `supportedTokens` order, which affects `attemptAll` iteration.
 
-### 3. Funding
+### 3. Reference JS Funding
 - 10 WETH transferred to bot
 - 100,000 USDC transferred to bot
 - MaxUint256 approvals for WETH/USDC/cbBTC on all pools
+
+The Forge parity fixture preserves the two 25 WETH→USDC market-shaping swaps,
+but does not transfer working inventory to `ArbHook`. It configures a
+100,000-USDC `maxFlashTradeAmount` instead; both arbitrage legs settle through
+nested pool callbacks and realized profit is forwarded to the owner.
 
 ### 4. Runtime Parameters
 - `MAX_ITER_PER_ATTEMPT = 2`
@@ -144,7 +149,7 @@ After each round, compare:
 - `profit` amount
 - `iterations` count
 
-## Current Test Status (as of 2026-01-04)
+## Current Test Status (as of 2026-07-14)
 
 **PARITY ACHIEVED** - All 10 rounds pass with exact match:
 
@@ -168,6 +173,12 @@ After each round, compare:
 
 The WETH→USDC swaps change the fee=500 pool's price, which affects subsequent arbitrage decisions. By Round 3, this price change makes `0xd0b5` a better sell pool than `0x1C45`.
 
+The production execution path now uses pool-native flash settlement when an
+owner configures a nonzero per-token cap. The first pool fronts the intermediate
+asset, the reverse leg executes inside its callback, the first pool is repaid
+atomically, and only profit reaches the owner. Exact parity remains unchanged
+while the hook starts and ends each round with zero working inventory.
+
 **Anvil command**:
 ```bash
 anvil --fork-url "$BASE_RPC_URL" --fork-block-number 33942262 --host 127.0.0.1 --port 8546
@@ -186,6 +197,9 @@ BASE_RPC_URL=http://127.0.0.1:8546 forge test --match-contract ArbHookParityTest
 - [x] Fixed funding to replicate JS WETH→USDC swaps (the key fix!)
 - [x] All 10 rounds match expected profits and pool selections
 - [x] `ENFORCE_PARITY = true` enabled and passing
+- [x] Pool-native flash settlement removes the Hook funding requirement
+- [x] Callback payloads bind the complete nested route and are one-shot
+- [x] Deterministic zero-prefund and entry-dust rollback tests pass
 
 ## Remaining Work
 
@@ -196,7 +210,7 @@ BASE_RPC_URL=http://127.0.0.1:8546 forge test --match-contract ArbHookParityTest
 Core Solidity lives in `contracts/`: `ArbHook.sol` hosts the Uniswap v4 after-swap hook, `ArbitrageLogic.sol` + `ArbUtils.sol` cover pricing/loop helpers, and `contracts/interfaces/` + `contracts/lib/` mirror external pool ABIs. Test fixtures (`contracts/test/*.sol`) include deterministic ERC20s, hook miners, and PoolManager harnesses. Forge tests live under `foundry/`; the JS reference harness lives in the external arb-bot repo.
 
 ## Coding Style & Naming Conventions
-Stick to Solidity ^0.8.20, four-space indentation, explicit visibility, and descriptive custom errors (`ArbErrors`). Contracts/structs are PascalCase, functions/state camelCase, and constants ALL_CAPS. Favor `using SafeERC20`, guard callbacks with `nonReentrant`, and emit events mirroring major revert reasons.
+Stick to Solidity ^0.8.20, four-space indentation, explicit visibility, and descriptive custom errors (`ArbErrors`). Contracts/structs are PascalCase, functions/state camelCase, and constants ALL_CAPS. Favor `using SafeERC20`, authenticate callbacks with payload-bound one-shot contexts (nested flash callbacks must remain callable), and emit events mirroring major revert reasons.
 
 ## Security & Environment
 Store `PRIVATE_KEY`, `BASE_RPC_URL`, and `BASE_TESTNET_RPC_URL` inside an ignored `.env`; never push operator secrets. Double-check trusted factory addresses, hook iteration caps, and min-profit guards prior to Base deployments.

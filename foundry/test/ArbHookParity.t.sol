@@ -119,6 +119,9 @@ contract ArbHookParityTest is Test {
         ctx.hook.setMinProfitToEmit(1 ether);
 
         _expectOwnableRevert(stranger);
+        ctx.hook.setMaxFlashTradeAmount(USDC, 100_000 * (10 ** USDC_DECIMALS));
+
+        _expectOwnableRevert(stranger);
         ctx.hook.setDataStorage(address(0));
 
         _expectOwnableRevert(stranger);
@@ -136,6 +139,9 @@ contract ArbHookParityTest is Test {
         _registerParityPools(ctx, pools);
         _approveParityPools(ctx, pools);
         _fundBot(ctx);
+        assertEq(IERC20(USDC).balanceOf(address(ctx.hook)), 0, "flash mode must not prefund USDC");
+        assertEq(IERC20(WETH).balanceOf(address(ctx.hook)), 0, "flash mode must not prefund WETH");
+        uint256 ownerUsdcBefore = IERC20(USDC).balanceOf(address(this));
 
         RoundExpectation[] memory expected = _expectedRounds();
         RoundResult[] memory actual = new RoundResult[](MAX_ROUNDS);
@@ -157,6 +163,8 @@ contract ArbHookParityTest is Test {
             if (ENFORCE_PARITY) {
                 _assertRoundMatches(actual[round], expected[round], round);
             }
+            assertEq(IERC20(USDC).balanceOf(address(ctx.hook)), 0, "USDC working balance must be zero");
+            assertEq(IERC20(WETH).balanceOf(address(ctx.hook)), 0, "WETH working balance must be zero");
         }
 
         assertGt(successfulRounds, 0, "at least one profitable round expected");
@@ -166,6 +174,11 @@ contract ArbHookParityTest is Test {
         } else {
             assertGt(tradeCount, 0, "trades should be recorded");
         }
+        assertEq(
+            IERC20(USDC).balanceOf(address(this)) - ownerUsdcBefore,
+            18_679_602,
+            "owner must receive exact aggregate profit"
+        );
 
         // Print summary similar to JS harness
         _logSummary(actual, expected, successfulRounds);
@@ -247,6 +260,7 @@ contract ArbHookParityTest is Test {
             _registerParityPools(ctx, pools);
             _approveParityPools(ctx, pools);
             _fundBot(ctx);
+            assertEq(IERC20(USDC).balanceOf(address(ctx.hook)), 0, "replay must not prefund hook");
 
             vm.recordLogs();
             bool success = ctx.hook.attemptAllForTest(MAX_ITER);
@@ -254,6 +268,7 @@ contract ArbHookParityTest is Test {
             RoundResult memory result = _decodeAttempt(vm.getRecordedLogs());
             emit log_named_int("replay profit", _toUsdcUnits(result.cumulativeProfit));
             assertEq(ctx.storageContract.getTradeCount(), 1, "storage should increment per replay");
+            assertEq(IERC20(USDC).balanceOf(address(ctx.hook)), 0, "replay must settle working balance");
         }
     }
 
@@ -310,7 +325,7 @@ contract ArbHookParityTest is Test {
         uint256 totalWeth = wethPerSwap * numSwaps;
 
         // Wrap ETH to WETH for funding swaps
-        vm.deal(address(this), totalWeth + 10 ether); // extra for bot
+        vm.deal(address(this), totalWeth);
         IWETH9 weth = IWETH9(WETH);
         weth.deposit{value: totalWeth}();
 
@@ -335,25 +350,13 @@ contract ArbHookParityTest is Test {
             emit log_named_uint("funding: USDC received", amountOut);
         }
 
-        // Transfer 100k USDC to bot
+        // Keep the JS harness's 100k bankroll only as a virtual sizing cap.
+        // The first DEX pool now supplies each iteration's working inventory.
         uint256 botUsdcAmount = 100_000 * (10 ** USDC_DECIMALS);
         uint256 usdcBalance = IERC20(USDC).balanceOf(address(this));
         emit log_named_uint("funding: total USDC after swaps", usdcBalance);
         require(usdcBalance >= botUsdcAmount, "insufficient USDC from swaps");
-        IERC20(USDC).transfer(address(ctx.hook), botUsdcAmount);
-
-        // Wrap and transfer 10 WETH to bot
-        _topUpWeth(ctx, 10 ether);
-    }
-
-    function _topUpWeth(DeployContext memory ctx, uint256 amount) private {
-        if (amount == 0) return;
-        if (address(this).balance < amount) {
-            vm.deal(address(this), amount);
-        }
-        IWETH9 weth = IWETH9(WETH);
-        weth.deposit{value: amount}();
-        weth.transfer(address(ctx.hook), amount);
+        ctx.hook.setMaxFlashTradeAmount(USDC, botUsdcAmount);
     }
 
     function _expectOwnableRevert(address caller) private {

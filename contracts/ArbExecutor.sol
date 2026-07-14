@@ -10,7 +10,12 @@ import {IUniswapV2Pair} from "./interfaces/IUniswapV2Pair.sol";
 import {IPancakeV3Pool} from "./interfaces/IPancakeV3Pool.sol";
 
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import {IUniswapV3Pool} from "@uniswap/v3-core/contracts/interfaces/IUniswapV3Pool.sol";
+
+interface IArbHookOwner {
+    function owner() external view returns (address);
+}
 
 /// @title ArbExecutor
 /// @notice Delegatecalled execution implementation for ArbHook.
@@ -18,6 +23,8 @@ import {IUniswapV3Pool} from "@uniswap/v3-core/contracts/interfaces/IUniswapV3Po
 ///      ArbExecutionStorage. Direct calls are rejected so its own empty storage
 ///      can never be mistaken for hook state.
 contract ArbExecutor is ArbExecutionStorage, IArbExecutor {
+    using SafeERC20 for IERC20;
+
     address private immutable SELF;
     uint8 private constant MAX_ROUTE_ATTEMPTS = 5;
 
@@ -303,6 +310,8 @@ contract ArbExecutor is ArbExecutionStorage, IArbExecutor {
         // already held by the hook before this isolated attempt began.
         uint256 startTokenBalanceAtEntry = startTokenContract.balanceOf(address(this));
         uint256 intermediateTokenBalanceAtEntry = intermediateTokenContract.balanceOf(address(this));
+        uint256 flashCapacity = maxFlashTradeAmount[startToken];
+        bool useFlashLiquidity = flashCapacity != 0;
         // Minimum practical trade size for this token precision (e.g. 1e14 for 18-dec tokens).
         uint256 minChunkStartToken = _minChunk(startToken);
         if (minChunkStartToken > uint256(type(int256).max)) {
@@ -376,6 +385,7 @@ contract ArbExecutor is ArbExecutionStorage, IArbExecutor {
         // Outer execution loop: each pass recomputes a fresh chunk from live state.
         for (uint256 i = 0; i < maxIterations;) {
             uint256 balanceBeforeIteration = startTokenContract.balanceOf(address(this));
+            uint256 availableStartToken = useFlashLiquidity ? flashCapacity : balanceBeforeIteration;
 
             uint256 chunkToSwap = 0;
             uint160 sqrtPriceLimitA_v3 = 0;
@@ -391,7 +401,7 @@ contract ArbExecutor is ArbExecutionStorage, IArbExecutor {
                 iterConfig.bpsDivisor = BPS_DIVISOR;
                 iterConfig.maxImpactBps = _MAX_IMPACT_BPS;
                 iterConfig.minChunkForStartToken = minChunkStartToken;
-                iterConfig.currentStartTokenBalance = balanceBeforeIteration;
+                iterConfig.currentStartTokenBalance = availableStartToken;
                 iterConfig.initialAbsSpread = initialAbsSpreadForThisArbOpportunity;
 
                 ArbitrageLogic.V3SwapParams memory v3Params = arbLib.getV3SwapParameters(
@@ -418,7 +428,7 @@ contract ArbExecutor is ArbExecutionStorage, IArbExecutor {
                     poolB_addr,
                     startToken,
                     intermediateToken,
-                    balanceBeforeIteration,
+                    availableStartToken,
                     minChunkStartToken,
                     _v2FeeForPoolType(poolAType),
                     _v2FeeForPoolType(poolBType)
@@ -483,7 +493,7 @@ contract ArbExecutor is ArbExecutionStorage, IArbExecutor {
             } else {
                 // Mixed V2/V3 path:
                 // exact optimum is expensive on-chain, so probe from half-balance downward.
-                uint256 currentBal = balanceBeforeIteration;
+                uint256 currentBal = availableStartToken;
                 if (currentBal == 0) break;
 
                 // Half-balance is a practical "large first probe":
@@ -524,12 +534,17 @@ contract ArbExecutor is ArbExecutionStorage, IArbExecutor {
 
             uint256 intermediateBalanceBefore = intermediateTokenContract.balanceOf(address(this));
             uint256 intermediateReceived = 0;
+            FlashSecondLeg memory secondLeg;
+            if (useFlashLiquidity) {
+                secondLeg =
+                    FlashSecondLeg({pool: poolB_addr, poolType: poolBType, sqrtPriceLimitX96: sqrtPriceLimitB_v3});
+            }
 
             // Leg 1: startToken -> intermediateToken on pool A.
             bool swap1Success = false;
             if (poolAType == ArbUtils.PoolType.V3 || poolAType == ArbUtils.PoolType.PANCAKESWAP_V3) {
                 swap1Success = _executeSwapInternal_noBalanceCheck(
-                    poolA_addr, poolAType, startToken, intermediateToken, chunkToSwap, sqrtPriceLimitA_v3
+                    poolA_addr, poolAType, startToken, intermediateToken, chunkToSwap, sqrtPriceLimitA_v3, secondLeg
                 );
             } else {
                 (uint112 rA_start, uint112 rA_interm,) =
@@ -541,67 +556,76 @@ contract ArbExecutor is ArbExecutionStorage, IArbExecutor {
                         arbLib.estimateImpactBps(poolB_addr, poolBType, intermediateToken, amountToReceive);
                     if (estimatedImpactB > _MAX_IMPACT_BPS) break;
                 }
-                swap1Success = _executeV2FlashSwap(
-                    IUniswapV2Pair(poolA_addr), intermediateToken, amountToReceive, startToken, chunkToSwap
+                swap1Success = _executeV2FlashSwapWithSecondLeg(
+                    IUniswapV2Pair(poolA_addr), intermediateToken, amountToReceive, startToken, chunkToSwap, secondLeg
                 );
             }
             if (!swap1Success) {
-                // A first leg may already have changed state for a nonstandard
-                // pool implementation. Revert the isolated self-call rather
-                // than returning a partial execution to the caller.
+                // A reverted later flash iteration is an atomic no-op, so keep
+                // profit from earlier iterations and stop sizing into the
+                // exhausted edge. The first iteration must still succeed.
+                if (useFlashLiquidity && iterations != 0) break;
                 revert ArbErrors.AtomicArbitrageExecutionFailed();
             }
 
             uint256 intermediateBalanceAfter = intermediateTokenContract.balanceOf(address(this));
-            if (intermediateBalanceAfter > intermediateBalanceBefore) {
-                intermediateReceived = intermediateBalanceAfter - intermediateBalanceBefore;
-            } else {
-                intermediateReceived = 0;
-            }
-            if (intermediateReceived == 0) {
-                revert ArbErrors.AtomicArbitrageExecutionFailed();
-            }
-
-            // Use the realized first-leg output for the second-leg policy
-            // check. This protects V3/V3 routes and nonstandard V2 pools whose
-            // actual output differs from the reserve quote; reverting here
-            // atomically rolls back the already-completed first leg.
-            if (isPoolBV3) {
-                uint256 estimatedImpactB =
-                    arbLib.estimateImpactBps(poolB_addr, poolBType, intermediateToken, intermediateReceived);
-                if (estimatedImpactB > _MAX_IMPACT_BPS) {
+            if (useFlashLiquidity) {
+                // The nested reverse leg must consume exactly the temporary
+                // inventory received from the initiating pool.
+                if (intermediateBalanceAfter != intermediateBalanceBefore) {
                     revert ArbErrors.AtomicArbitrageExecutionFailed();
                 }
-            }
+            } else {
+                if (intermediateBalanceAfter > intermediateBalanceBefore) {
+                    intermediateReceived = intermediateBalanceAfter - intermediateBalanceBefore;
+                }
+                if (intermediateReceived == 0) {
+                    revert ArbErrors.AtomicArbitrageExecutionFailed();
+                }
 
-            bool swap2Success = false;
-            // Leg 2: intermediateToken -> startToken on pool B.
-            if (poolBType == ArbUtils.PoolType.V3 || poolBType == ArbUtils.PoolType.PANCAKESWAP_V3) {
-                uint160 actualSqrtPriceLimitB_v3 = sqrtPriceLimitB_v3; // V3-V3 default
-                if (
-                    (poolAType == ArbUtils.PoolType.V2 || poolAType == ArbUtils.PoolType.PANCAKESWAP_V2)
-                        && (poolBType == ArbUtils.PoolType.V3 || poolBType == ArbUtils.PoolType.PANCAKESWAP_V3)
-                ) {
-                    actualSqrtPriceLimitB_v3 = arbLib.calculateV3SqrtPriceLimitForAmountIn(
-                        poolB_addr, poolBType, intermediateToken, intermediateReceived, 0
+                // Use the realized first-leg output for the second-leg policy
+                // check. Reverting here atomically rolls back leg one.
+                if (isPoolBV3) {
+                    uint256 estimatedImpactB =
+                        arbLib.estimateImpactBps(poolB_addr, poolBType, intermediateToken, intermediateReceived);
+                    if (estimatedImpactB > _MAX_IMPACT_BPS) {
+                        revert ArbErrors.AtomicArbitrageExecutionFailed();
+                    }
+                }
+
+                bool swap2Success;
+                // Leg 2: intermediateToken -> startToken on pool B.
+                if (poolBType == ArbUtils.PoolType.V3 || poolBType == ArbUtils.PoolType.PANCAKESWAP_V3) {
+                    uint160 actualSqrtPriceLimitB_v3 = sqrtPriceLimitB_v3; // V3-V3 default
+                    if (poolAType == ArbUtils.PoolType.V2 || poolAType == ArbUtils.PoolType.PANCAKESWAP_V2) {
+                        actualSqrtPriceLimitB_v3 = arbLib.calculateV3SqrtPriceLimitForAmountIn(
+                            poolB_addr, poolBType, intermediateToken, intermediateReceived, 0
+                        );
+                    }
+                    swap2Success = _executeSwapInternal_noBalanceCheck(
+                        poolB_addr,
+                        poolBType,
+                        intermediateToken,
+                        startToken,
+                        intermediateReceived,
+                        actualSqrtPriceLimitB_v3
+                    );
+                } else {
+                    (uint112 rB_interm, uint112 rB_start,) =
+                        arbLib._getV2ReservesForTokens(IUniswapV2Pair(poolB_addr), intermediateToken, startToken);
+                    uint256 amountToReceive2 =
+                        arbLib.getAmountOut(intermediateReceived, rB_interm, rB_start, _v2FeeForPoolType(poolBType));
+                    swap2Success = _executeV2FlashSwap(
+                        IUniswapV2Pair(poolB_addr),
+                        startToken,
+                        amountToReceive2,
+                        intermediateToken,
+                        intermediateReceived
                     );
                 }
-                swap2Success = _executeSwapInternal_noBalanceCheck(
-                    poolB_addr, poolBType, intermediateToken, startToken, intermediateReceived, actualSqrtPriceLimitB_v3
-                );
-            } else {
-                (uint112 rB_interm, uint112 rB_start,) =
-                    arbLib._getV2ReservesForTokens(IUniswapV2Pair(poolB_addr), intermediateToken, startToken);
-                uint256 amountToReceive2 =
-                    arbLib.getAmountOut(intermediateReceived, rB_interm, rB_start, _v2FeeForPoolType(poolBType));
-                swap2Success = _executeV2FlashSwap(
-                    IUniswapV2Pair(poolB_addr), startToken, amountToReceive2, intermediateToken, intermediateReceived
-                );
-            }
-            if (!swap2Success) {
-                // The first leg has completed, so a failed reverse leg must
-                // roll back the entire isolated pair attempt.
-                revert ArbErrors.AtomicArbitrageExecutionFailed();
+                if (!swap2Success) {
+                    revert ArbErrors.AtomicArbitrageExecutionFailed();
+                }
             }
 
             uint256 balanceAfterIteration = startTokenContract.balanceOf(address(this));
@@ -701,7 +725,55 @@ contract ArbExecutor is ArbExecutionStorage, IArbExecutor {
                 timestamp: block.timestamp
             });
         }
+
+        if (useFlashLiquidity) {
+            startTokenContract.safeTransfer(IArbHookOwner(address(this)).owner(), realizedProfit);
+            if (startTokenContract.balanceOf(address(this)) != startTokenBalanceAtEntry) {
+                revert ArbErrors.AtomicArbitrageExecutionFailed();
+            }
+        }
         return (true, cumulativeProfit, iterations);
+    }
+
+    /// @inheritdoc IArbExecutor
+    function executeFlashSecondLeg(
+        address pool,
+        ArbUtils.PoolType poolType,
+        address tokenIn,
+        address tokenOut,
+        uint256 amountIn,
+        uint160 sqrtPriceLimitX96
+    ) external override onlyDelegateCall returns (uint256 amountOut) {
+        IERC20 inputToken = IERC20(tokenIn);
+        IERC20 outputToken = IERC20(tokenOut);
+        uint256 inputBefore = inputToken.balanceOf(address(this));
+        uint256 outputBefore = outputToken.balanceOf(address(this));
+        bool swapSuccess;
+
+        if (poolType == ArbUtils.PoolType.V3 || poolType == ArbUtils.PoolType.PANCAKESWAP_V3) {
+            uint256 estimatedImpact = arbLib.estimateImpactBps(pool, poolType, tokenIn, amountIn);
+            if (estimatedImpact > _MAX_IMPACT_BPS) revert ArbErrors.AtomicArbitrageExecutionFailed();
+            if (sqrtPriceLimitX96 == 0) {
+                sqrtPriceLimitX96 = arbLib.calculateV3SqrtPriceLimitForAmountIn(pool, poolType, tokenIn, amountIn, 0);
+                if (sqrtPriceLimitX96 == 0) revert ArbErrors.AtomicArbitrageExecutionFailed();
+            }
+            swapSuccess =
+                _executeSwapInternal_noBalanceCheck(pool, poolType, tokenIn, tokenOut, amountIn, sqrtPriceLimitX96);
+        } else {
+            (uint112 reserveIn, uint112 reserveOut,) =
+                arbLib._getV2ReservesForTokens(IUniswapV2Pair(pool), tokenIn, tokenOut);
+            uint256 quotedAmountOut = arbLib.getAmountOut(amountIn, reserveIn, reserveOut, _v2FeeForPoolType(poolType));
+            swapSuccess = _executeV2FlashSwap(IUniswapV2Pair(pool), tokenOut, quotedAmountOut, tokenIn, amountIn);
+        }
+        if (!swapSuccess) revert ArbErrors.AtomicArbitrageExecutionFailed();
+
+        uint256 inputAfter = inputToken.balanceOf(address(this));
+        uint256 consumed = inputBefore > inputAfter ? inputBefore - inputAfter : 0;
+        if (consumed != amountIn) revert ArbErrors.FlashSecondLegInputNotFullyConsumed(amountIn, consumed);
+
+        uint256 outputAfter = outputToken.balanceOf(address(this));
+        if (outputAfter <= outputBefore) revert ArbErrors.AtomicArbitrageExecutionFailed();
+        amountOut = outputAfter - outputBefore;
     }
 
     /// @dev Attempts to convert only an attempt-created intermediate residue
@@ -746,6 +818,24 @@ contract ArbExecutor is ArbExecutionStorage, IArbExecutor {
         address tokenToPay,
         uint256 amountToPay
     ) internal override returns (bool success) {
+        return _executeV2FlashSwapWithSecondLeg(
+            pair,
+            tokenToReceive,
+            amountToReceive,
+            tokenToPay,
+            amountToPay,
+            FlashSecondLeg({pool: address(0), poolType: ArbUtils.PoolType.V3, sqrtPriceLimitX96: 0})
+        );
+    }
+
+    function _executeV2FlashSwapWithSecondLeg(
+        IUniswapV2Pair pair,
+        address tokenToReceive,
+        uint256 amountToReceive,
+        address tokenToPay,
+        uint256 amountToPay,
+        FlashSecondLeg memory secondLeg
+    ) private returns (bool success) {
         address pool = address(pair);
         PoolMeta storage pm = poolMetaByAddr[pool];
         if (
@@ -769,9 +859,9 @@ contract ArbExecutor is ArbExecutionStorage, IArbExecutor {
             revert ArbErrors.V2CallbackContextMismatch();
         }
 
-        activeV2SwapContext = _v2SwapContextHash(pool, pm.poolType, tokenToPay, amountToPay, amount0Out, amount1Out);
-
-        bytes memory data = abi.encode(tokenToPay, amountToPay);
+        bytes memory data = abi.encode(tokenToPay, amountToPay, secondLeg);
+        activeV2SwapContext =
+            _v2SwapContextHash(pool, pm.poolType, tokenToPay, amountToPay, amount0Out, amount1Out, keccak256(data));
         try pair.swap(amount0Out, amount1Out, address(this), data) {
             success = true;
         } catch {
@@ -791,6 +881,26 @@ contract ArbExecutor is ArbExecutionStorage, IArbExecutor {
         address tokenOut,
         uint256 amountIn,
         uint160 sqrtPriceLimitX96
+    ) private returns (bool success) {
+        return _executeSwapInternal_noBalanceCheck(
+            poolAddress,
+            poolType,
+            tokenIn,
+            tokenOut,
+            amountIn,
+            sqrtPriceLimitX96,
+            FlashSecondLeg({pool: address(0), poolType: ArbUtils.PoolType.V3, sqrtPriceLimitX96: 0})
+        );
+    }
+
+    function _executeSwapInternal_noBalanceCheck(
+        address poolAddress,
+        ArbUtils.PoolType poolType,
+        address tokenIn,
+        address tokenOut,
+        uint256 amountIn,
+        uint160 sqrtPriceLimitX96,
+        FlashSecondLeg memory secondLeg
     ) private returns (bool success) {
         if (tokenIn == tokenOut) revert ArbErrors.SwapTokensMustBeDifferent();
         if (amountIn == 0 || amountIn > uint256(type(int256).max)) {
@@ -833,9 +943,9 @@ contract ArbExecutor is ArbExecutionStorage, IArbExecutor {
         if (activeV3SwapContext != bytes32(0)) {
             revert ArbErrors.V3CallbackContextMismatch();
         }
-        activeV3SwapContext = _v3SwapContextHash(poolAddress, poolType, callbackSelector, tokenIn, zeroForOne, amountIn);
-
-        bytes memory data = abi.encode(tokenIn, address(this), amountIn, poolAddress);
+        bytes memory data = abi.encode(tokenIn, address(this), amountIn, poolAddress, secondLeg);
+        activeV3SwapContext =
+            _v3SwapContextHash(poolAddress, poolType, callbackSelector, tokenIn, zeroForOne, amountIn, keccak256(data));
 
         // Assume approvals are set up front; avoid allowance SLOAD and branch
 
