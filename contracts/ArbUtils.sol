@@ -20,6 +20,14 @@ import {IDataStorage} from "./interfaces/IDataStorage.sol";
 abstract contract ArbUtils {
     uint8 internal constant MAX_SAFE_TOKEN_DECIMALS = 77;
 
+    /// @dev Canonical concentrated-liquidity factories on Base. V3 callback
+    ///      authentication relies on pools being immutable factory deployments,
+    ///      so registration must reject contracts that merely mimic the pool ABI.
+    IUniswapV3Factory internal constant UNISWAP_V3_FACTORY =
+        IUniswapV3Factory(0x33128a8fC17869897dcE68Ed026d694621f6FDfD);
+    IUniswapV3Factory internal constant PANCAKESWAP_V3_FACTORY =
+        IUniswapV3Factory(0x0BFbCF9fa4f9C56B0F40a671Ad40E0805A091865);
+
     IDataStorage public dataStorage;
 
     /// @notice Minimum tick‑spread (in basis points) required to start an iteration.
@@ -72,9 +80,12 @@ abstract contract ArbUtils {
         uint128 qBuy;
         uint128 qSell;
     }
+    // Deprecated price-only failure state retained to preserve the shared
+    // Hook/Executor storage layout. Execution deliberately ignores it because
+    // balances, approvals, liquidity, and policy can change without a price move.
     mapping(bytes32 => FailedQuote) internal lastFailedQuote;
 
-    // Last failing pool combination seen for a token pair at a specific quantised quote.
+    // Deprecated alongside lastFailedQuote; retained for storage compatibility.
     struct FailedAttempt {
         address buyPool;
         address sellPool;
@@ -93,17 +104,15 @@ abstract contract ArbUtils {
         delete baseCounterList[base];
     }
 
-    // Key is symmetric for (A,B) and (B,A) so both directions share one cache slot.
-    function _getPairKey(address tokenA, address tokenB) internal pure returns (bytes32) {
-        return
-            tokenA < tokenB ? keccak256(abi.encodePacked(tokenA, tokenB)) : keccak256(abi.encodePacked(tokenB, tokenA));
-    }
-
     function _removeTokenFromSupported(address token) internal {
         uint256 n = supportedTokens.length;
         for (uint256 i; i < n; ++i) {
             if (supportedTokens[i] == token) {
-                supportedTokens[i] = supportedTokens[n - 1];
+                // Registration order defines route traversal order. Preserve it
+                // when a base token is removed instead of using swap-and-pop.
+                for (uint256 j = i; j + 1 < n; ++j) {
+                    supportedTokens[j] = supportedTokens[j + 1];
+                }
                 supportedTokens.pop();
                 break;
             }
@@ -121,6 +130,10 @@ abstract contract ArbUtils {
         if (poolAddresses.length != fees.length || poolAddresses.length != poolTypes.length) {
             revert ArbErrors.InputArrayLengthMismatch();
         }
+        // An empty registration is a no-op. Adding the base to
+        // `supportedTokens` here would create a route with no pools that can
+        // survive until an explicit reset.
+        if (poolAddresses.length == 0) return;
 
         // Preserve first-seen ordering for deterministic traversal in attemptAll.
         bool tokenIsNew = true;
@@ -157,11 +170,10 @@ abstract contract ArbUtils {
             } else {
                 // PANCAKESWAP_V3
                 IPancakeV3Pool pool = IPancakeV3Pool(poolAddr);
-                IUniswapV3Factory factory = IUniswapV3Factory(0x0BFbCF9fa4f9C56B0F40a671Ad40E0805A091865);
                 t0 = pool.token0();
                 t1 = pool.token1();
                 actualFee = pool.fee();
-                tickSpacing = factory.feeAmountTickSpacing(actualFee);
+                tickSpacing = PANCAKESWAP_V3_FACTORY.feeAmountTickSpacing(actualFee);
             }
 
             if (!((token == t0 && t1 != address(0)) || (token == t1 && t0 != address(0)))) {
@@ -170,6 +182,11 @@ abstract contract ArbUtils {
 
             if (actualFee != providedFee) {
                 revert ArbErrors.AddPoolsProvidedFeeMismatch();
+            }
+
+            IUniswapV3Factory expectedFactory = poolType == PoolType.V3 ? UNISWAP_V3_FACTORY : PANCAKESWAP_V3_FACTORY;
+            if (expectedFactory.getPool(t0, t1, actualFee) != poolAddr) {
+                revert ArbErrors.AddPoolsPoolVerificationFailed();
             }
         } else if (poolType == PoolType.V2) {
             actualFee = V2_POOL_FEE_PPM;
@@ -212,18 +229,54 @@ abstract contract ArbUtils {
         if (numPools == 0) revert ArbErrors.TokenHasNoPools();
         if (poolIndex >= numPools) revert ArbErrors.PoolIndexOutOfBounds();
 
-        if (poolIndex != numPools - 1) pools[poolIndex] = pools[numPools - 1];
+        PoolInfo memory removedPool = pools[poolIndex];
+        address removedCounter = removedPool.token0 == token ? removedPool.token1 : removedPool.token0;
+
+        // Pool registration order is a deterministic tie-breaker during route
+        // discovery, so admin removal must not reorder the surviving pools.
+        for (uint256 i = poolIndex; i + 1 < numPools; ++i) {
+            pools[i] = pools[i + 1];
+        }
         pools.pop();
 
-        /* orphan-pruning skipped for brevity; unchanged behaviour */
-        if (pools.length == 0) _removeTokenFromSupported(token);
+        if (pools.length == 0) {
+            _removeTokenFromSupported(token);
+        } else {
+            _pruneCounterIfOrphaned(token, removedCounter);
+        }
     }
 
     function _resetTokenPools(address token) internal {
-        if (tokenPools[token].length == 0) return;
-        _clearCountersForBase(token);
         delete tokenPools[token];
+        // Also removes legacy/accidental ghost entries whose pool array is
+        // already empty.
         _removeTokenFromSupported(token);
+    }
+
+    function _pruneCounterIfOrphaned(address base, address counter) private {
+        PoolInfo[] storage pools = tokenPools[base];
+        uint256 poolCount = pools.length;
+        for (uint256 i; i < poolCount; ++i) {
+            PoolInfo storage pool = pools[i];
+            address poolCounter = pool.token0 == base ? pool.token1 : pool.token0;
+            if (poolCounter == counter) return;
+        }
+
+        if (!isCounterKnown[base][counter]) return;
+        isCounterKnown[base][counter] = false;
+
+        address[] storage counters = baseCounterList[base];
+        uint256 counterCount = counters.length;
+        for (uint256 i; i < counterCount; ++i) {
+            if (counters[i] != counter) continue;
+            // Counter traversal is insertion ordered for the same reason as
+            // supported-token traversal.
+            for (uint256 j = i; j + 1 < counterCount; ++j) {
+                counters[j] = counters[j + 1];
+            }
+            counters.pop();
+            return;
+        }
     }
 
     function _resetAllPools() internal {

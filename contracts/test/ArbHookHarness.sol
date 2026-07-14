@@ -32,4 +32,24 @@ contract ArbHookHarness is ArbHook {
         FailedAttempt storage attempt = lastFailedAttemptForPair[pairKey];
         return (attempt.buyPool, attempt.sellPool, attempt.qBuy, attempt.qSell);
     }
+
+    function countersForTest(address base) external view returns (address[] memory) {
+        return baseCounterList[base];
+    }
+
+    function counterKnownForTest(address base, address counter) external view returns (bool) {
+        return isCounterKnown[base][counter];
+    }
+
+    function seedFailureCachesForTest(
+        bytes32 quoteKey,
+        bytes32 pairKey,
+        address buyPool,
+        address sellPool,
+        uint128 qBuy,
+        uint128 qSell
+    ) external onlyOwner {
+        lastFailedQuote[quoteKey] = FailedQuote(qBuy, qSell);
+        lastFailedAttemptForPair[pairKey] = FailedAttempt(buyPool, sellPool, qBuy, qSell);
+    }
 }
