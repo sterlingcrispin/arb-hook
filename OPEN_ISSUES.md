@@ -20,7 +20,7 @@ The initial deployment is owner-operated with a small set of manually verified, 
 - Priority: `CRITICAL`
 - Summary: The deterministic fork gates use Base block 33942262. They cannot prove current lender premiums, liquidity, canonical contract state, route economics, or transaction cost.
 - Evidence: The canonical router lifecycle passed on Base block 49149499 with the live Aave premium at 5 bps. The successful hook path used 1,076,889 gas and settled through the expected beneficiary path.
-- Decision: run the intended manifest through a fresh current-head fork, verify canonical addresses and code, and set the minimum net-profit floor from current total transaction cost before deployment.
+- Decision: run the intended manifest through a fresh current-head fork, verify canonical addresses and code, and set the minimum net-profit floor from a differential gas replay before deployment.
 
 6. Mandatory on-chain trade-history persistence
 - Status: `RESOLVED`
@@ -109,3 +109,7 @@ The initial deployment is owner-operated with a small set of manually verified, 
 2. Mixed-route flash principal sizing
 - Status: `ADDRESSED`
 - Notes: Pre-loan sizing now reuses the existing mixed-route simulator and bounded halving loop, and the obsolete generic spread-utilization hint was removed. Fixed-block Aave fork tests cover both directions against real Base pools. V2-to-V3 borrowed 50 USDC, swapped 25 USDC, paid 0.025 USDC, and netted 1.190636 USDC; V3-to-V2 used the same principal and fee and netted 1.820425 USDC in deliberately displaced test states.
+
+23. Fail-closed canary economic configuration
+- Status: `ADDRESSED`
+- Notes: The owner-run configuration script requires explicit nonzero USDC principal, fee-cap, and minimum-net-profit values, applies the principal cap last, and does not enable hook iterations. The runbook defines the raw-unit differential-gas formula and records `0.10 USDC` only as a provisional rehearsal floor; the final value remains part of the current-head release gate.

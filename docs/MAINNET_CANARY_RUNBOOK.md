@@ -132,7 +132,20 @@ cast call "$AAVE_POOL" \
 
 5. Trust the deployed adapter, assign it to USDC, then set the principal cap,
    maximum fee, and minimum net profit. All three economic values must be
-   nonzero or borrowing remains disabled.
+   nonzero or borrowing remains disabled. Simulate the owner-only configuration
+   script with explicit raw-unit values, then add `--broadcast`:
+
+```bash
+PRIVATE_KEY="$OWNER_KEY" HOOK="$HOOK" AAVE_ADAPTER="$ADAPTER" \
+USDC_FLASH_PRINCIPAL_CAP_RAW="$USDC_FLASH_PRINCIPAL_CAP_RAW" \
+USDC_MAX_FLASH_FEE_BPS="$USDC_MAX_FLASH_FEE_BPS" \
+USDC_MIN_NET_PROFIT_RAW="$USDC_MIN_NET_PROFIT_RAW" \
+forge script script/ConfigureArbHookCanary.s.sol:ConfigureArbHookCanary \
+  --rpc-url "$BASE_RPC_URL"
+```
+
+   The script configures the principal cap last and does not enable hook
+   iterations.
 6. Read back both configurations:
 
 ```bash
@@ -151,19 +164,32 @@ of 10,695.735171 USDC, so an 11,000 USDC cap is the smallest simple cap that
 covers that fixed-block gate. The test suite's 100,000 USDC cap is not a
 production recommendation.
 
-`minNetProfit` is denominated in raw borrowed-token units. It excludes the
-transaction's ETH gas cost even though it includes the flash fee. Derive the
-production floor offchain from a conservative ETH/USDC conversion and current
-Base fee conditions; the one-unit test value is not safe for production. V3
-routes reuse the existing sizing estimate to reject opportunities that cannot
+`minNetProfit` is denominated in raw borrowed-token units. It excludes ETH gas
+even though it includes the flash fee. For USDC, calculate:
+
+```text
+gasCostRaw = ceil(
+  (incrementalGas * conservativeGasPriceWei + extraEthFeeWei)
+  * conservativeEthUsdcRaw / 1e18
+)
+minNetProfitRaw = gasCostRaw + desiredUserMarginRaw
+```
+
+Measure `incrementalGas` by replaying the same swap from the same current-head
+fork snapshot with iterations first at `0` and then at the intended value. The
+swap calldata is unchanged, so normal user traffic does not incur incremental
+L1 calldata cost from the arb itself. If the canary swap exists only to trigger
+the hook, include the full transaction gas and L1 fee in `extraEthFeeWei`.
+Every route type reuses its sizing estimate to reject opportunities that cannot
 cover the quoted flash fee plus this floor before borrowing. The realized
 post-loan check remains authoritative because the estimate is not exact.
 
 The 2026-07-26 rehearsal at Base block 49149499 measured 1,076,889 gas inside
 the successful hook path. At that block's 0.006 gwei gas price and observed
-WETH/USDC price, L2 execution alone was about 0.012324 USDC. This excludes L1
-data cost, volatility, and user margin; it is a calibration example, not a
-production floor.
+WETH/USDC price, L2 execution alone was about 0.012324 USDC. A provisional
+rehearsal value of `100000` raw USDC (`0.10 USDC`) is roughly eight times that
+measured L2 cost, but it is not a release value. Recalculate from the final
+current-head differential replay and the desired user margin.
 
 ## Route Canary Traffic
 

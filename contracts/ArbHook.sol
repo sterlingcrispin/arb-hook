@@ -715,7 +715,8 @@ contract ArbHook is
             return (false, 0, 0);
         if (
             expectedRouteProfit > 0 &&
-            expectedRouteProfit < fee + minNetProfit
+            (expectedRouteProfit <= fee ||
+                expectedRouteProfit - fee < minNetProfit)
         ) return (false, 0, 0);
 
         address beneficiary = activeAttemptProfitRecipient;

@@ -86,6 +86,9 @@ Add `--broadcast` only after reviewing the simulation. The optional `OWNER`
 environment variable defaults to the key's address. The script intentionally does not
 register pools, configure lender limits, or enable callback
 iterations; those owner actions must be reviewed separately after deployment.
+`script/ConfigureArbHookCanary.s.sol` applies the reviewed USDC lender and
+economic values in a separate owner transaction sequence. It requires explicit,
+nonzero raw-unit values and does not enable callback iterations.
 
 ## Cached Fork Workflow (Fast Re-runs)
 
