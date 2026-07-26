@@ -5,111 +5,13 @@ import "forge-std/Test.sol";
 
 import {ArbHookHarness} from "../../contracts/test/ArbHookHarness.sol";
 import {PoolManagerHarness} from "../../contracts/test/PoolManagerHarness.sol";
+import {AaveV3ERC3156Adapter} from "../../contracts/AaveV3ERC3156Adapter.sol";
 import {ArbitrageLogic} from "../../contracts/ArbitrageLogic.sol";
-import {DataStorage} from "../../contracts/DataStorage.sol";
 import {ArbUtils} from "../../contracts/ArbUtils.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
-import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
-import {IERC3156FlashBorrower} from "../../contracts/interfaces/IERC3156FlashBorrower.sol";
-import {IERC3156FlashLender} from "../../contracts/interfaces/IERC3156FlashLender.sol";
 import {IWETH9} from "../../contracts/interfaces/IWETH9.sol";
 import {ISwapRouter02} from "../../contracts/interfaces/uniswap/ISwapRouter02.sol";
 import {IPoolManager} from "@uniswap/v4-core/src/interfaces/IPoolManager.sol";
-
-interface IAaveV3Pool {
-    function FLASHLOAN_PREMIUM_TOTAL() external view returns (uint128);
-
-    function flashLoanSimple(
-        address receiverAddress,
-        address asset,
-        uint256 amount,
-        bytes calldata params,
-        uint16 referralCode
-    ) external;
-}
-
-interface IAaveFlashLoanSimpleReceiver {
-    function executeOperation(
-        address asset,
-        uint256 amount,
-        uint256 premium,
-        address initiator,
-        bytes calldata params
-    ) external returns (bool);
-}
-
-/// @notice Test-only ERC3156 adapter over Aave V3 flashLoanSimple.
-contract AaveV3ERC3156Adapter is IERC3156FlashLender, IAaveFlashLoanSimpleReceiver {
-    using SafeERC20 for IERC20;
-
-    IAaveV3Pool public immutable pool;
-    address public immutable supportedToken;
-    address public immutable liquidityToken;
-
-    bytes32 private constant CALLBACK_SUCCESS =
-        keccak256("ERC3156FlashBorrower.onFlashLoan");
-
-    constructor(address pool_, address token_, address liquidityToken_) {
-        pool = IAaveV3Pool(pool_);
-        supportedToken = token_;
-        liquidityToken = liquidityToken_;
-    }
-
-    function maxFlashLoan(address token) external view returns (uint256) {
-        if (token != supportedToken) return 0;
-        return IERC20(token).balanceOf(liquidityToken);
-    }
-
-    function flashFee(address token, uint256 amount) external view returns (uint256) {
-        require(token == supportedToken, "unsupported token");
-        uint256 premiumBps = uint256(pool.FLASHLOAN_PREMIUM_TOTAL());
-        return (amount * premiumBps) / 10_000;
-    }
-
-    function flashLoan(
-        address receiver,
-        address token,
-        uint256 amount,
-        bytes calldata data
-    ) external returns (bool) {
-        require(token == supportedToken, "unsupported token");
-        bytes memory params = abi.encode(receiver, msg.sender, data);
-        pool.flashLoanSimple(address(this), token, amount, params, 0);
-        return true;
-    }
-
-    function executeOperation(
-        address asset,
-        uint256 amount,
-        uint256 premium,
-        address initiator,
-        bytes calldata params
-    ) external returns (bool) {
-        require(msg.sender == address(pool), "invalid pool caller");
-        require(initiator == address(this), "invalid aave initiator");
-
-        (address receiver, address flashInitiator, bytes memory data) = abi.decode(
-            params,
-            (address, address, bytes)
-        );
-        require(asset == supportedToken, "unexpected asset");
-
-        IERC20(asset).safeTransfer(receiver, amount);
-        bytes32 response = IERC3156FlashBorrower(receiver).onFlashLoan(
-            flashInitiator,
-            asset,
-            amount,
-            premium,
-            data
-        );
-        require(response == CALLBACK_SUCCESS, "bad borrower callback");
-
-        uint256 repay = amount + premium;
-        IERC20(asset).safeTransferFrom(receiver, address(this), repay);
-        IERC20(asset).forceApprove(address(pool), repay);
-        return true;
-    }
-}
 
 contract ArbHookFlashForkAaveTest is Test {
     // Base mainnet addresses from @bgd-labs/aave-address-book (AaveV3Base / AaveV3BaseAssets).
@@ -126,8 +28,8 @@ contract ArbHookFlashForkAaveTest is Test {
     uint256 internal constant PARITY_FLASH_CAP_USDC = 100_000e6;
     uint256 internal constant PARITY_ROUNDS = 10;
     uint256 internal constant PARITY_ROUNDS_SMOKE = 3;
-    bytes32 internal constant FLASH_REQUESTED_TOPIC0 =
-        keccak256("FlashLoanRequested(address,address,uint256,address)");
+    bytes32 internal constant FLASH_SETTLED_TOPIC0 =
+        keccak256("FlashLoanSettled(address,address,address,address,address,uint256,uint256,uint256,int256,uint256,address)");
 
     struct PoolSpec {
         address base;
@@ -141,10 +43,20 @@ contract ArbHookFlashForkAaveTest is Test {
         address sellPool;
     }
 
+    struct Settlement {
+        address buyPool;
+        address sellPool;
+        uint256 principal;
+        uint256 totalAmountSwapped;
+        uint256 fee;
+        int256 netProfit;
+        uint256 iterations;
+        address beneficiary;
+    }
+
     bool internal forkEnabled;
     PoolManagerHarness internal poolManager;
     ArbHookHarness internal hook;
-    DataStorage internal dataStorage;
     AaveV3ERC3156Adapter internal adapter;
 
     function setUp() public {
@@ -159,19 +71,24 @@ contract ArbHookFlashForkAaveTest is Test {
         }
         if (bytes(baseRpcUrl).length == 0) return;
 
+        // Cached Anvil already forks the fixed historical block, but its local block
+        // numbers begin at zero. Do not ask Forge to fetch Base block FORK_BLOCK from
+        // that local provider; direct-RPC runs retain explicit block pinning.
+        bool usePinnedLocalFork = vm.envOr("FORK_ALREADY_PINNED", false);
+        if (usePinnedLocalFork) {
+            vm.createSelectFork(baseRpcUrl);
+        } else {
+
         vm.createSelectFork(baseRpcUrl, FORK_BLOCK);
+        }
         forkEnabled = true;
 
         poolManager = new PoolManagerHarness(address(this));
         ArbitrageLogic logic = new ArbitrageLogic();
-        dataStorage = new DataStorage(address(this));
         hook = new ArbHookHarness(
             IPoolManager(address(poolManager)),
             address(this),
-            address(logic),
-            address(dataStorage)
-        );
-        dataStorage.setWriter(address(hook));
+            address(logic));
 
         adapter = new AaveV3ERC3156Adapter(AAVE_POOL, USDC, AAVE_USDC_A_TOKEN);
         hook.setTrustedFlashLender(address(adapter), true);
@@ -180,7 +97,9 @@ contract ArbHookFlashForkAaveTest is Test {
     }
 
     function testForkAaveAdapterRoundTripRepaysPrincipalAndFee() public {
-        if (!forkEnabled) return;
+        if (!forkEnabled) {
+            vm.skip(true, "set RUN_FLASH_FORK_INTEGRATION=true and BASE_RPC_URL"); return;
+        }
 
         uint256 principal = TEST_FLASH_PRINCIPAL_USDC;
         hook.setFlashPrincipalForToken(USDC, principal);
@@ -211,12 +130,13 @@ contract ArbHookFlashForkAaveTest is Test {
         );
     }
 
-    function testForkAaveAdapterProfitablePathPaysBeneficiaryAndStoresNet() public {
-        if (!forkEnabled) return;
+    function testForkAaveAdapterProfitablePathPaysBeneficiaryAndEmitsNetSettlement() public {
+        if (!forkEnabled) {
+            vm.skip(true, "set RUN_FLASH_FORK_INTEGRATION=true and BASE_RPC_URL"); return;
+        }
 
         uint256 principal = TEST_FLASH_PRINCIPAL_USDC;
         hook.setFlashPrincipalForToken(USDC, principal);
-        hook.setMinProfitToEmit(1);
         hook.setTestProfitBps(1); // enable harness test path for maxIterations=0
 
         address beneficiary = makeAddr("forkBeneficiary");
@@ -232,7 +152,7 @@ contract ArbHookFlashForkAaveTest is Test {
         hook.setTestProfitTransfer(address(this), expectedGross);
 
         uint256 beneficiaryBefore = IERC20(USDC).balanceOf(beneficiary);
-        uint256 tradesBefore = dataStorage.getTradeCount();
+        vm.recordLogs();
 
         (bool success, int256 profit, uint256 iterations) = hook.runFlashArbForTest(
             address(0xD1),
@@ -252,19 +172,19 @@ contract ArbHookFlashForkAaveTest is Test {
             beneficiaryBefore + expectedNet,
             "beneficiary should receive net profit"
         );
-        assertEq(
-            dataStorage.getTradeCount(),
-            tradesBefore + 1,
-            "profitable fork flash trade should be stored"
-        );
-
-        uint256[] memory stored = dataStorage.fetchTradeData(tradesBefore);
-        assertEq(stored[5], expectedNet, "stored profit should be net");
+        Settlement memory settled = _extractProfitableSettlement(
+            vm.getRecordedLogs());
+        assertEq(settled.buyPool, address(0xD2), "settled buy pool mismatch");
+        assertEq(settled.sellPool, address(0xD1), "settled sell pool mismatch");
+        assertEq(uint256(settled.netProfit), expectedNet, "settled net mismatch");
+        assertEq(settled.beneficiary, beneficiary, "settled beneficiary mismatch");
         assertEq(IERC20(USDC).balanceOf(address(hook)), 0, "hook should not retain USDC");
     }
 
     function testForkAaveRealArbPathExecutesAgainstParityPoolBook() public {
-        if (!forkEnabled) return;
+        if (!forkEnabled) {
+            vm.skip(true, "set RUN_FLASH_FORK_INTEGRATION=true and BASE_RPC_URL"); return;
+        }
 
         _configureParityPoolBook();
         _replicateParityFundingState();
@@ -272,7 +192,6 @@ contract ArbHookFlashForkAaveTest is Test {
 
         uint256 principal = TEST_FLASH_PRINCIPAL_USDC;
         hook.setFlashPrincipalForToken(USDC, principal);
-        hook.setMinProfitToEmit(0);
 
         ArbUtils.PoolInfo[] memory usdcPools = hook.getPoolsForToken(USDC);
         assertEq(usdcPools.length, 16, "must register parity USDC pool universe");
@@ -308,19 +227,26 @@ contract ArbHookFlashForkAaveTest is Test {
         assertGt(pairProfit, -int256(paidFee), "arb path should generate non-zero gross result");
     }
 
-    function testForkAaveAttemptAllTracksLegacyRoundSequenceShape() public {
+    function testForkAaveAttemptAllTracksLegacyRoundSequenceFull() public {
         _runLegacyRoundSequence(PARITY_ROUNDS, true);
     }
 
-    function testForkAaveAttemptAllTracksLegacyRoundSequenceShapeFirst3() public {
+    function testForkAaveAttemptAllTracksLegacyRoundSequenceSmokeFirst3() public {
         _runLegacyRoundSequence(PARITY_ROUNDS_SMOKE, false);
+    }
+
+    function testForkAaveAttemptAllTracksLegacyRoundSequenceShapePrefix() public {
+        uint256 roundsToRun = vm.envOr("FLASH_PARITY_ROUNDS", PARITY_ROUNDS);
+        _runLegacyRoundSequence(roundsToRun, roundsToRun > 1);
     }
 
     function _runLegacyRoundSequence(
         uint256 roundsToRun,
         bool requirePrincipalVariance
     ) private {
-        if (!forkEnabled) return;
+        if (!forkEnabled) {
+            vm.skip(true, "set RUN_FLASH_FORK_INTEGRATION=true and BASE_RPC_URL"); return;
+        }
         assertLe(roundsToRun, PARITY_ROUNDS, "round cap exceeds legacy sequence");
 
         _configureParityPoolBook();
@@ -328,12 +254,8 @@ contract ArbHookFlashForkAaveTest is Test {
         _seedCbBtcUsdcGap();
 
         hook.setFlashPrincipalForToken(USDC, PARITY_FLASH_CAP_USDC);
-        hook.setMinProfitToEmit(0);
-
-        uint256 tradesBefore = dataStorage.getTradeCount();
         RoundExpectation[PARITY_ROUNDS] memory expected = _legacyRoundExpectations();
         uint256 profitableRounds;
-        uint256 routeMatches;
         uint256 lastPrincipal;
         bool sawPrincipalVariance;
 
@@ -343,22 +265,20 @@ contract ArbHookFlashForkAaveTest is Test {
             bool success = hook.attemptAllForTest(PARITY_MAX_ITER);
             assertTrue(success, "legacy-profitable round should remain profitable");
             Vm.Log[] memory logs = vm.getRecordedLogs();
-            uint256 principal = _extractFlashRequestedPrincipal(logs);
+            Settlement memory settled = _extractProfitableSettlement(logs);
+            uint256 principal = settled.principal;
             assertGt(principal, 0, "round should request flash principal");
             if (round > 0 && principal != lastPrincipal) {
                 sawPrincipalVariance = true;
             }
             lastPrincipal = principal;
+            address buyPool = settled.buyPool;
+            address sellPool = settled.sellPool;
+            uint256 totalAmountSwapped = settled.totalAmountSwapped;
+            uint256 profit = uint256(settled.netProfit);
 
-            uint256[] memory trade = dataStorage.fetchTradeData(tradesBefore + round);
-            address buyPool = address(uint160(trade[0]));
-            address sellPool = address(uint160(trade[1]));
-            uint256 profit = trade[5];
-
-            bool routeMatch =
-                buyPool == expected[round].buyPool &&
-                sellPool == expected[round].sellPool;
-            if (routeMatch) routeMatches++;
+            uint256 fee =
+                settled.fee;
             if (profit > 0) profitableRounds++;
 
             emit log("");
@@ -368,20 +288,21 @@ contract ArbHookFlashForkAaveTest is Test {
             emit log_named_address("expected sell", expected[round].sellPool);
             emit log_named_address("actual sell", sellPool);
             emit log_named_uint("flash principal (raw usdc)", principal);
+            emit log_named_uint("total amount swapped (raw usdc)", totalAmountSwapped);
+            emit log_named_uint("Aave fee (raw usdc)", fee);
             emit log_named_uint("net profit (raw usdc)", profit);
-            emit log_named_uint("iterations", trade[6]);
-            emit log_named_uint("route match (1=yes)", routeMatch ? 1 : 0);
+            emit log_named_uint("iterations", settled.iterations);
+            assertEq(buyPool, expected[round].buyPool, "buy route drifted from legacy");
+            assertEq(sellPool, expected[round].sellPool, "sell route drifted from legacy");
 
             assertGt(profit, 0, "round should have positive net profit");
         }
 
         emit log("");
         emit log_named_uint("profitable rounds", profitableRounds);
-        emit log_named_uint("route matches vs legacy", routeMatches);
         emit log("====================================================");
 
         assertEq(profitableRounds, roundsToRun, "all tested rounds should remain profitable");
-        assertGt(routeMatches, 0, "expected at least some route alignment with legacy order");
         if (requirePrincipalVariance && roundsToRun > 1) {
             assertTrue(sawPrincipalVariance, "flash principal should adapt across rounds");
         }
@@ -408,7 +329,6 @@ contract ArbHookFlashForkAaveTest is Test {
         hook.setMinSpreadBps(10);
         hook.setChunkSpreadConsumptionBps(1500);
         hook.setMaxImpactBps(500);
-        hook.setMinProfitToEmit(0);
     }
 
     function _replicateParityFundingState() private {
@@ -565,17 +485,29 @@ contract ArbHookFlashForkAaveTest is Test {
         });
     }
 
-    function _extractFlashRequestedPrincipal(
+    function _extractProfitableSettlement(
         Vm.Log[] memory entries
-    ) private pure returns (uint256 principal) {
+    ) private view returns (Settlement memory settled) {
         for (uint256 i = 0; i < entries.length; ++i) {
             if (
+                entries[i].emitter == address(hook) &&
                 entries[i].topics.length > 0 &&
-                entries[i].topics[0] == FLASH_REQUESTED_TOPIC0
+                entries[i].topics[0] == FLASH_SETTLED_TOPIC0
             ) {
-                (principal, ) = abi.decode(entries[i].data, (uint256, address));
-                return principal;
+                Settlement memory candidate;
+                (
+                    candidate.buyPool,
+                    candidate.sellPool,
+                    candidate.principal,
+                    candidate.totalAmountSwapped,
+                    candidate.fee,
+                    candidate.netProfit,
+                    candidate.iterations,
+                    candidate.beneficiary ) = abi.decode(entries[i].data, (address, address, uint256, uint256, uint256, int256,uint256, address));
+                if (candidate.netProfit > 0)
+                return candidate;
             }
         }
+        revert("profitable settlement event missing");
     }
 }

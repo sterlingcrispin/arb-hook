@@ -12,7 +12,6 @@ import "@openzeppelin/contracts/token/ERC20/extensions/IERC20Metadata.sol";
 import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import {ArbErrors} from "./Errors.sol";
 import {ArbitrageLogic} from "./ArbitrageLogic.sol";
-import {IDataStorage} from "./interfaces/IDataStorage.sol";
 
 /// @title ArbUtils
 /// @notice Shared state and helper routines for pool registration, route discovery,
@@ -22,8 +21,6 @@ import {IDataStorage} from "./interfaces/IDataStorage.sol";
 ///      Registration order therefore determines evaluation order in `attemptAllInternal`.
 abstract contract ArbUtils {
     using SafeERC20 for IERC20;
-
-    IDataStorage public dataStorage;
 
     /// @notice Minimum tick‑spread (in basis points) required to start an iteration.
     uint16 public minSpreadBps = 10; // 0.10 %
@@ -65,28 +62,9 @@ abstract contract ArbUtils {
     // Stateless pricing/sizing engine shared by the hook execution paths.
     ArbitrageLogic internal arbLib;
 
-    IDataStorage.TradeData public lastTradeData;
-
     // Mailbox written by inner execution and consumed by wrapper callsites.
     // Keeping this on storage avoids pushing richer structs through low-level return data.
     int256 public lastExecutionProfit;
-
-    struct FailedQuote {
-        uint128 qBuy;
-        uint128 qSell;
-    }
-    mapping(bytes32 => FailedQuote) internal lastFailedQuote;
-
-    // Last failing pool combination seen for a token pair at a specific quantised quote.
-    struct FailedAttempt {
-        address buyPool;
-        address sellPool;
-        uint128 qBuy;
-        uint128 qSell;
-    }
-    mapping(bytes32 => FailedAttempt) internal lastFailedAttemptForPair;
-
-    mapping(address => uint256) internal poolActivityCache;
 
     /* ---------------- Pool-list helpers ---------------- */
     function _clearCountersForBase(address base) internal {
@@ -230,21 +208,6 @@ abstract contract ArbUtils {
                 tickSpacing
             )
         );
-
-        uint256 initialActivityIndicator;
-        if (poolType == PoolType.V3) {
-            (, , uint16 obsIndex, , , , ) = IUniswapV3Pool(poolAddr).slot0();
-            initialActivityIndicator = obsIndex;
-        } else if (poolType == PoolType.PANCAKESWAP_V3) {
-            // Use the specific IPancakeV3Pool interface to avoid ABI issues
-            (, , uint16 obsIndex, , , , ) = IPancakeV3Pool(poolAddr).slot0();
-            initialActivityIndicator = obsIndex;
-        } else {
-            // V2 or PCS V2
-            (, , uint32 timestamp) = IUniswapV2Pair(poolAddr).getReserves();
-            initialActivityIndicator = timestamp;
-        }
-        poolActivityCache[poolAddr] = initialActivityIndicator;
 
         // Build the base -> counter adjacency list used by attemptAll route scanning.
         address counter = (t0 == token) ? t1 : t0;

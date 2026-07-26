@@ -76,10 +76,11 @@ Per iteration:
 3. Measure realized per-iteration profit from wallet balances.
 4. Stop if marginal iteration profit is `<= 0`.
 
-After loop:
+After the loop:
 
 - Best-effort unwind of residual intermediate tokens (except USDC/WETH skip case).
-- Emit/store trade only if positive and above `minProfitToEmit`.
+- Return the realized profit, iteration count, and total input swapped to the flash callback.
+- Emit the final route and net accounting in `FlashLoanSettled`.
 
 Why stop on non-positive marginal profit:
 

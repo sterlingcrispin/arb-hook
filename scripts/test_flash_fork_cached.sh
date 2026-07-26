@@ -17,6 +17,8 @@ LOCAL_RPC_URL="http://${ANVIL_HOST}:${ANVIL_PORT}"
 ANVIL_QUIET="${ANVIL_QUIET:-1}"
 ANVIL_NO_RATE_LIMIT="${ANVIL_NO_RATE_LIMIT:-1}"
 ANVIL_CUPS="${ANVIL_CUPS:-5000}"
+FORK_IDENTITY_ADDRESS="0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913" # Base USDC
+FORK_BLOCK_HEX="$(printf '0x%x' "${FORK_BLOCK}")"
 
 mkdir -p "${CACHE_PATH}"
 
@@ -31,6 +33,24 @@ rpc_ready() {
     "${LOCAL_RPC_URL}" >/dev/null 2>&1
 }
 
+rpc_matches_fork() {
+  local block_response
+  local code_response
+  block_response="$(curl -sS \
+    -H "Content-Type: application/json" \
+    -X POST \
+    --data '{"jsonrpc":"2.0","method":"eth_blockNumber","params":[],"id":1}' \
+    "${LOCAL_RPC_URL}" 2>/dev/null || true)"
+  code_response="$(curl -sS \
+    -H "Content-Type: application/json" \
+    -X POST \
+    --data "{\"jsonrpc\":\"2.0\",\"method\":\"eth_getCode\",\"params\":[\"${FORK_IDENTITY_ADDRESS}\",\"latest\"],\"id\":1}" \
+    "${LOCAL_RPC_URL}" 2>/dev/null || true)"
+
+  [[ "${block_response}" == *"\"result\":\"${FORK_BLOCK_HEX}\""* ]] &&
+    [[ "${code_response}" =~ \"result\":\"0x[0-9a-fA-F]{2,}\" ]]
+}
+
 cleanup() {
   if [[ "${anvil_started_by_script}" == "1" && -n "${anvil_pid}" ]]; then
     kill "${anvil_pid}" >/dev/null 2>&1 || true
@@ -39,6 +59,11 @@ cleanup() {
 trap cleanup EXIT
 
 if rpc_ready; then
+  if ! rpc_matches_fork; then
+    echo "Existing RPC at ${LOCAL_RPC_URL} is not the expected Base fork at block ${FORK_BLOCK}"
+    echo "Stop it or choose another ANVIL_PORT before running this test"
+    exit 1
+  fi
   echo "Using existing anvil at ${LOCAL_RPC_URL}"
 else
   echo "Starting cached anvil at ${LOCAL_RPC_URL} (log: ${ANVIL_LOG_PATH})"
@@ -81,9 +106,9 @@ fi
 if [[ "$#" -eq 0 ]]; then
   set -- \
     --match-contract ArbHookFlashForkAaveTest \
-    --match-test testForkAaveAttemptAllTracksLegacyRoundSequenceShape \
+    --match-test LegacyRoundSequenceFull \
     -vv
 fi
 
-BASE_RPC_URL="${LOCAL_RPC_URL}" RUN_FLASH_FORK_INTEGRATION=true \
+BASE_RPC_URL="${LOCAL_RPC_URL}" FORK_ALREADY_PINNED=true RUN_FLASH_FORK_INTEGRATION=true \
   forge test "$@"
