@@ -270,7 +270,7 @@ Acceptance:
 4. New flash-loan test suite passing on fork and local harnesses.
 
 ## Deferred Correctness Work
-- V2/V2 and mixed V2/V3 routes still need route-specific pre-loan principal tests. The initial V3/V3 canary uses the existing V3 liquidity-derived sizing path.
+- Mixed V2/V3 routes still need route-specific pre-loan principal sizing and a real-pool fork test. V2/V2 now reuses the existing reserve-based sizing ladder before borrowing and is covered by a real Aave-backed Base fork test.
 - Moving execution into a separate engine remains deferred because the runtime budget was met by relocating cold registration validation instead of splitting the hot execution path.
 
 ## Definition of Done

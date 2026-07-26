@@ -10,6 +10,7 @@ import {TestToken} from "../../contracts/test/TestToken.sol";
 import {AaveV3ERC3156Adapter} from "../../contracts/AaveV3ERC3156Adapter.sol";
 import {ArbitrageLogic} from "../../contracts/ArbitrageLogic.sol";
 import {ArbUtils} from "../../contracts/ArbUtils.sol";
+import {IUniswapV2Pair} from "../../contracts/interfaces/IUniswapV2Pair.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {IWETH9} from "../../contracts/interfaces/IWETH9.sol";
 import {ISwapRouter02} from "../../contracts/interfaces/uniswap/ISwapRouter02.sol";
@@ -36,6 +37,8 @@ contract ArbHookFlashForkAaveTest is Test {
     address internal constant AAVE_USDC_A_TOKEN = 0x4e65fE4DbA92790696d040ac24Aa414708F5c0AB;
     address internal constant V4_POOL_MANAGER = 0x498581fF718922c3f8e6A244956aF099B2652b2b;
     address internal constant UNIVERSAL_ROUTER = 0x6fF5693b99212Da76ad316178A184AB56D299b43;
+    address internal constant UNISWAP_V2_WETH_USDC = 0x88A43bbDF9D098eEC7bCEda4e2494615dfD9bB9C;
+    address internal constant PANCAKE_V2_WETH_USDC = 0x79474223AEdD0339780baCcE75aBDa0BE84dcBF9;
     uint256 internal constant FORK_BLOCK = 33_942_262;
     uint256 internal constant TEST_FLASH_PRINCIPAL_USDC = 5_000e6;
     uint256 internal constant PARITY_MAX_ITER = 2;
@@ -157,6 +160,50 @@ contract ArbHookFlashForkAaveTest is Test {
         uint256 paidFee = IERC20(USDC).balanceOf(AAVE_USDC_A_TOKEN) - aTokenLiquidityBefore;
         assertGe(paidFee, fee, "at least one flash fee payment expected");
         assertGt(pairProfit, -int256(paidFee), "arb path should generate non-zero gross result");
+    }
+
+    function testForkAaveV2V2UsesRouteSizedPrincipal() public {
+        if (!forkEnabled) {
+            vm.skip(true, "set RUN_FLASH_FORK_INTEGRATION=true and BASE_RPC_URL"); return;
+        }
+
+        address[] memory pools = new address[](2);
+        pools[0] = PANCAKE_V2_WETH_USDC;
+        pools[1] = UNISWAP_V2_WETH_USDC;
+        uint24[] memory fees = new uint24[](2);
+        fees[0] = 2500;
+        fees[1] = 3000;
+        ArbUtils.PoolType[] memory types = new ArbUtils.PoolType[](2);
+        types[0] = ArbUtils.PoolType.PANCAKESWAP_V2;
+        types[1] = ArbUtils.PoolType.V2;
+        hook.addPools(USDC, pools, fees, types);
+
+        // Move the shallow Pancake pair away from the deeper Uniswap pair.
+        vm.deal(address(this), 0.01 ether);
+        IWETH9(WETH).deposit{value: 0.01 ether}();
+        assertTrue(IERC20(WETH).transfer(PANCAKE_V2_WETH_USDC, 0.01 ether));
+        IUniswapV2Pair(PANCAKE_V2_WETH_USDC).sync();
+
+        uint256 principalCap = 100e6;
+        hook.setFlashPrincipalForToken(USDC, principalCap);
+
+        vm.recordLogs();
+        (bool success, int256 profit, uint256 iterations) = hook.runFlashArbForTest(
+            PANCAKE_V2_WETH_USDC,
+            UNISWAP_V2_WETH_USDC,
+            USDC,
+            WETH,
+            1,
+            ArbUtils.PoolType.PANCAKESWAP_V2,
+            ArbUtils.PoolType.V2
+        );
+        Settlement memory settled = _extractProfitableSettlement(vm.getRecordedLogs());
+
+        assertTrue(success, "V2/V2 flash route failed");
+        assertGt(profit, 0, "V2/V2 route should settle net positive");
+        assertEq(iterations, 1, "expected one V2/V2 iteration");
+        assertLt(settled.principal, principalCap, "V2/V2 borrowed the full cap");
+        assertEq(settled.principal, settled.totalAmountSwapped * 2, "principal did not preserve V2 half-balance sizing");
     }
 
     function testForkAaveAttemptAllTracksLegacyRoundSequenceFull() public {

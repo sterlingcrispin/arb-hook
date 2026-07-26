@@ -9,11 +9,11 @@ The initial deployment is owner-operated with a small set of manually verified, 
 
 ## Open For Canary
 
-2. V2 and mixed-route flash principal sizing
+2. Mixed-route flash principal sizing
 - Status: `OPEN`
 - Priority: `HIGH`
-- Summary: V3/V3 routes derive principal from existing liquidity math before borrowing. V2/V2 and mixed routes still begin with a generic quote-based principal and calculate their trade chunk after the loan fee is committed.
-- Decision: exclude V2 and mixed routes from the initial canary. Resolve this before registering those route types; do not rewrite the legacy sizing loops speculatively.
+- Summary: V3/V3 and V2/V2 routes now derive principal from their existing route math before borrowing. Mixed V2/V3 routes still begin with a generic quote-based principal and calculate their trade chunk after the loan fee is committed.
+- Decision: exclude mixed routes from the initial canary. Resolve this before registering mixed routes; preserve the legacy sizing loop rather than replacing it speculatively.
 
 20. Independent review of release commit
 - Status: `BLOCKS DEPLOYMENT`
@@ -107,3 +107,7 @@ The initial deployment is owner-operated with a small set of manually verified, 
 5. CREATE2 deployment workflow
 - Status: `ADDRESSED`
 - Notes: `script/DeployArbHook.s.sol` mines the after-swap-only address against the canonical CREATE2 deployer and deploys the production hook. The local deployment test verifies the predicted address and constructor permission check.
+
+22. V2/V2 flash principal sizing and execution
+- Status: `ADDRESSED`
+- Notes: Pre-loan sizing now reuses the existing V2 reserve-based probe ladder against the configured principal cap. It borrows twice the selected chunk so the unchanged executor's half-balance starting candidate remains identical. A fixed-block Base fork test executes a real PancakeSwap V2 to Uniswap V2 route through Aave: 20 USDC borrowed, 10 USDC swapped, 0.01 USDC fee, and 0.984011 USDC net profit in the deliberately displaced test state.

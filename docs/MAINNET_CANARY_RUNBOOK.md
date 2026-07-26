@@ -13,14 +13,16 @@ Do not route mainnet swaps through the hook until all of these are true:
    owner, Aave reserve, v4 PoolManager, Universal Router, and beneficiary encoding.
 4. Every production address has been checked against its current official source
    and its runtime code has been inspected on the deployment RPC.
-5. The owner is the intended multisig or hardware-backed canary account.
+5. The owner is the intended canary wallet and holds only the deliberately
+   limited canary funds.
 6. The minimum net-profit floor has been calibrated against incremental L2
    execution cost, L1 data cost, and the desired user margin.
 7. The initial v4 liquidity and flash-principal caps are explicitly accepted as
    canary risk limits.
 
-The initial pool book must contain only Uniswap V3 and PancakeSwap V3 routes.
-V2 and mixed-route flash principal sizing remains open in `OPEN_ISSUES.md`.
+V3/V3 and V2/V2 routes have route-specific pre-loan sizing and fixed-block fork
+coverage. Mixed V2/V3 route sizing remains open in `OPEN_ISSUES.md` and mixed
+routes must not be registered for the initial canary.
 
 ## Reproduce The Release
 
