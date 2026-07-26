@@ -4,6 +4,7 @@ pragma solidity ^0.8.20;
 import "forge-std/Test.sol";
 
 import {ArbHook} from "../../contracts/ArbHook.sol";
+import {ArbErrors} from "../../contracts/Errors.sol";
 
 import {ArbHookHarness} from "../../contracts/test/ArbHookHarness.sol";
 import {PoolManagerHarness} from "../../contracts/test/PoolManagerHarness.sol";
@@ -43,7 +44,7 @@ contract ArbHookFlashConfigTest is Test {
     }
 
     function testSetLenderForTokenRequiresTrustedLender() public {
-        vm.expectRevert(bytes("lender not trusted"));
+        vm.expectRevert(ArbErrors.UntrustedFlashLender.selector);
         hook.setLenderForToken(TOKEN, LENDER);
 
         hook.setTrustedFlashLender(LENDER, true);
@@ -52,12 +53,12 @@ contract ArbHookFlashConfigTest is Test {
     }
 
     function testSetMaxFlashFeeBpsCap() public {
-        vm.expectRevert(bytes("maxFeeBps>10000"));
+        vm.expectRevert(ArbErrors.FlashFeeBpsTooHigh.selector);
         hook.setMaxFlashFeeBpsForToken(TOKEN, 10001);
     }
 
     function testOnFlashLoanRejectsUnknownLender() public {
-        vm.expectRevert(bytes("invalid flash lender"));
+        vm.expectRevert(ArbErrors.InvalidFlashLender.selector);
         hook.onFlashLoan(address(this), TOKEN, 1, 0, hex"01");
     }
 

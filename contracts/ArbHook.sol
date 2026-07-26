@@ -207,8 +207,10 @@ contract ArbHook is
     ) Ownable(initialOwner) {
         poolManager = _poolManager;
         validateHookAddress(this);
-        require(address(_poolManager) != address(0), "poolManager=0");
-        require(_arbLib != address(0), "arbLib=0");
+        if (address(_poolManager) == address(0))
+            revert ArbErrors.InvalidPoolManagerAddress();
+        if (_arbLib == address(0))
+            revert ArbErrors.InvalidArbitrageLogicAddress();
         arbLib = ArbitrageLogic(_arbLib);
         hookMaxIterations = 2;
         defaultProfitRecipient = initialOwner;
@@ -238,7 +240,7 @@ contract ArbHook is
         address lender,
         bool isTrusted
     ) external onlyOwner {
-        require(lender != address(0), "lender=0");
+        if (lender == address(0)) revert ArbErrors.InvalidLenderAddress();
         trustedFlashLender[lender] = isTrusted;
     }
 
@@ -246,9 +248,10 @@ contract ArbHook is
         address token,
         address lender
     ) external onlyOwner {
-        require(token != address(0), "token=0");
-        require(lender != address(0), "lender=0");
-        require(trustedFlashLender[lender], "lender not trusted");
+        if (token == address(0)) revert ArbErrors.InvalidTokenAddress();
+        if (lender == address(0)) revert ArbErrors.InvalidLenderAddress();
+        if (!trustedFlashLender[lender])
+            revert ArbErrors.UntrustedFlashLender();
         lenderByToken[token] = lender;
     }
 
@@ -256,7 +259,7 @@ contract ArbHook is
         address token,
         uint256 principal
     ) external onlyOwner {
-        require(token != address(0), "token=0");
+        if (token == address(0)) revert ArbErrors.InvalidTokenAddress();
         flashPrincipalByToken[token] = principal;
     }
 
@@ -264,13 +267,15 @@ contract ArbHook is
         address token,
         uint256 maxFeeBps
     ) external onlyOwner {
-        require(token != address(0), "token=0");
-        require(maxFeeBps <= FEE_BPS_DIVISOR, "maxFeeBps>10000");
+        if (token == address(0)) revert ArbErrors.InvalidTokenAddress();
+        if (maxFeeBps > FEE_BPS_DIVISOR)
+            revert ArbErrors.FlashFeeBpsTooHigh();
         maxFlashFeeBpsByToken[token] = maxFeeBps;
     }
 
     function setDefaultProfitRecipient(address recipient) external onlyOwner {
-        require(recipient != address(0), "recipient=0");
+        if (recipient == address(0))
+            revert ArbErrors.InvalidProfitRecipient();
         defaultProfitRecipient = recipient;
     }
 
@@ -337,7 +342,7 @@ contract ArbHook is
     function attemptAllInternal(
         uint256 maxIterations
     ) external returns (bool success) {
-        require(msg.sender == address(this), "Only self");
+        if (msg.sender != address(this)) revert ArbErrors.WrapperOnlySelf();
 
         int256 totalProfit = 0;
         uint256 baseCount = supportedTokens.length;
@@ -777,25 +782,27 @@ contract ArbHook is
         bytes calldata data
     ) external override returns (bytes32) {
         if (msg.sender != _activeLender || !trustedFlashLender[msg.sender]) {
-            revert("invalid flash lender");
+            revert ArbErrors.InvalidFlashLender();
         }
-        if (initiator != address(this)) revert("invalid flash initiator");
+        if (initiator != address(this))
+            revert ArbErrors.InvalidFlashInitiator();
         if (token != _activeLoanToken || amount != _activeLoanAmount) {
-            revert("flash loan mismatch");
+            revert ArbErrors.FlashLoanMismatch();
         }
         if (
             _activeFlashContextHash !=
             _flashContextHash(msg.sender, token, amount, data)
         ) {
-            revert("flash context mismatch");
+            revert ArbErrors.FlashContextMismatch();
         }
 
         FlashLoanExecutionParams memory params = abi.decode(
             data,
             (FlashLoanExecutionParams)
         );
-        if (params.tokenA != token) revert("flash tokenA mismatch");
-        if (params.beneficiary == address(0)) revert("flash beneficiary=0");
+        if (params.tokenA != token) revert ArbErrors.FlashTokenMismatch();
+        if (params.beneficiary == address(0))
+            revert ArbErrors.InvalidFlashBeneficiary();
 
         uint256 balanceBefore = IERC20(token).balanceOf(address(this));
 
@@ -811,7 +818,7 @@ contract ArbHook is
                 params.buyPoolType
             )
         );
-        if (!successCall) revert("flash arb execution failed");
+        if (!successCall) revert ArbErrors.FlashArbitrageExecutionFailed();
 
         (bool tradeSuccess, , uint256 iters, uint256 totalAmountSwapped) = abi.decode(
             returndata,
@@ -834,7 +841,7 @@ contract ArbHook is
         uint256 repayAmount = amount + fee;
         uint256 repaymentBalance = IERC20(token).balanceOf(address(this));
         if (repaymentBalance < repayAmount) {
-            revert("insufficient flash repayment balance");
+            revert ArbErrors.InsufficientFlashRepaymentBalance();
         }
         IERC20(token).approve(msg.sender, 0);
         IERC20(token).approve(msg.sender, repayAmount);
@@ -1361,7 +1368,7 @@ contract ArbHook is
                 address(this)
             );
             if (remainingInterm > 0) {
-                revert("Unwind failed, tokens stuck");
+                revert ArbErrors.UnwindFailed();
             }
         }
 
@@ -1560,7 +1567,7 @@ contract ArbHook is
 
         if (amountToPay > 0) {
             bool ok = IERC20(tokenToPay).transfer(pool, amountToPay);
-            if (!ok) revert("ERC20 transfer failed");
+            if (!ok) revert ArbErrors.ERC20TransferFailed();
         }
     }
 
@@ -1590,7 +1597,7 @@ contract ArbHook is
         }
         if (amountToPay > 0) {
             bool ok = IERC20(tokenToPay).transfer(msg.sender, amountToPay);
-            if (!ok) revert("ERC20 transfer failed");
+            if (!ok) revert ArbErrors.ERC20TransferFailed();
         }
     }
 

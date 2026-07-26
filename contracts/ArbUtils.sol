@@ -153,7 +153,7 @@ abstract contract ArbUtils {
                     (token == t1 && t0 != address(0)))
             ) revert ArbErrors.AddPoolsInputTokenNotInPool();
         } else {
-            revert("Unsupported Pool Type");
+            revert ArbErrors.UnsupportedPoolType();
         }
 
         dec0 = IERC20Metadata(t0).decimals();
@@ -227,7 +227,7 @@ abstract contract ArbUtils {
         uint256 amountToPay
     ) internal virtual returns (bool success) {
         if (tokenToReceive == tokenToPay || amountToReceive == 0)
-            revert("Invalid V2 flash swap params");
+            revert ArbErrors.InvalidV2FlashSwapParams();
 
         //console.log("... Executing V2 Flash Swap ...");
         //console.log("tokenToReceive:", tokenToReceive);
