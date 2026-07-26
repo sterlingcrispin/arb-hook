@@ -13,7 +13,7 @@ contract ArbHookHarness is ArbHook {
 
     uint256 public testProfitBps;
     bool public testInjectProfitAnyIterations;
-    bool public testLegacyTelemetryEnabled;
+    bool public testLegacyInventoryParityEnabled;
     address public testProfitPayer;
     uint256 public testFixedProfitAmount;
 
@@ -138,13 +138,54 @@ contract ArbHookHarness is ArbHook {
         testInjectProfitAnyIterations = enabled;
     }
 
-    function setTestLegacyTelemetryEnabled(bool enabled) external onlyOwner {
-        testLegacyTelemetryEnabled = enabled;
+    function setTestLegacyInventoryParityEnabled(
+        bool enabled
+    ) external onlyOwner {
+        testLegacyInventoryParityEnabled = enabled;
     }
 
     function setTestProfitTransfer(address payer, uint256 amount) external onlyOwner {
         testProfitPayer = payer;
         testFixedProfitAmount = amount;
+    }
+
+    // The production hook is flash-only. This test-only branch keeps the
+    // historical prefunded executor available as an exact regression oracle.
+    function executeIterativeArbViaFlash(
+        address poolA_addr,
+        address poolB_addr,
+        address startToken,
+        address intermediateToken,
+        uint256 maxIterations,
+        ArbUtils.PoolType poolAType,
+        ArbUtils.PoolType poolBType
+    )
+        public
+        override
+        returns (bool success, int256 cumulativeProfit, uint256 iterations)
+    {
+        if (!testLegacyInventoryParityEnabled) {
+            return
+                super.executeIterativeArbViaFlash(
+                    poolA_addr,
+                    poolB_addr,
+                    startToken,
+                    intermediateToken,
+                    maxIterations,
+                    poolAType,
+                    poolBType
+                );
+        }
+
+        (success, cumulativeProfit, iterations, ) = executeIterativeArb(
+            poolA_addr,
+            poolB_addr,
+            startToken,
+            intermediateToken,
+            maxIterations,
+            poolAType,
+            poolBType
+        );
     }
 
     function executeIterativeArb(
@@ -204,7 +245,7 @@ contract ArbHookHarness is ArbHook {
                 poolBType
             );
         if (
-            testLegacyTelemetryEnabled &&
+            testLegacyInventoryParityEnabled &&
             iterations > 0 &&
             cumulativeProfit > 0
         ) {
