@@ -156,7 +156,7 @@ contract ArbitrageLogic {
         bool aIsToken0,
         uint8 dec0,
         uint8 dec1
-    ) public pure returns (uint256 rawPriceScaled) {
+    ) private pure returns (uint256 rawPriceScaled) {
         // Calls the corrected internal function instead of ArbMath._price1e18
         return
             _calculatePrice1e18_corrected(sqrtPriceX96, aIsToken0, dec0, dec1);
@@ -171,7 +171,7 @@ contract ArbitrageLogic {
     function getEffectiveBuyPrice(
         uint256 rawPriceScaled,
         uint24 poolFee
-    ) public pure returns (uint256 effectiveBuyPrice) {
+    ) private pure returns (uint256 effectiveBuyPrice) {
         // buy-leg pays the fee -> price increases
         return
             FullMath.mulDiv(
@@ -190,7 +190,7 @@ contract ArbitrageLogic {
     function getEffectiveSellPrice(
         uint256 rawPriceScaled,
         uint24 poolFee
-    ) public pure returns (uint256 effectiveSellPrice) {
+    ) private pure returns (uint256 effectiveSellPrice) {
         // sell-leg receives less -> price decreases
         return
             FullMath.mulDiv(
@@ -279,7 +279,6 @@ contract ArbitrageLogic {
             }
 
             rawPriceScaled = getV2RawPriceScaled(
-                v2Pool,
                 tokenA,
                 tokenB,
                 r0,
@@ -314,7 +313,7 @@ contract ArbitrageLogic {
 
     // --- Constants --- (Moved from ArbUtils)
     /// @dev 0.0001 % granularity – keeps price hashes compact (uint128)
-    uint256 public constant PRICE_GRANULARITY = 1e10;
+    uint256 private constant PRICE_GRANULARITY = 1e10;
 
     // --- Quote Helpers --- (Moved from ArbUtils & made public)
     /**
@@ -390,7 +389,7 @@ contract ArbitrageLogic {
         uint256 poolB_maxIn, // ΔB.in to reach sqrtPriceLimitB
         uint256 poolB_maxStartOut, // ΔA.out obtainable at sqrtPriceLimitB
         uint24 feeB // pool B fee
-    ) public pure returns (uint256 bestChunk, int256 bestPL) {
+    ) private pure returns (uint256 bestChunk, int256 bestPL) {
         if (hi < lo) return (0, 0);
 
         uint256 fullChunk = hi;
@@ -725,13 +724,11 @@ contract ArbitrageLogic {
 
     /**
      * @notice Calculates the raw price of tokenA in terms of tokenB for a V2 pool, scaled to 1e18.
-     * @param pair The IUniswapV2Pair contract instance.
      * @param tokenA Address of tokenA (the token whose price is being measured).
      * @param tokenB Address of tokenB (the token in which the price is expressed).
      * @return rawPriceScaled The price of tokenA in terms of tokenB, scaled by 1e18. Returns 0 if liquidity is 0.
      */
     function getV2RawPriceScaled(
-        IUniswapV2Pair pair,
         address tokenA,
         address tokenB,
         uint112 reserve0,
@@ -740,7 +737,7 @@ contract ArbitrageLogic {
         address pairToken1,
         uint8 decimalsA,
         uint8 decimalsB
-    ) public view returns (uint256 rawPriceScaled) {
+    ) private pure returns (uint256 rawPriceScaled) {
         if (reserve0 == 0 || reserve1 == 0) {
             return 0; // No liquidity or one-sided liquidity, no valid price
         }
@@ -793,7 +790,7 @@ contract ArbitrageLogic {
     function getV2EffectiveBuyPrice(
         uint256 rawV2PriceScaled,
         uint24 v2FeePPM
-    ) public pure returns (uint256 effectiveBuyPrice) {
+    ) private pure returns (uint256 effectiveBuyPrice) {
         // To buy tokenA, you pay more of tokenB. Price B/A increases.
         // The amount of tokenB needed is rawV2PriceScaled / (1 - feeRate)
         // Example: Fee 0.3% (3000 PPM). Rate = 0.003. 1 - feeRate = 0.997
@@ -813,7 +810,7 @@ contract ArbitrageLogic {
     function getV2EffectiveSellPrice(
         uint256 rawV2PriceScaled,
         uint24 v2FeePPM
-    ) public pure returns (uint256 effectiveSellPrice) {
+    ) private pure returns (uint256 effectiveSellPrice) {
         // To sell tokenA, you receive less of tokenB. Price B/A decreases.
         // The amount of tokenB received is rawV2PriceScaled * (1 - feeRate)
         // Example: Fee 0.3%. Rate = 0.003. 1 - feeRate = 0.997
@@ -931,10 +928,6 @@ contract ArbitrageLogic {
 
             int256 simulatedProfit = simulateV2V2Profit(
                 currentTestChunk,
-                poolA,
-                poolB,
-                startToken,
-                intermediateToken,
                 reserveA_start,
                 reserveA_interm,
                 reserveB_interm,
@@ -963,10 +956,6 @@ contract ArbitrageLogic {
             ) {
                 int256 minChunkProfit = simulateV2V2Profit(
                     minChunkStartToken,
-                    poolA,
-                    poolB,
-                    startToken,
-                    intermediateToken,
                     reserveA_start,
                     reserveA_interm,
                     reserveB_interm,
@@ -989,10 +978,6 @@ contract ArbitrageLogic {
                 // Re-simulate profit if chunk was capped
                 params.expectedProfitFromChunk = simulateV2V2Profit(
                     params.estimatedChunkToSwap,
-                    poolA,
-                    poolB,
-                    startToken,
-                    intermediateToken,
                     reserveA_start,
                     reserveA_interm,
                     reserveB_interm,
@@ -1023,10 +1008,6 @@ contract ArbitrageLogic {
     /**
      * @notice Simulates the profit/loss from a V2-V2 arbitrage trade for a given chunk.
      * @param chunkToSwapStartToken Amount of startToken to swap in the first pool.
-     * @param poolA The first V2 pair (startToken -> intermediateToken).
-     * @param poolB The second V2 pair (intermediateToken -> startToken).
-     * @param startToken Address of the start token.
-     * @param intermediateToken Address of the intermediate token.
      * @param rA_start Reserve of startToken in Pool A.
      * @param rA_interm Reserve of intermediateToken in Pool A.
      * @param rB_interm Reserve of intermediateToken in Pool B.
@@ -1035,10 +1016,6 @@ contract ArbitrageLogic {
      */
     function simulateV2V2Profit(
         uint256 chunkToSwapStartToken,
-        IUniswapV2Pair poolA,
-        IUniswapV2Pair poolB,
-        address startToken,
-        address intermediateToken,
         uint112 rA_start,
         uint112 rA_interm,
         uint112 rB_interm,
@@ -1219,7 +1196,7 @@ contract ArbitrageLogic {
         address startToken,
         address intermediateToken,
         uint24 poolAFeePPM
-    ) public view returns (int256 profitInStartToken) {
+    ) private view returns (int256 profitInStartToken) {
         if (chunkToSwapStartToken == 0) return 0;
 
 
@@ -1294,12 +1271,12 @@ contract ArbitrageLogic {
         address startToken,
         address intermediateToken,
         uint24 poolBFeePPM
-    ) public view returns (int256 profitInStartToken) {
+    ) private view returns (int256 profitInStartToken) {
         if (chunkToSwapStartToken == 0) return 0;
 
 
         // Step 1: Accurately simulate V3 swap (startToken -> intermediateToken) using SwapMath
-        (uint160 sqrtP, , , , , uint8 feeProtocol, ) = poolA.slot0();
+        (uint160 sqrtP, , , , , , ) = poolA.slot0();
         uint128 liquidity = poolA.liquidity();
         address v3_token0 = poolA.token0();
         bool zeroForOne = (startToken == v3_token0);

@@ -1134,10 +1134,6 @@ contract ArbHook is
                         while (true) {
                             lastEstPLFullV2Halving = arbLib.simulateV2V2Profit(
                                 testV2Chunk,
-                                IUniswapV2Pair(poolA_addr),
-                                IUniswapV2Pair(poolB_addr),
-                                startToken,
-                                intermediateToken,
                                 rA_s,
                                 rA_i,
                                 rB_i,
