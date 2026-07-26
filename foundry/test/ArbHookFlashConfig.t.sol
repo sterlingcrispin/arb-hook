@@ -15,6 +15,7 @@ import {IPoolManager} from "@uniswap/v4-core/src/interfaces/IPoolManager.sol";
 import {PoolKey} from "@uniswap/v4-core/src/types/PoolKey.sol";
 import {BalanceDelta} from "@uniswap/v4-core/src/types/BalanceDelta.sol";
 import {SwapParams} from "@uniswap/v4-core/src/types/PoolOperation.sol";
+import {HookMiner} from "@uniswap/v4-periphery/src/utils/HookMiner.sol";
 
 contract ArbHookFlashConfigTest is Test {
     ArbHookHarness internal hook;
@@ -80,16 +81,26 @@ contract ArbHookFlashConfigTest is Test {
         );
     }
 
-    function testProductionHookRejectsUnminedAddress() public {
+    function testProductionHookDeploysAtMinedAddress() public {
         PoolManagerHarness poolManager = new PoolManagerHarness(address(this));
         ArbitrageLogic logic = new ArbitrageLogic();
+        bytes memory args = abi.encode(
+            IPoolManager(address(poolManager)),
+            address(this),
+            address(logic)
+        );
+        (address expected, bytes32 salt) = HookMiner.find(
+            address(this),
+            Hooks.AFTER_SWAP_FLAG,
+            type(ArbHook).creationCode,
+            args
+        );
 
-        uint256 nonce = vm.getNonce(address(this));
-        address nextDeployment = vm.computeCreateAddress(address(this), nonce);
-        uint160 permissionBits = uint160(nextDeployment) & uint160((1 << 14) - 1);
-        assertNotEq(permissionBits, uint160(1 << 6), "test deployment unexpectedly has exact afterSwap permission bits");
-
-        vm.expectRevert(abi.encodeWithSelector(Hooks.HookAddressNotValid.selector, nextDeployment));
-        new ArbHook(IPoolManager(address(poolManager)), address(this), address(logic));
+        ArbHook deployed = new ArbHook{salt: salt}(
+            IPoolManager(address(poolManager)),
+            address(this),
+            address(logic)
+        );
+        assertEq(address(deployed), expected);
     }
 }

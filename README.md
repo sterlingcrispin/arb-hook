@@ -68,6 +68,23 @@ The swap router must pass the beneficiary as exactly 20 packed address bytes (`a
 
 `ArbHook` uses Uniswap v4's normal hook-address validation. A production deployment must therefore use CREATE2 to mine an address whose permission bits specify `afterSwap` only. The arbitrary-address validation bypass exists only in `contracts/test/ArbHookHarness.sol`.
 
+## Base Deployment
+
+`script/DeployArbHook.s.sol` deploys `ArbitrageLogic`, the USDC Aave adapter,
+and an after-swap-only hook mined against Base's canonical CREATE2 deployer.
+Simulate first:
+
+```bash
+PRIVATE_KEY="$PRIVATE_KEY" forge script \
+  script/DeployArbHook.s.sol:DeployArbHook \
+  --rpc-url "$BASE_RPC_URL"
+```
+
+Add `--broadcast` only after reviewing the simulation. The optional `OWNER`
+environment variable defaults to the key's address. The script intentionally does not
+register pools, grant approvals, configure lender limits, or enable callback
+iterations; those owner actions must be reviewed separately after deployment.
+
 ## Cached Fork Workflow (Fast Re-runs)
 
 Fork-level tests are RPC-heavy on the first run because missing state is fetched lazily.

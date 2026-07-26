@@ -15,18 +15,6 @@ The initial deployment is owner-operated with a small set of manually verified, 
 - Summary: V3/V3 routes derive principal from existing liquidity math before borrowing. V2/V2 and mixed routes still begin with a generic quote-based principal and calculate their trade chunk after the loan fee is committed.
 - Decision: add route-specific tests before changing the legacy sizing loops.
 
-4. Production router recipient integration
-- Status: `OPEN`
-- Priority: `HIGH`
-- Summary: Unit tests cover `sender` and a 32-byte `hookData` override, but a real V4 router usually appears as the hook sender.
-- Decision: test and document the intended router's beneficiary encoding before canary traffic.
-
-5. CREATE2 deployment workflow
-- Status: `OPEN`
-- Priority: `HIGH`
-- Summary: Production `ArbHook` now validates V4 permission bits, but the repository does not yet include the mined-address deployment script.
-- Decision: add and test the mined-address deployment workflow before canary deployment.
-
 6. Mandatory on-chain trade-history persistence
 - Status: `RESOLVED`
 - Priority: `MEDIUM`
@@ -98,3 +86,11 @@ The initial deployment is owner-operated with a small set of manually verified, 
 3. V3/V3 max-impact enforcement
 - Status: `ADDRESSED`
 - Notes: V3 sizing now caps each leg's adaptive tick movement before deriving the pool-enforced `sqrtPriceLimit`. This reuses the existing sizing path, removes a redundant impact read and write-only field, and preserves both exact inventory parity and the flash-loan ten-round route sequence.
+
+4. Production router recipient integration
+- Status: `ADDRESSED`
+- Notes: The fixed-block fork test now sends a real v4 swap through Base's canonical Universal Router and PoolManager, then verifies that the real Aave-backed arb pays the beneficiary encoded as exactly 20 packed bytes.
+
+5. CREATE2 deployment workflow
+- Status: `ADDRESSED`
+- Notes: `script/DeployArbHook.s.sol` mines the after-swap-only address against the canonical CREATE2 deployer and deploys the production hook. The local deployment test verifies the predicted address and constructor permission check.

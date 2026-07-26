@@ -16,6 +16,7 @@ remappings = [
   '@uniswap/v3-periphery/=node_modules/@uniswap/v3-periphery/',
   '@uniswap/v4-core/=node_modules/@uniswap/v4-core/',
   '@uniswap/v4-periphery/=node_modules/@uniswap/v4-periphery/',
+  '@uniswap/universal-router/=node_modules/@uniswap/universal-router/',
   '@nomicfoundation/=node_modules/@nomicfoundation/',
   'forge-std/=lib/forge-std/src/',
   'solmate/=lib/solmate/'
