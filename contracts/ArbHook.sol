@@ -1384,30 +1384,6 @@ contract ArbHook is
         return (true, cumulativeProfit, iterations, totalAmountSwapped);
     }
 
-    // Inlined version of executeIterativeArb to avoid external call overhead
-    function _executeIterativeArbInline(
-        address poolA_addr,
-        address poolB_addr,
-        address startToken,
-        address intermediateToken,
-        uint256 maxIterations,
-        ArbUtils.PoolType poolAType,
-        ArbUtils.PoolType poolBType
-    )
-        internal
-        returns (bool success, int256 cumulativeProfit, uint256 iterations, uint256 totalAmountSwapped)
-    {
-        (success, cumulativeProfit, iterations, totalAmountSwapped) = executeIterativeArb(
-            poolA_addr,
-            poolB_addr,
-            startToken,
-            intermediateToken,
-            maxIterations,
-            poolAType,
-            poolBType
-        );
-    }
-
     // ----------------------- Swap helpers (V3/V2) --------------------------
     function _executeSwapInternal_noBalanceCheck(
         address poolAddress,
