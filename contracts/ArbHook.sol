@@ -14,9 +14,6 @@ import {BalanceDelta} from "@uniswap/v4-core/src/types/BalanceDelta.sol";
 import {SwapParams} from "@uniswap/v4-core/src/types/PoolOperation.sol";
 
 import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
-import {
-    ReentrancyGuard
-} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {
     IERC20Metadata
@@ -44,7 +41,6 @@ contract ArbHook is
     BaseHook,
     ArbUtils,
     Ownable,
-    ReentrancyGuard,
     IERC3156FlashBorrower
 {
     using SafeERC20 for IERC20;
@@ -258,7 +254,7 @@ contract ArbHook is
         address[] memory poolAddresses,
         uint24[] memory fees,
         ArbUtils.PoolType[] memory poolTypes
-    ) external onlyOwner nonReentrant {
+    ) external onlyOwner {
         // Registration order matters: it affects supportedTokens/baseCounterList traversal order.
         uint256 firstAddedPool = tokenPools[token].length;
         _addPools(token, poolAddresses, fees, poolTypes);
@@ -293,7 +289,7 @@ contract ArbHook is
     function removePool(
         address token,
         uint256 idx
-    ) external onlyOwner nonReentrant {
+    ) external onlyOwner {
         // Clear meta before removal
         if (idx < tokenPools[token].length) {
             address p = tokenPools[token][idx].poolAddress;
@@ -302,7 +298,7 @@ contract ArbHook is
         _removePool(token, idx);
     }
 
-    function resetTokenPools(address token) external onlyOwner nonReentrant {
+    function resetTokenPools(address token) external onlyOwner {
         // Clear metas for this token
         ArbUtils.PoolInfo[] storage pools = tokenPools[token];
         for (uint256 i = 0; i < pools.length; i++) {
@@ -311,7 +307,7 @@ contract ArbHook is
         _resetTokenPools(token);
     }
 
-    function resetAllPools() external onlyOwner nonReentrant {
+    function resetAllPools() external onlyOwner {
         // Clear metas for all tokens
         for (uint256 i = 0; i < supportedTokens.length; i++) {
             address t = supportedTokens[i];
@@ -337,31 +333,6 @@ contract ArbHook is
         return d > 4 ? 10 ** (d - 4) : 1;
     }
 
-    function getPoolsForToken(
-        address token
-    ) external view returns (ArbUtils.PoolInfo[] memory) {
-        return tokenPools[token];
-    }
-
-    function getSupportedTokenCount() external view returns (uint256) {
-        return supportedTokens.length;
-    }
-
-    function getAllSupportedTokens() external view returns (address[] memory) {
-        return supportedTokens;
-    }
-
-    function approvePools(
-        address tokenAddress,
-        address[] calldata poolAddresses,
-        uint256 amount
-    ) external onlyOwner nonReentrant {
-        for (uint256 i = 0; i < poolAddresses.length; i++) {
-            IERC20(tokenAddress).approve(poolAddresses[i], 0);
-            IERC20(tokenAddress).approve(poolAddresses[i], amount);
-        }
-    }
-
     // -------------------------- Core entrypoint ----------------------------
     /// @notice Evaluate arbitrage opportunities across all configured base/counter pairs.
     /// @dev Must be executed via self-call. Individual pair attempts are isolated with
@@ -371,7 +342,6 @@ contract ArbHook is
         uint256 maxIterations
     ) external returns (bool success) {
         require(msg.sender == address(this), "Only self");
-        lastExecutionProfit = 0; // reset mailbox
 
         int256 totalProfit = 0;
         uint256 baseCount = supportedTokens.length;
@@ -400,7 +370,6 @@ contract ArbHook is
             }
         }
 
-        lastExecutionProfit = totalProfit;
         bool tradeWasProfitable = totalProfit > 0;
         return tradeWasProfitable;
     }
