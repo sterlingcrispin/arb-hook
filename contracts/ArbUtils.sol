@@ -7,21 +7,17 @@ import "@uniswap/v3-core/contracts/interfaces/IUniswapV3Factory.sol";
 import "./interfaces/IUniswapV2Factory.sol";
 import "./interfaces/IUniswapV2Pair.sol";
 import "./interfaces/IPancakeV3Pool.sol";
-import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import "@openzeppelin/contracts/token/ERC20/extensions/IERC20Metadata.sol";
-import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import {ArbErrors} from "./Errors.sol";
 import {ArbitrageLogic} from "./ArbitrageLogic.sol";
 
 /// @title ArbUtils
 /// @notice Shared state and helper routines for pool registration, route discovery,
-///         pricing support, and treasury operations used by ArbHook.
+///         pricing support, and V2 swap execution used by ArbHook.
 /// @dev Route planning is intentionally simple and deterministic:
 ///      `supportedTokens` (outer loop) -> `baseCounterList[base]` (inner loop).
 ///      Registration order therefore determines evaluation order in `attemptAllInternal`.
 abstract contract ArbUtils {
-    using SafeERC20 for IERC20;
-
     /// @notice Minimum tick‑spread (in basis points) required to start an iteration.
     uint16 public minSpreadBps = 10; // 0.10 %
 
@@ -180,24 +176,6 @@ abstract contract ArbUtils {
         }
     }
 
-    /* ---------------- wallet / treasury helpers ---------------- */
-    function _withdrawTokens(address token, address to, uint256 amt) internal {
-        if (to == address(0)) revert ArbErrors.WithdrawToZeroAddress();
-        if (token == address(0)) revert ArbErrors.WithdrawZeroAddressToken();
-        uint256 bal = IERC20(token).balanceOf(address(this));
-        if (amt > bal) revert ArbErrors.WithdrawAmountExceedsBalance(amt, bal);
-        IERC20(token).safeTransfer(to, amt);
-    }
-
-    function _withdrawETH(address payable to, uint256 amt) internal {
-        if (to == address(0)) revert ArbErrors.WithdrawETHToZeroAddress();
-        uint256 bal = address(this).balance;
-        if (amt > bal)
-            revert ArbErrors.WithdrawETHAmountExceedsBalance(amt, bal);
-        (bool ok, ) = to.call{value: amt}("");
-        if (!ok) revert ArbErrors.ETHWithdrawalFailed(to, amt);
-    }
-
     // -------------------------------------------------------------------
     //  Constants
     // -------------------------------------------------------------------
@@ -229,12 +207,6 @@ abstract contract ArbUtils {
         if (tokenToReceive == tokenToPay || amountToReceive == 0)
             revert ArbErrors.InvalidV2FlashSwapParams();
 
-        //console.log("... Executing V2 Flash Swap ...");
-        //console.log("tokenToReceive:", tokenToReceive);
-        //console.log("amountToReceive:", amountToReceive);
-        //console.log("tokenToPay:", tokenToPay);
-        //console.log("amountToPay:", amountToPay);
-
         // Encode the required input amount and the input token address into `data` for the callback
         bytes memory data = abi.encode(tokenToPay, amountToPay);
 
@@ -246,12 +218,9 @@ abstract contract ArbUtils {
         } else {
             amount1Out = amountToReceive;
         }
-        //console.log("trying to swap");
         try pair.swap(amount0Out, amount1Out, address(this), data) {
             success = true;
-        } catch (bytes memory reason) {
-            //console.log("!!! V2 FLASH SWAP FAILED !!!");
-            // console.logBytes(reason);
+        } catch {
             success = false;
         }
     }
