@@ -785,8 +785,6 @@ contract ArbitrageLogic {
             FullMath.mulDiv(rawV2PriceScaled, 1_000_000 - v2FeePPM, 1_000_000);
     }
 
-    // --- NEW V2-V2 Arbitrage Calculation Logic ---
-
     struct V2TradeParams {
         bool opportunityExists;
         uint256 estimatedChunkToSwap; // Amount of startToken
@@ -857,16 +855,18 @@ contract ArbitrageLogic {
             return params; // Not enough liquidity in one of the pools
         }
 
+        uint256 minimumChunk = minChunkStartToken == 0
+            ? 1
+            : minChunkStartToken;
+        if (startTokenBalance < minimumChunk) return params;
+
         // Heuristic probe ladder.
         // Exact optimal V2-V2 size is possible off-chain but expensive on-chain,
         // so we probe representative sizes and pick the best simulated outcome.
         // The largest probe (50% balance) is intentional: slippage usually makes
         // oversizing fail fast, and smaller candidates are then cheap to test.
-        uint256[] memory testChunkSizes = new uint256[](4);
-        testChunkSizes[0] = minChunkStartToken;
-        if (testChunkSizes[0] == 0 && startTokenBalance > 0)
-            testChunkSizes[0] = 1; // Min 1 wei
-
+        uint256[4] memory testChunkSizes;
+        testChunkSizes[0] = minimumChunk;
         testChunkSizes[1] = startTokenBalance / 100; // 1% of balance
         testChunkSizes[2] = startTokenBalance / 10; // 10% of balance
         testChunkSizes[3] = startTokenBalance / 2; // 50% of balance
@@ -877,17 +877,14 @@ contract ArbitrageLogic {
         for (uint i = 0; i < testChunkSizes.length; i++) {
             uint256 currentTestChunk = testChunkSizes[i];
             if (currentTestChunk == 0) continue;
-            if (currentTestChunk < minChunkStartToken && minChunkStartToken > 0)
-                currentTestChunk = minChunkStartToken; // Ensure at least minChunk if possible
-            if (currentTestChunk > startTokenBalance)
-                currentTestChunk = startTokenBalance;
-            if (currentTestChunk == 0) continue;
+            if (currentTestChunk < minimumChunk)
+                currentTestChunk = minimumChunk;
 
             // Skip duplicate probes when balance is small and ratios collapse to same value.
             if (
                 i > 0 &&
                 currentTestChunk == testChunkSizes[i - 1] &&
-                currentTestChunk != minChunkStartToken
+                currentTestChunk != minimumChunk
             ) continue;
             if (i > 0 && currentTestChunk == bestChunk) continue; // Already found as best or tested
 
@@ -911,60 +908,6 @@ contract ArbitrageLogic {
             params.opportunityExists = true;
             params.estimatedChunkToSwap = bestChunk;
             params.expectedProfitFromChunk = bestSimulatedProfit;
-        } else {
-            // Fallback: if no heuristic chunk was profitable, explicitly check minChunk one last time IF it wasn't bestChunk.
-            // This path is less likely if minChunk was already in testChunkSizes[0] and resulted in profit <=0.
-            if (
-                minChunkStartToken > 0 &&
-                minChunkStartToken <= startTokenBalance &&
-                minChunkStartToken != bestChunk
-            ) {
-                int256 minChunkProfit = simulateV2V2Profit(
-                    minChunkStartToken,
-                    reserveA_start,
-                    reserveA_interm,
-                    reserveB_interm,
-                    reserveB_start,
-                    poolAFeePPM,
-                    poolBFeePPM
-                );
-                if (minChunkProfit > 0) {
-                    params.opportunityExists = true;
-                    params.estimatedChunkToSwap = minChunkStartToken;
-                    params.expectedProfitFromChunk = minChunkProfit;
-                }
-            }
-        }
-
-        // Final cap and minChunk check if opportunity was found by heuristics
-        if (params.opportunityExists) {
-            if (params.estimatedChunkToSwap > startTokenBalance) {
-                params.estimatedChunkToSwap = startTokenBalance;
-                // Re-simulate profit if chunk was capped
-                params.expectedProfitFromChunk = simulateV2V2Profit(
-                    params.estimatedChunkToSwap,
-                    reserveA_start,
-                    reserveA_interm,
-                    reserveB_interm,
-                    reserveB_start,
-                    poolAFeePPM,
-                    poolBFeePPM
-                );
-                if (params.expectedProfitFromChunk <= 0)
-                    params.opportunityExists = false;
-            }
-            // Ensure it's not below minChunk if it was profitable, unless it IS minChunk
-            if (
-                params.estimatedChunkToSwap < minChunkStartToken &&
-                params.estimatedChunkToSwap > 0 &&
-                params.opportunityExists
-            ) {
-                if (minChunkStartToken > params.estimatedChunkToSwap) {
-                    // This case implies that a chunk smaller than minChunk was found profitable somehow, then opportunity should be false.
-                    // Or, if it was capped to be less than minChunk. Generally, don't proceed if less than minChunk.
-                    params.opportunityExists = false;
-                }
-            }
         }
 
         return params;
