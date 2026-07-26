@@ -185,9 +185,7 @@ contract ArbHookParityTest is Test {
             Vm.Log[] memory logs = vm.getRecordedLogs();
             if (!success) {
                 emit log_named_uint("attemptAll returned false on round", round + 1);
-                emit log(
-                    "no ArbitrageAttempted event emitted; inspect hook console output"
-                );
+                emit log("no test-harness parity event emitted");
             }
             assertTrue(success, "attemptAll should execute successfully");
             actual[round] = _decodeAttempt(logs);
@@ -322,6 +320,7 @@ contract ArbHookParityTest is Test {
             IPoolManager(address(ctx.poolManager)),
             address(this),
             address(ctx.logic));
+        ctx.hook.setTestLegacyTelemetryEnabled(true);
         ctx.hook.setHookMaxIterations(MAX_ITER);
         ctx.hook.setMinSpreadBps(MIN_SPREAD_BPS);
         ctx.hook.setChunkSpreadConsumptionBps(
@@ -743,7 +742,7 @@ contract ArbHookParityTest is Test {
                 return result;
             }
         }
-        revert("ArbitrageAttempted event missing");
+        revert("test-harness parity event missing");
     }
 
     function _logRound(

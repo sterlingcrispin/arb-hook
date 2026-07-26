@@ -77,11 +77,12 @@ Add to `ArbHook`:
   - `address private _activeLender`
   - `bytes32 private _activeFlashContextHash`
 
-Add/adjust events:
-- `FlashLoanRequested(token, lender, amount, recipient)`
-- `FlashLoanSettled(token, lender, amount, fee, netProfit, recipient)`
-- `FlashLoanFailed(token, lender, amount, reason)`
-- Update `ArbitrageAttempted` docs to clarify gross vs net accounting.
+Production telemetry:
+- `FlashLoanSettled` is the sole execution event and records the completed
+  route, principal, fee, net result, iterations, and beneficiary.
+- Expected discovery, route, and lender failures are contained without
+  serializing revert bytes into logs.
+- Historical inventory telemetry exists only in the legacy test harness.
 
 ## Beneficiary Resolution Strategy
 Implement deterministic recipient selection in `_afterSwap`:
@@ -258,8 +259,10 @@ Acceptance:
 9. Integration breakage from interface/event schema drift
 - Mitigation: keep existing external function/event signatures stable unless strictly necessary; if a change is required, document it and add migration notes.
 
-10. Reduced debuggability from changed failure surfaces
-- Mitigation: keep structured failure events (`AttemptAllFailed`, pair failure, flash failure) and add explicit reason tagging for flash callback failures.
+10. Reduced debuggability from contained failure surfaces
+- Mitigation: assert observable behavior in local tests, use fixed-block
+  simulation and traces during canary diagnosis, and keep successful economic
+  accounting in `FlashLoanSettled`.
 
 11. Operational rollback risk
 - Mitigation: keep owner controls for lender allowlist and principal limits so exposure can be reduced immediately without redeploying logic.

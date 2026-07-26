@@ -185,20 +185,10 @@ contract MockV2PricePair is IUniswapV2Pair {
 }
 
 contract ArbHookFlashLoanE2ETest is Test {
-    bytes32 private constant ARBITRAGE_ATTEMPTED_TOPIC =
-        keccak256(
-            "ArbitrageAttempted(address,address,address,address,uint256,int256,uint256)"
-        );
-    bytes32 private constant FLASH_LOAN_REQUESTED_TOPIC =
-        keccak256("FlashLoanRequested(address,address,uint256,address)");
     bytes32 private constant FLASH_LOAN_SETTLED_TOPIC =
         keccak256(
             "FlashLoanSettled(address,address,address,address,address,uint256,uint256,uint256,int256,uint256,address)"
         );
-    bytes32 private constant FLASH_LOAN_FAILED_TOPIC =
-        keccak256("FlashLoanFailed(address,address,bytes)");
-    bytes32 private constant HOOK_ATTEMPT_ALL_TOPIC =
-        keccak256("HookAttemptAll(uint256,bool,bool)");
 
     struct Settlement {
         address buyPool;
@@ -369,7 +359,11 @@ contract ArbHookFlashLoanE2ETest is Test {
             1
         );
 
-        uint256 requestedPrincipal = _extractRequestedPrincipal(vm.getRecordedLogs());
+        (bool sawSettlement, Settlement memory settled) = _findLastSettlement(
+            vm.getRecordedLogs()
+        );
+        assertTrue(sawSettlement, "quote-hinted run should settle");
+        uint256 requestedPrincipal = settled.principal;
         uint256 expectedPrincipal = (principalCap * 3500) / 10_000; // spread > 80 bps => 35%
         assertEq(
             requestedPrincipal,
@@ -525,22 +519,8 @@ contract ArbHookFlashLoanE2ETest is Test {
         assertEq(iterations, 0, "forged callback should not run iterations");
 
         Vm.Log[] memory entries = vm.getRecordedLogs();
-        bool sawFlashLoanFailed = false;
-        for (uint256 i = 0; i < entries.length; i++) {
-            if (
-                entries[i].emitter == address(hook) &&
-                entries[i].topics.length > 0 &&
-                entries[i].topics[0] == FLASH_LOAN_FAILED_TOPIC
-            ) {
-                sawFlashLoanFailed = true;
-                break;
-            }
-        }
-        assertTrue(sawFlashLoanFailed, "expected FlashLoanFailed event");(
-            bool sawSettlement,) = _findLastSettlement(entries);
-        assertFalse(sawSettlement,
-            "forged callback must not emit settlement"
-        );
+        (bool sawSettlement, ) = _findLastSettlement(entries);
+        assertFalse(sawSettlement, "forged callback must not emit settlement");
     }
 
     function testFlashLoanNetNegativeRunDoesNotPayBeneficiaryAndEmitsSettlement() public {
@@ -654,19 +634,9 @@ contract ArbHookFlashLoanE2ETest is Test {
         );
 
         Vm.Log[] memory entries = vm.getRecordedLogs();
-        (
-        bool sawFlashSettled, Settlement memory settled) = _findLastSettlement(entries);
-        bool sawArbAttempted = false;
-        for (uint256 i = 0; i < entries.length; i++) {
-            if (
-                entries[i].emitter == address(hook) &&
-                entries[i].topics.length > 0
-            ) {
-                if (entries[i].topics[0] == ARBITRAGE_ATTEMPTED_TOPIC) {
-                    sawArbAttempted = true;
-                }
-            }
-        }
+        (bool sawFlashSettled, Settlement memory settled) = _findLastSettlement(
+            entries
+        );
         assertTrue(sawFlashSettled, "flash settlement event missing");
         assertEq(settled.buyPool, address(0xD2), "settled buy pool mismatch");
         assertEq(settled.sellPool, address(0xD1), "settled sell pool mismatch");
@@ -676,10 +646,6 @@ contract ArbHookFlashLoanE2ETest is Test {
         assertEq(settled.netProfit, int256(expectedNet), "settled net mismatch");
         assertEq(settled.iterations, iterations, "settled iterations mismatch");
         assertEq(settled.beneficiary, beneficiary, "settled beneficiary mismatch");
-        assertFalse(
-            sawArbAttempted,
-            "legacy gross ArbitrageAttempted event should be suppressed in flash flow"
-        );
     }
 
     function testRecipientRoutingUsesSenderWhenHookDataIsEmpty() public {
@@ -893,7 +859,11 @@ contract ArbHookFlashLoanE2ETest is Test {
             bytes("")
         );
         Vm.Log[] memory entries = vm.getRecordedLogs();
-        uint256 borrowedPrincipal = _extractRequestedPrincipal(entries);
+        (bool sawSettlement, Settlement memory settled) = _findLastSettlement(
+            entries
+        );
+        assertTrue(sawSettlement, "callback path should emit settlement");
+        uint256 borrowedPrincipal = settled.principal;
         assertGt(borrowedPrincipal, 0, "callback path should request flash principal");
 
         uint256 fee = lender.flashFee(address(token), borrowedPrincipal);
@@ -913,8 +883,6 @@ contract ArbHookFlashLoanE2ETest is Test {
             "default recipient should not receive payout when sender is present"
         );
 
-        (bool sawSettlement, Settlement memory settled) = _findLastSettlement(entries);
-        assertTrue(sawSettlement, "callback path should emit settlement");
         assertEq(
             settled.principal, borrowedPrincipal, "settled principal mismatch");
         assertEq(settled.netProfit, int256(expectedNet),
@@ -946,7 +914,11 @@ contract ArbHookFlashLoanE2ETest is Test {
             abi.encode(overrideRecipient)
         );
         Vm.Log[] memory entries = vm.getRecordedLogs();
-        uint256 borrowedPrincipal = _extractRequestedPrincipal(entries);
+        (bool sawSettlement, Settlement memory settled) = _findLastSettlement(
+            entries
+        );
+        assertTrue(sawSettlement, "callback path should emit settlement");
+        uint256 borrowedPrincipal = settled.principal;
         assertGt(borrowedPrincipal, 0, "callback path should request flash principal");
 
         uint256 fee = lender.flashFee(address(token), borrowedPrincipal);
@@ -971,8 +943,6 @@ contract ArbHookFlashLoanE2ETest is Test {
             "default recipient should not receive payout when hookData override is set"
         );
 
-        (bool sawSettlement, Settlement memory settled) = _findLastSettlement(entries);
-        assertTrue(sawSettlement, "callback path should emit settlement");
         assertEq(settled.netProfit, int256(expectedNet), "settled net mismatch");
         assertEq(settled.beneficiary, overrideRecipient, "settled recipient mismatch");
     }
@@ -1014,37 +984,7 @@ contract ArbHookFlashLoanE2ETest is Test {
         );
 
         Vm.Log[] memory entries = vm.getRecordedLogs();
-        bool sawHookAttemptAll = false;
-        bool sawFlashLoanFailed = false;
-        bool hookCallSuccess = false;
-        bool hookTradeProfitable = true;
-
-        for (uint256 i = 0; i < entries.length; i++) {
-            if (
-                entries[i].emitter == address(hook) &&
-                entries[i].topics.length > 0
-            ) {
-                if (entries[i].topics[0] == HOOK_ATTEMPT_ALL_TOPIC) {
-                    (, hookCallSuccess, hookTradeProfitable) = abi.decode(
-                        entries[i].data,
-                        (uint256, bool, bool)
-                    );
-                    sawHookAttemptAll = true;
-                }
-                if (entries[i].topics[0] == FLASH_LOAN_FAILED_TOPIC) {
-                    sawFlashLoanFailed = true;
-                }
-            }
-        }
-
-        assertTrue(sawHookAttemptAll, "expected HookAttemptAll event");
-        assertTrue(hookCallSuccess, "attemptAll self-call should remain isolated");
-        assertFalse(
-            hookTradeProfitable,
-            "failed flash callback should not report profitable hook execution"
-        );
-        assertTrue(sawFlashLoanFailed, "expected FlashLoanFailed event");
-        (bool sawSettlement,) = _findLastSettlement(entries);
+        (bool sawSettlement, ) = _findLastSettlement(entries);
         assertFalse(sawSettlement, "failed flash callback must not emit settlement");
     }
 
@@ -1069,19 +1009,4 @@ contract ArbHookFlashLoanE2ETest is Test {
         }
     }
 
-    function _extractRequestedPrincipal(
-        Vm.Log[] memory entries
-    ) private view returns (uint256 principal) {
-        for (uint256 i = 0; i < entries.length; i++) {
-            if (
-                entries[i].emitter == address(hook) &&
-                entries[i].topics.length > 0 &&
-                entries[i].topics[0] == FLASH_LOAN_REQUESTED_TOPIC
-            ) {
-                (principal, ) = abi.decode(entries[i].data, (uint256, address));
-                return principal;
-            }
-        }
-        return 0;
-    }
 }
