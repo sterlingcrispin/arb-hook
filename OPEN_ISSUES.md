@@ -61,6 +61,7 @@ The initial deployment is owner-operated with a small set of manually verified, 
 12. Mixed V2-to-V3 max-impact guard
 - Status: `ADDRESSED`
 - Notes: Mixed `V2 -> V3` execution now estimates projected V3-leg input impact and aborts attempts when it exceeds `_MAX_IMPACT_BPS`.
+- Follow-up: the same guard now applies when V3 is the first leg of a `V3 -> V2` route.
 
 13. Pancake V2 fee modeling consistency
 - Status: `ADDRESSED`
