@@ -1,12 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
-// --- External deps ──────────────────────────────────────────────────────
-import "@uniswap/v3-core/contracts/interfaces/IUniswapV3Pool.sol";
-import "@uniswap/v3-core/contracts/interfaces/IUniswapV3Factory.sol";
-import "./interfaces/IUniswapV2Factory.sol";
 import "./interfaces/IUniswapV2Pair.sol";
-import "./interfaces/IPancakeV3Pool.sol";
 import "@openzeppelin/contracts/token/ERC20/extensions/IERC20Metadata.sol";
 import {ArbErrors} from "./Errors.sol";
 import {ArbitrageLogic} from "./ArbitrageLogic.sol";
@@ -95,81 +90,16 @@ abstract contract ArbUtils {
         uint24 providedFee,
         PoolType poolType
     ) internal {
-        address t0;
-        address t1;
-        uint8 dec0;
-        uint8 dec1;
-        int24 tickSpacing = 0;
-        uint24 actualFee = providedFee;
-
-        if (poolType == PoolType.V3 || poolType == PoolType.PANCAKESWAP_V3) {
-            if (poolType == PoolType.V3) {
-                IUniswapV3Pool pool = IUniswapV3Pool(poolAddr);
-                t0 = pool.token0();
-                t1 = pool.token1();
-                actualFee = pool.fee();
-                tickSpacing = pool.tickSpacing();
-            } else {
-                // PANCAKESWAP_V3
-                IPancakeV3Pool pool = IPancakeV3Pool(poolAddr);
-                IUniswapV3Factory factory = IUniswapV3Factory(
-                    0x0BFbCF9fa4f9C56B0F40a671Ad40E0805A091865
-                );
-                t0 = pool.token0();
-                t1 = pool.token1();
-                actualFee = pool.fee();
-                tickSpacing = factory.feeAmountTickSpacing(actualFee);
-            }
-
-            if (
-                !((token == t0 && t1 != address(0)) ||
-                    (token == t1 && t0 != address(0)))
-            ) revert ArbErrors.AddPoolsInputTokenNotInPool();
-
-            if (actualFee != providedFee)
-                revert ArbErrors.AddPoolsProvidedFeeMismatch();
-        } else if (poolType == PoolType.V2) {
-            actualFee = V2_POOL_FEE_PPM;
-            IUniswapV2Pair pair = IUniswapV2Pair(poolAddr);
-            t0 = pair.token0();
-            t1 = pair.token1();
-
-            if (
-                !((token == t0 && t1 != address(0)) ||
-                    (token == t1 && t0 != address(0)))
-            ) revert ArbErrors.AddPoolsInputTokenNotInPool();
-        } else if (poolType == PoolType.PANCAKESWAP_V2) {
-            actualFee = PANCAKESWAP_V2_POOL_FEE_PPM;
-            IUniswapV2Pair pair = IUniswapV2Pair(poolAddr);
-            t0 = pair.token0();
-            t1 = pair.token1();
-
-            if (
-                !((token == t0 && t1 != address(0)) ||
-                    (token == t1 && t0 != address(0)))
-            ) revert ArbErrors.AddPoolsInputTokenNotInPool();
-        } else {
-            revert ArbErrors.UnsupportedPoolType();
-        }
-
-        dec0 = IERC20Metadata(t0).decimals();
-        dec1 = IERC20Metadata(t1).decimals();
-
-        tokenPools[token].push(
-            PoolInfo(
-                poolAddr,
-                actualFee,
-                poolType,
-                t0,
-                t1,
-                dec0,
-                dec1,
-                tickSpacing
-            )
+        PoolInfo memory info = arbLib.getValidatedPoolInfo(
+            token,
+            poolAddr,
+            providedFee,
+            poolType
         );
+        tokenPools[token].push(info);
 
         // Build the base -> counter adjacency list used by attemptAll route scanning.
-        address counter = (t0 == token) ? t1 : t0;
+        address counter = info.token0 == token ? info.token1 : info.token0;
         if (!isCounterKnown[token][counter]) {
             isCounterKnown[token][counter] = true;
             baseCounterList[token].push(counter);
