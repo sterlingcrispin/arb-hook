@@ -720,7 +720,7 @@ contract ArbitrageLogic {
     function findBestV3Chunk(
         V3SwapParams memory params,
         uint256 minChunkForStartToken
-    ) public pure returns (uint256 bestChunk) {
+    ) public pure returns (uint256 bestChunk, int256 expectedProfit) {
         (uint256 poolB_maxIn, uint256 poolB_maxStartOut) = ArbMath
             ._deltaAmounts(
                 params.zeroForOneB,
@@ -729,7 +729,7 @@ contract ArbitrageLogic {
                 params.poolBState.liquidity
             );
 
-        (bestChunk, ) = _binarySearchBestChunk(
+        (bestChunk, expectedProfit) = _binarySearchBestChunk(
             params.chunkToSwap, // This is the roughChunk (upper bound)
             minChunkForStartToken,
             params.intermediateAmountPotentiallyFromA,
@@ -740,7 +740,7 @@ contract ArbitrageLogic {
         );
 
         if (bestChunk == 0) {
-            return 0;
+            expectedProfit = 0;
         }
     }
 

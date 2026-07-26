@@ -152,7 +152,10 @@ production recommendation.
 `minNetProfit` is denominated in raw borrowed-token units. It excludes the
 transaction's ETH gas cost even though it includes the flash fee. Derive the
 production floor offchain from a conservative ETH/USDC conversion and current
-Base fee conditions; the one-unit test value is not safe for production.
+Base fee conditions; the one-unit test value is not safe for production. V3
+routes reuse the existing sizing estimate to reject opportunities that cannot
+cover the quoted flash fee plus this floor before borrowing. The realized
+post-loan check remains authoritative because the estimate is not exact.
 
 ## Route Canary Traffic
 

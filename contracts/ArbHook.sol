@@ -681,7 +681,8 @@ contract ArbHook is
         }
 
         uint256 maxFeeBps = maxFlashFeeBpsByToken[startToken];
-        if (maxFeeBps == 0 || minNetProfitByToken[startToken] == 0) {
+        uint256 minNetProfit = minNetProfitByToken[startToken];
+        if (maxFeeBps == 0 || minNetProfit == 0) {
             return (false, 0, 0);
         }
 
@@ -690,10 +691,11 @@ contract ArbHook is
         bool isPoolAV3 = poolAType == ArbUtils.PoolType.V3 || poolAType == ArbUtils.PoolType.PANCAKESWAP_V3;
         bool isPoolBV3 = poolBType == ArbUtils.PoolType.V3 || poolBType == ArbUtils.PoolType.PANCAKESWAP_V3;
         uint256 refinedV3Principal;
+        uint256 expectedV3Profit;
         if (maxIterations > 0 && isPoolAV3 && isPoolBV3) {
             // Reuse the executor's existing V3 sizing model for the first loan.
             // This reads current pool state but does not add tick traversal.
-            (principal, refinedV3Principal) = _deriveV3Principal(
+            (principal, refinedV3Principal, expectedV3Profit) = _deriveV3Principal(
                 poolA_addr, poolB_addr, startToken, intermediateToken, poolAType, poolBType, principalCap
             );
             if (principal == 0) return (false, 0, 0);
@@ -716,6 +718,10 @@ contract ArbHook is
 
         if (_feeExceedsCap(principal, fee, maxFeeBps))
             return (false, 0, 0);
+        if (
+            expectedV3Profit > 0 &&
+            expectedV3Profit < fee + minNetProfit
+        ) return (false, 0, 0);
 
         address beneficiary = activeAttemptProfitRecipient;
         if (beneficiary == address(0)) return (false, 0, 0);
@@ -1069,7 +1075,7 @@ contract ArbHook is
                     break;
                 }
 
-                chunkToSwap = arbLib.findBestV3Chunk(
+                (chunkToSwap, ) = arbLib.findBestV3Chunk(
                     v3Params,
                     iterConfig.minChunkForStartToken
                 );
@@ -1728,19 +1734,19 @@ contract ArbHook is
         ArbUtils.PoolType poolAType,
         ArbUtils.PoolType poolBType,
         uint256 principalCap
-    ) internal view returns (uint256 principal, uint256 refinedPrincipal) {
-        if (principalCap == 0) return (0, 0);
+    ) internal view returns (uint256 principal, uint256 refinedPrincipal, uint256 expectedProfit) {
+        if (principalCap == 0) return (0, 0, 0);
 
         (bool tickAOk, int24 tickA) = _tryReadV3Tick(poolA, poolAType);
         (bool tickBOk, int24 tickB) = _tryReadV3Tick(poolB, poolBType);
-        if (!tickAOk || !tickBOk) return (0, 0);
+        if (!tickAOk || !tickBOk) return (0, 0, 0);
 
         address poolAToken0 = poolMetaByAddr[poolA].token0;
-        if (poolAToken0 == address(0)) return (0, 0);
+        if (poolAToken0 == address(0)) return (0, 0, 0);
 
         int24 signedSpread = poolAToken0 == startToken ? tickA - tickB : tickB - tickA;
         int24 initialAbsSpread = signedSpread >= 0 ? signedSpread : -signedSpread;
-        if (initialAbsSpread < int24(uint24(minSpreadBps))) return (0, 0);
+        if (initialAbsSpread < int24(uint24(minSpreadBps))) return (0, 0, 0);
 
         ArbitrageLogic.IterationConfig memory config;
         config.minSpreadBps = minSpreadBps;
@@ -1753,12 +1759,13 @@ contract ArbHook is
 
         ArbitrageLogic.V3SwapParams memory params =
             arbLib.getV3SwapParameters(poolA, poolB, startToken, intermediateToken, config, poolAType, poolBType);
-        if (!params.shouldContinue) return (0, 0);
+        if (!params.shouldContinue) return (0, 0, 0);
 
-        refinedPrincipal = arbLib.findBestV3Chunk(params, config.minChunkForStartToken);
-        if (refinedPrincipal == 0) return (0, 0);
+        int256 estimatedProfit;
+        (refinedPrincipal, estimatedProfit) = arbLib.findBestV3Chunk(params, config.minChunkForStartToken);
+        if (refinedPrincipal == 0) return (0, 0, 0);
 
-        return (params.chunkToSwap, refinedPrincipal);
+        return (params.chunkToSwap, refinedPrincipal, uint256(estimatedProfit));
     }
 
     function _tryReadV3Tick(address pool, ArbUtils.PoolType poolType) private view returns (bool ok, int24 tick) {

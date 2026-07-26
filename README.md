@@ -146,7 +146,7 @@ The per-token flash controls are:
   Sets the maximum lender fee relative to principal. Zero disables borrowing. Both the quote and actual callback fee are checked with ceiling rounding.
 
 - `setMinNetProfitForToken(address,uint256)`
-  Sets the minimum profit after the flash fee, in raw units of the borrowed token. Zero disables borrowing. A result below this floor reverts the loan atomically, so tokens already sitting on the hook cannot subsidize an unprofitable attempt.
+  Sets the minimum profit after the flash fee, in raw units of the borrowed token. Zero disables borrowing. V3 routes reject an obviously insufficient opportunity before borrowing by reusing the existing sizing estimate, and the realized result is checked again during repayment.
 
 ### Reference Sequence Profile
 
