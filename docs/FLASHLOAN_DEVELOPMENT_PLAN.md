@@ -270,7 +270,7 @@ Acceptance:
 4. New flash-loan test suite passing on fork and local harnesses.
 
 ## Deferred Correctness Work
-- Mixed V2/V3 routes still need route-specific pre-loan principal sizing and a real-pool fork test. V2/V2 now reuses the existing reserve-based sizing ladder before borrowing and is covered by a real Aave-backed Base fork test.
+- V3/V3, V2/V2, and both mixed route directions now reuse their existing sizing logic before borrowing and have real Aave-backed Base fork coverage.
 - Moving execution into a separate engine remains deferred because the runtime budget was met by relocating cold registration validation instead of splitting the hot execution path.
 
 ## Definition of Done

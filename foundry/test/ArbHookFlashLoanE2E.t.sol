@@ -179,6 +179,8 @@ contract ArbHookFlashLoanE2ETest is Test {
     ArbHookHarness internal hook;
     TestToken internal token;
     TestToken internal counterToken;
+    MockV2PricePair internal directPoolA;
+    MockV2PricePair internal directPoolB;
 
     function setUp() public {
         poolManager = new PoolManagerHarness(address(this));
@@ -190,6 +192,19 @@ contract ArbHookFlashLoanE2ETest is Test {
         );
         token = new TestToken("Flash Loan Token", "FLT", 0);
         counterToken = new TestToken("Counter Token", "CTR", 0);
+        directPoolA = new MockV2PricePair(
+            address(token),
+            address(counterToken),
+            1_000_000_000_000e18,
+            1_100_000_000_000e18
+        );
+        directPoolB = new MockV2PricePair(
+            address(token),
+            address(counterToken),
+            1_000_000_000_000e18,
+            1_000_000_000_000e18
+        );
+        hook.setTestInjectProfitAnyIterations(true);
     }
 
     function _configureLender(
@@ -262,7 +277,7 @@ contract ArbHookFlashLoanE2ETest is Test {
         assertEq(lender.flashLoanCallCount(), 1, "expected one flash loan");
     }
 
-    function testRunPairUsesAdaptivePrincipalHint() public {
+    function testRunPairUsesRouteSizedPrincipal() public {
         uint256 principalCap = 100_000e18;
         MockERC3156Lender lender = new MockERC3156Lender(
             IERC20(address(token)),
@@ -336,7 +351,7 @@ contract ArbHookFlashLoanE2ETest is Test {
     }
 
     function testSubThresholdTradeCannotSpendHookBalance() public {
-        uint256 principal = 100_000;
+        uint256 principal = 100_000e18;
         MockERC3156Lender lender = new MockERC3156Lender(
             IERC20(address(token)),
             5
@@ -475,13 +490,13 @@ contract ArbHookFlashLoanE2ETest is Test {
     {
         return
             hook.runFlashArbForTest(
-                address(0xA1),
-                address(0xB2),
+                address(directPoolA),
+                address(directPoolB),
                 address(token),
                 address(counterToken),
-                0,
-                ArbUtils.PoolType.V3,
-                ArbUtils.PoolType.V3
+                1,
+                ArbUtils.PoolType.V2,
+                ArbUtils.PoolType.V2
             );
     }
 

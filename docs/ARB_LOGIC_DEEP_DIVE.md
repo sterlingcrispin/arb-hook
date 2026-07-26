@@ -116,6 +116,10 @@ So the implementation uses bounded heuristics:
 
 - Start at half balance.
 - Halve until a profitable chunk appears or floor/iteration cap is hit.
+- Before a flash loan, run that same bounded simulation from half of the
+  configured principal cap. Borrow twice the selected chunk so callback
+  execution begins with the same candidate; no separate spread-based sizing
+  model is used.
 
 Large-first probing is intentional: it converges quickly and cheaply with halving when oversized.
 

@@ -20,9 +20,9 @@ Do not route mainnet swaps through the hook until all of these are true:
 7. The initial v4 liquidity and flash-principal caps are explicitly accepted as
    canary risk limits.
 
-V3/V3 and V2/V2 routes have route-specific pre-loan sizing and fixed-block fork
-coverage. Mixed V2/V3 route sizing remains open in `OPEN_ISSUES.md` and mixed
-routes must not be registered for the initial canary.
+V3/V3, V2/V2, V2-to-V3, and V3-to-V2 routes have route-specific pre-loan
+sizing and fixed-block Aave fork coverage. Register only the canonical route
+types and pools listed in the reviewed canary manifest.
 
 ## Reproduce The Release
 

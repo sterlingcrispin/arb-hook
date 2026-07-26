@@ -39,6 +39,7 @@ contract ArbHookFlashForkAaveTest is Test {
     address internal constant UNIVERSAL_ROUTER = 0x6fF5693b99212Da76ad316178A184AB56D299b43;
     address internal constant UNISWAP_V2_WETH_USDC = 0x88A43bbDF9D098eEC7bCEda4e2494615dfD9bB9C;
     address internal constant PANCAKE_V2_WETH_USDC = 0x79474223AEdD0339780baCcE75aBDa0BE84dcBF9;
+    address internal constant UNISWAP_V3_WETH_USDC = 0xd0b53D9277642d899DF5C87A3966A349A798F224;
     uint256 internal constant FORK_BLOCK = 33_942_262;
     uint256 internal constant TEST_FLASH_PRINCIPAL_USDC = 5_000e6;
     uint256 internal constant PARITY_MAX_ITER = 2;
@@ -204,6 +205,91 @@ contract ArbHookFlashForkAaveTest is Test {
         assertEq(iterations, 1, "expected one V2/V2 iteration");
         assertLt(settled.principal, principalCap, "V2/V2 borrowed the full cap");
         assertEq(settled.principal, settled.totalAmountSwapped * 2, "principal did not preserve V2 half-balance sizing");
+    }
+
+    function testForkAaveMixedV2V3UsesRouteSizedPrincipal() public {
+        if (!forkEnabled) {
+            vm.skip(true, "set RUN_FLASH_FORK_INTEGRATION=true and BASE_RPC_URL"); return;
+        }
+
+        address[] memory pools = new address[](2);
+        pools[0] = PANCAKE_V2_WETH_USDC;
+        pools[1] = UNISWAP_V3_WETH_USDC;
+        uint24[] memory fees = new uint24[](2);
+        fees[0] = 2500;
+        fees[1] = 500;
+        ArbUtils.PoolType[] memory types = new ArbUtils.PoolType[](2);
+        types[0] = ArbUtils.PoolType.PANCAKESWAP_V2;
+        types[1] = ArbUtils.PoolType.V3;
+        hook.addPools(USDC, pools, fees, types);
+
+        vm.deal(address(this), 0.01 ether);
+        IWETH9(WETH).deposit{value: 0.01 ether}();
+        assertTrue(IERC20(WETH).transfer(PANCAKE_V2_WETH_USDC, 0.01 ether));
+        IUniswapV2Pair(PANCAKE_V2_WETH_USDC).sync();
+
+        uint256 principalCap = 100e6;
+        hook.setFlashPrincipalForToken(USDC, principalCap);
+
+        vm.recordLogs();
+        (bool success, int256 profit, uint256 iterations) = hook.runFlashArbForTest(
+            PANCAKE_V2_WETH_USDC,
+            UNISWAP_V3_WETH_USDC,
+            USDC,
+            WETH,
+            1,
+            ArbUtils.PoolType.PANCAKESWAP_V2,
+            ArbUtils.PoolType.V3
+        );
+        Settlement memory settled = _extractProfitableSettlement(vm.getRecordedLogs());
+
+        assertTrue(success, "mixed flash route failed");
+        assertGt(profit, 0, "mixed route should settle net positive");
+        assertEq(iterations, 1, "expected one mixed iteration");
+        assertLt(settled.principal, principalCap, "mixed route borrowed the full cap");
+        assertEq(settled.principal, settled.totalAmountSwapped * 2, "principal did not preserve mixed half-balance sizing");
+    }
+
+    function testForkAaveMixedV3V2UsesRouteSizedPrincipal() public {
+        if (!forkEnabled) {
+            vm.skip(true, "set RUN_FLASH_FORK_INTEGRATION=true and BASE_RPC_URL"); return;
+        }
+
+        address[] memory pools = new address[](2);
+        pools[0] = UNISWAP_V3_WETH_USDC;
+        pools[1] = PANCAKE_V2_WETH_USDC;
+        uint24[] memory fees = new uint24[](2);
+        fees[0] = 500;
+        fees[1] = 2500;
+        ArbUtils.PoolType[] memory types = new ArbUtils.PoolType[](2);
+        types[0] = ArbUtils.PoolType.V3;
+        types[1] = ArbUtils.PoolType.PANCAKESWAP_V2;
+        hook.addPools(USDC, pools, fees, types);
+
+        _pullToken(USDC, USDC_WHALE, 50e6);
+        assertTrue(IERC20(USDC).transfer(PANCAKE_V2_WETH_USDC, 50e6));
+        IUniswapV2Pair(PANCAKE_V2_WETH_USDC).sync();
+
+        uint256 principalCap = 100e6;
+        hook.setFlashPrincipalForToken(USDC, principalCap);
+
+        vm.recordLogs();
+        (bool success, int256 profit, uint256 iterations) = hook.runFlashArbForTest(
+            UNISWAP_V3_WETH_USDC,
+            PANCAKE_V2_WETH_USDC,
+            USDC,
+            WETH,
+            1,
+            ArbUtils.PoolType.V3,
+            ArbUtils.PoolType.PANCAKESWAP_V2
+        );
+        Settlement memory settled = _extractProfitableSettlement(vm.getRecordedLogs());
+
+        assertTrue(success, "reverse mixed flash route failed");
+        assertGt(profit, 0, "reverse mixed route should settle net positive");
+        assertEq(iterations, 1, "expected one reverse mixed iteration");
+        assertLt(settled.principal, principalCap, "reverse mixed route borrowed the full cap");
+        assertEq(settled.principal, settled.totalAmountSwapped * 2, "principal did not preserve mixed half-balance sizing");
     }
 
     function testForkAaveAttemptAllTracksLegacyRoundSequenceFull() public {

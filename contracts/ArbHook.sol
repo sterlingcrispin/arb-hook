@@ -102,7 +102,6 @@ contract ArbHook is
     address private _activeLender;
     address private _activeLoanToken;
     uint256 private _activeLoanAmount;
-    uint256 private _activePrincipalHint;
     bytes32 private _activeFlashContextHash;
 
     bool private _flashLastTradeSuccess;
@@ -491,13 +490,6 @@ contract ArbHook is
             }
 
             // Isolate pair execution failure from the outer scanner.
-            _activePrincipalHint = _derivePrincipalForQuote(
-                tokenA,
-                buyPrice,
-                sellPrice,
-                buyPoolType,
-                sellPoolType
-            );
             (bool successCall, bytes memory returndata) = address(this).call(
                 abi.encodeWithSelector(
                     this.executeIterativeArbViaFlash.selector,
@@ -510,7 +502,6 @@ contract ArbHook is
                     buyPoolType
                 )
             );
-            _activePrincipalHint = 0;
 
             if (!successCall) {
                 // Mark as tried to avoid infinite loops
@@ -674,6 +665,7 @@ contract ArbHook is
         returns (bool success, int256 cumulativeProfit, uint256 iterations)
     {
         if (msg.sender != address(this)) revert ArbErrors.WrapperOnlySelf();
+        if (maxIterations == 0) return (false, 0, 0);
 
         address lender = lenderByToken[startToken];
         if (lender == address(0) || !trustedFlashLender[lender]) {
@@ -687,31 +679,29 @@ contract ArbHook is
         }
 
         uint256 principalCap = _resolvePrincipalCap(startToken, lender);
-        uint256 principal = _activePrincipalHint;
+        uint256 principal;
         bool isPoolAV3 = poolAType == ArbUtils.PoolType.V3 || poolAType == ArbUtils.PoolType.PANCAKESWAP_V3;
         bool isPoolBV3 = poolBType == ArbUtils.PoolType.V3 || poolBType == ArbUtils.PoolType.PANCAKESWAP_V3;
         uint256 refinedV3Principal;
         uint256 expectedRouteProfit;
-        if (maxIterations > 0 && isPoolAV3 && isPoolBV3) {
+        if (isPoolAV3 && isPoolBV3) {
             // Reuse the executor's existing V3 sizing model for the first loan.
             // This reads current pool state but does not add tick traversal.
             (principal, refinedV3Principal, expectedRouteProfit) = _deriveV3Principal(
                 poolA_addr, poolB_addr, startToken, intermediateToken, poolAType, poolBType, principalCap
             );
             if (principal == 0) return (false, 0, 0);
-        } else if (maxIterations > 0 && !isPoolAV3 && !isPoolBV3) {
+        } else if (!isPoolAV3 && !isPoolBV3) {
             (principal, expectedRouteProfit) = _deriveV2Principal(
                 poolA_addr, poolB_addr, startToken, intermediateToken, poolAType, poolBType, principalCap
             );
             if (principal == 0) return (false, 0, 0);
+        } else {
+            (principal, expectedRouteProfit) = _deriveMixedPrincipal(
+                poolA_addr, poolB_addr, startToken, intermediateToken, poolAType, poolBType, principalCap
+            );
+            if (principal == 0) return (false, 0, 0);
         }
-        if (principal == 0 || principal > principalCap) {
-            principal = principalCap;
-        }
-        if (principal == 0) {
-            return (false, 0, 0);
-        }
-
         uint256 fee;
         try
             IERC3156FlashLender(lender).flashFee(startToken, principal)
@@ -1181,7 +1171,7 @@ contract ArbHook is
                 // it converges quickly with halving while avoiding full-balance over-commit.
                 uint256 initialTestChunk = currentBal / 2;
                 if (initialTestChunk > 0) {
-                    chunkToSwap = arbLib.findBestMixedPairChunk(
+                    (chunkToSwap, ) = arbLib.findBestMixedPairChunk(
                         poolA_addr,
                         poolB_addr,
                         poolAType,
@@ -1652,61 +1642,7 @@ contract ArbHook is
         _activeLender = address(0);
         _activeLoanToken = address(0);
         _activeLoanAmount = 0;
-        _activePrincipalHint = 0;
         _activeFlashContextHash = bytes32(0);
-    }
-
-    function _derivePrincipalForQuote(
-        address token,
-        uint256 buyPrice,
-        uint256 sellPrice,
-        ArbUtils.PoolType,
-        ArbUtils.PoolType
-    ) private view returns (uint256) {
-        uint256 principalCap = _resolvePrincipalCap(token);
-        if (principalCap == 0) return 0;
-
-        uint256 minPrincipal = _minChunk(token);
-        if (minPrincipal > principalCap) minPrincipal = principalCap;
-        if (buyPrice == 0 || sellPrice <= buyPrice) return minPrincipal;
-
-        uint256 spreadBps = ((sellPrice - buyPrice) * FEE_BPS_DIVISOR) /
-            buyPrice;
-        if (spreadBps <= minSpreadBps) return minPrincipal;
-
-        // Adaptive utilization curve:
-        // - floor uses impact guardrail (default 5%),
-        // - ramp scales with observed spread and configured chunk-consumption policy,
-        // - cap remains bounded by existing risk controls.
-        uint256 floorUtilizationBps = _MAX_IMPACT_BPS;
-        if (floorUtilizationBps == 0) floorUtilizationBps = minSpreadBps;
-        if (floorUtilizationBps == 0) floorUtilizationBps = 1;
-        if (floorUtilizationBps > FEE_BPS_DIVISOR) {
-            floorUtilizationBps = FEE_BPS_DIVISOR;
-        }
-
-        uint256 maxUtilizationBps = CHUNK_SPREAD_CONSUMPTION_BPS +
-            (floorUtilizationBps * 4);
-        if (maxUtilizationBps > FEE_BPS_DIVISOR) {
-            maxUtilizationBps = FEE_BPS_DIVISOR;
-        }
-        if (maxUtilizationBps < floorUtilizationBps) {
-            maxUtilizationBps = floorUtilizationBps;
-        }
-
-        uint256 spreadOverThreshold = spreadBps - uint256(minSpreadBps);
-        uint256 rampDenominator = uint256(minSpreadBps) + _MAX_IMPACT_BPS;
-        if (rampDenominator == 0) rampDenominator = 1;
-
-        uint256 rampBps = (spreadOverThreshold * CHUNK_SPREAD_CONSUMPTION_BPS) /
-            rampDenominator;
-        uint256 utilizationBps = floorUtilizationBps + rampBps;
-        if (utilizationBps > maxUtilizationBps) utilizationBps = maxUtilizationBps;
-
-        uint256 principal = (principalCap * utilizationBps) / FEE_BPS_DIVISOR;
-        if (principal < minPrincipal) principal = minPrincipal;
-        if (principal > principalCap) principal = principalCap;
-        return principal;
     }
 
     function _deriveV2Principal(
@@ -1735,6 +1671,33 @@ contract ArbHook is
         uint256 chunk = params.estimatedChunkToSwap;
         principal = chunk > principalCap / 2 ? principalCap : chunk * 2;
         expectedProfit = uint256(params.expectedProfitFromChunk);
+    }
+
+    function _deriveMixedPrincipal(
+        address poolA,
+        address poolB,
+        address startToken,
+        address intermediateToken,
+        ArbUtils.PoolType poolAType,
+        ArbUtils.PoolType poolBType,
+        uint256 principalCap
+    ) internal view returns (uint256 principal, uint256 expectedProfit) {
+        (uint256 chunk, int256 estimatedProfit) = arbLib.findBestMixedPairChunk(
+            poolA,
+            poolB,
+            poolAType,
+            poolBType,
+            startToken,
+            intermediateToken,
+            principalCap / 2,
+            _minChunk(startToken),
+            0,
+            int256(_minChunk(startToken)) / 10
+        );
+        if (chunk == 0 || estimatedProfit <= 0) return (0, 0);
+
+        principal = chunk > principalCap / 2 ? principalCap : chunk * 2;
+        expectedProfit = uint256(estimatedProfit);
     }
 
     /// @dev Determines the V3/V3 flash principal with the same bounded liquidity,

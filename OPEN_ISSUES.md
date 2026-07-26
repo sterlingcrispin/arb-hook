@@ -9,12 +9,6 @@ The initial deployment is owner-operated with a small set of manually verified, 
 
 ## Open For Canary
 
-2. Mixed-route flash principal sizing
-- Status: `OPEN`
-- Priority: `HIGH`
-- Summary: V3/V3 and V2/V2 routes now derive principal from their existing route math before borrowing. Mixed V2/V3 routes still begin with a generic quote-based principal and calculate their trade chunk after the loan fee is committed.
-- Decision: exclude mixed routes from the initial canary. Resolve this before registering mixed routes; preserve the legacy sizing loop rather than replacing it speculatively.
-
 20. Independent review of release commit
 - Status: `BLOCKS DEPLOYMENT`
 - Priority: `CRITICAL`
@@ -111,3 +105,7 @@ The initial deployment is owner-operated with a small set of manually verified, 
 22. V2/V2 flash principal sizing and execution
 - Status: `ADDRESSED`
 - Notes: Pre-loan sizing now reuses the existing V2 reserve-based probe ladder against the configured principal cap. It borrows twice the selected chunk so the unchanged executor's half-balance starting candidate remains identical. A fixed-block Base fork test executes a real PancakeSwap V2 to Uniswap V2 route through Aave: 20 USDC borrowed, 10 USDC swapped, 0.01 USDC fee, and 0.984011 USDC net profit in the deliberately displaced test state.
+
+2. Mixed-route flash principal sizing
+- Status: `ADDRESSED`
+- Notes: Pre-loan sizing now reuses the existing mixed-route simulator and bounded halving loop, and the obsolete generic spread-utilization hint was removed. Fixed-block Aave fork tests cover both directions against real Base pools. V2-to-V3 borrowed 50 USDC, swapped 25 USDC, paid 0.025 USDC, and netted 1.190636 USDC; V3-to-V2 used the same principal and fee and netted 1.820425 USDC in deliberately displaced test states.
