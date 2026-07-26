@@ -111,15 +111,18 @@ library ArbMath {
         } catch {
             return type(uint256).max;
         }
+        if (tickSpacing <= 0) return type(uint256).max;
 
         uint160 sqrtP_nextTick;
         if (tokenIn == t0) {
-            if (currentTick == TickMath.MIN_TICK) return type(uint256).max;
+            if (currentTick < TickMath.MIN_TICK + tickSpacing)
+                return type(uint256).max;
             sqrtP_nextTick = TickMath.getSqrtRatioAtTick(
                 currentTick - tickSpacing
             );
         } else {
-            if (currentTick == TickMath.MAX_TICK) return type(uint256).max;
+            if (currentTick > TickMath.MAX_TICK - tickSpacing)
+                return type(uint256).max;
             sqrtP_nextTick = TickMath.getSqrtRatioAtTick(
                 currentTick + tickSpacing
             );
@@ -136,7 +139,14 @@ library ArbMath {
             return type(uint256).max;
         }
 
-        return FullMath.mulDivRoundingUp(dx, 10000, amountInForOneTick);
+        // One tick is approximately one basis point; scale the local
+        // tick-spacing capacity into the same units as maxImpactBps.
+        return
+            FullMath.mulDivRoundingUp(
+                dx,
+                uint24(tickSpacing),
+                amountInForOneTick
+            );
     }
 
     /// @dev Uses SwapMath.computeSwapStep and handles tick crossings.
