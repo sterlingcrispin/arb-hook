@@ -7,7 +7,7 @@ fs_permissions = [{ access = "read", path = "node_modules" }]
 cache = true
 optimizer = true
 optimizer_runs = 200
-auto_detect_solc = true
+solc = '0.8.26'
 evm_version = 'cancun'
 via_ir = true
 remappings = [

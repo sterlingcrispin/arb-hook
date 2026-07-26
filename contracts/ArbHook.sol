@@ -1469,8 +1469,6 @@ contract ArbHook is
             poolAddress
         );
 
-        // Assume approvals are set up front; avoid allowance SLOAD and branch
-
         if (poolType == ArbUtils.PoolType.V3) {
             try
                 IUniswapV3Pool(poolAddress).swap(
