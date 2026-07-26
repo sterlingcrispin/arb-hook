@@ -13,7 +13,19 @@ The initial deployment is owner-operated with a small set of manually verified, 
 - Status: `OPEN`
 - Priority: `HIGH`
 - Summary: V3/V3 routes derive principal from existing liquidity math before borrowing. V2/V2 and mixed routes still begin with a generic quote-based principal and calculate their trade chunk after the loan fee is committed.
-- Decision: add route-specific tests before changing the legacy sizing loops.
+- Decision: exclude V2 and mixed routes from the initial canary. Resolve this before registering those route types; do not rewrite the legacy sizing loops speculatively.
+
+20. Independent review of release commit
+- Status: `BLOCKS DEPLOYMENT`
+- Priority: `CRITICAL`
+- Summary: The flash-loan, callback, and route-execution changes need independent Solidity review against the exact release commit.
+- Decision: no mainnet swap routing before external sign-off. This is an external release gate, not a reason to add more onchain checks.
+
+21. Current-head Base rehearsal and economic calibration
+- Status: `BLOCKS DEPLOYMENT`
+- Priority: `CRITICAL`
+- Summary: The deterministic fork gates use Base block 33942262. They cannot prove current lender premiums, liquidity, canonical contract state, route economics, or transaction cost.
+- Decision: run the intended manifest through a fresh current-head fork, verify canonical addresses and code, and set the minimum net-profit floor from current total transaction cost before deployment.
 
 6. Mandatory on-chain trade-history persistence
 - Status: `RESOLVED`

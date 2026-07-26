@@ -18,9 +18,9 @@ Most of the time the answer is no, and the hook exits almost immediately. When t
 
 The hook doesn't assume the arbitrage leg happens on another Uniswap v4 pool. Today the implemented external pool types are Uniswap V2/V3 and PancakeSwap V2/V3, so the v4 hook is acting as an observation point for broader cross-venue price discovery.
 
-The production execution path is flash-loan-funded for principal, so the hook does not need to hold full trading inventory. Router/pool approvals and flash-lender configuration are still required. A loan is attempted only when the token has a non-zero principal cap, fee cap, and minimum net profit.
+The production execution path is flash-loan-funded for principal, so the hook does not need to hold full trading inventory. External pool repayment is made directly from authenticated swap callbacks; no standing pool allowance is required. A loan is attempted only when the token has a configured lender plus a non-zero principal cap, fee cap, and minimum net profit.
 
-There is still required operator setup off-chain: pool registration, approvals, lender configuration, and runtime-parameter configuration (`hookMaxIterations`, `minSpreadBps`, `chunkSpreadConsumptionBps`, `maxImpactBps`). Hook execution is disabled by default (`hookMaxIterations = 0`). The Aave V3 integration uses the production adapter in `contracts/AaveV3ERC3156Adapter.sol`, with one configured reserve per adapter deployment.
+There is still required operator setup off-chain: pool registration, lender configuration, and runtime-parameter configuration (`hookMaxIterations`, `minSpreadBps`, `chunkSpreadConsumptionBps`, `maxImpactBps`). Hook execution is disabled by default (`hookMaxIterations = 0`). The Aave V3 integration uses the production adapter in `contracts/AaveV3ERC3156Adapter.sol`, with one configured reserve per adapter deployment.
 
 ## Canary Threat Model
 
@@ -72,6 +72,8 @@ The swap router must pass the beneficiary as exactly 20 packed address bytes (`a
 
 `script/DeployArbHook.s.sol` deploys `ArbitrageLogic`, the USDC Aave adapter,
 and an after-swap-only hook mined against Base's canonical CREATE2 deployer.
+The complete release, configuration, canary, and shutdown procedure is in
+[`docs/MAINNET_CANARY_RUNBOOK.md`](docs/MAINNET_CANARY_RUNBOOK.md).
 Simulate first:
 
 ```bash
@@ -82,7 +84,7 @@ PRIVATE_KEY="$PRIVATE_KEY" forge script \
 
 Add `--broadcast` only after reviewing the simulation. The optional `OWNER`
 environment variable defaults to the key's address. The script intentionally does not
-register pools, grant approvals, configure lender limits, or enable callback
+register pools, configure lender limits, or enable callback
 iterations; those owner actions must be reviewed separately after deployment.
 
 ## Cached Fork Workflow (Fast Re-runs)

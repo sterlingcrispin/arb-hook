@@ -21,13 +21,11 @@
   ],
   "license": "MIT",
   "dependencies": {
-    "@openzeppelin/contracts": "^5.0.0",
-    "@uniswap/permit2": "github:Uniswap/permit2",
-    "@uniswap/universal-router": "github:Uniswap/universal-router",
-    "@uniswap/v3-core": "github:Uniswap/v3-core#0.8",
-    "@uniswap/v3-periphery": "^1.4.3",
-    "@uniswap/v4-core": "github:Uniswap/v4-core",
-    "@uniswap/v4-periphery": "github:Uniswap/v4-periphery",
-    "prb-math": "^2.4.3"
+    "@openzeppelin/contracts": "5.3.0",
+    "@uniswap/universal-router": "https://github.com/Uniswap/universal-router/archive/050b93cf4e9508b78412f23ad66e85d5c76a45b5.tar.gz",
+    "@uniswap/v3-core": "https://github.com/Uniswap/v3-core/archive/6562c52e8f75f0c10f9deaf44861847585fc8129.tar.gz",
+    "@uniswap/v3-periphery": "1.4.4",
+    "@uniswap/v4-core": "https://github.com/Uniswap/v4-core/archive/d153b048868a60c2403a3ef5b2301bb247884d46.tar.gz",
+    "@uniswap/v4-periphery": "https://github.com/Uniswap/v4-periphery/archive/3779387e5d296f39df543d23524b050f89a62917.tar.gz"
   }
 }
