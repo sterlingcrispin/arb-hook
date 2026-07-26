@@ -1496,16 +1496,13 @@ contract ArbHook is
         // - caller must be the exact pool we encoded,
         // - pool must be registered in our pool book.
         if (decodedCaller != address(this)) {
-            revert ArbErrors.CallbackCallerMismatch(
-                decodedCaller,
-                address(this)
-            );
+            revert ArbErrors.CallbackCallerMismatch();
         }
         if (msg.sender == tx.origin) {
             revert ArbErrors.CallbackCallerIsEOA();
         }
         if (msg.sender != expectedPool) {
-            revert ArbErrors.CallbackUnexpectedPool(msg.sender, expectedPool);
+            revert ArbErrors.CallbackUnexpectedPool();
         }
 
         address pool = msg.sender;
@@ -1515,16 +1512,12 @@ contract ArbHook is
         // Use cached pool metadata instead of fresh external reads.
         PoolMeta storage pm = poolMetaByAddr[pool];
         if (!pm.exists)
-            revert ArbErrors.CallbackUnexpectedPool(pool, expectedPool);
+            revert ArbErrors.CallbackUnexpectedPool();
         token0 = pm.token0;
         token1 = pm.token1;
 
         if (decodedTokenIn != token0 && decodedTokenIn != token1) {
-            revert ArbErrors.CallbackDecodedTokenNotInPool(
-                decodedTokenIn,
-                token0,
-                token1
-            );
+            revert ArbErrors.CallbackDecodedTokenNotInPool();
         }
 
         uint256 amountToPay;
@@ -1565,11 +1558,11 @@ contract ArbHook is
         address uniPair = V2_FACTORY.getPair(t0, t1);
         address pcsPair = PANCAKESWAP_V2_FACTORY.getPair(t0, t1);
         if (msg.sender != uniPair && msg.sender != pcsPair) {
-            revert ArbErrors.CallbackUnexpectedPool(msg.sender, address(0));
+            revert ArbErrors.CallbackUnexpectedPool();
         }
         _requireRegisteredV2CallbackPool(msg.sender, t0, t1);
         if (tokenToPay != t0 && tokenToPay != t1) {
-            revert ArbErrors.CallbackDecodedTokenNotInPool(tokenToPay, t0, t1);
+            revert ArbErrors.CallbackDecodedTokenNotInPool();
         }
         if (amountToPay > 0) {
             bool ok = IERC20(tokenToPay).transfer(msg.sender, amountToPay);
@@ -1595,11 +1588,11 @@ contract ArbHook is
         address uniPair = V2_FACTORY.getPair(t0, t1);
         address pcsPair = PANCAKESWAP_V2_FACTORY.getPair(t0, t1);
         if (msg.sender != uniPair && msg.sender != pcsPair) {
-            revert ArbErrors.CallbackUnexpectedPool(msg.sender, address(0));
+            revert ArbErrors.CallbackUnexpectedPool();
         }
         _requireRegisteredV2CallbackPool(msg.sender, t0, t1);
         if (tokenToPay != t0 && tokenToPay != t1) {
-            revert ArbErrors.CallbackDecodedTokenNotInPool(tokenToPay, t0, t1);
+            revert ArbErrors.CallbackDecodedTokenNotInPool();
         }
         if (amountToPay > 0) {
             IERC20(tokenToPay).safeTransfer(msg.sender, amountToPay);
@@ -1802,7 +1795,7 @@ contract ArbHook is
             pm.token0 != token0 ||
             pm.token1 != token1
         ) {
-            revert ArbErrors.CallbackUnexpectedPool(pool, address(0));
+            revert ArbErrors.CallbackUnexpectedPool();
         }
     }
 

@@ -15,17 +15,10 @@ library ArbErrors {
     error SwapMismatchedTokens0To1();
     error SwapMismatchedTokens1To0();
     error SwapInputTokenNotInPool();
-    error CallbackCallerMismatch(
-        address decodedCaller,
-        address contractAddress
-    );
+    error CallbackCallerMismatch();
     error CallbackCallerIsEOA();
-    error CallbackUnexpectedPool(address caller, address expectedPool);
-    error CallbackDecodedTokenNotInPool(
-        address decodedTokenIn,
-        address token0,
-        address token1
-    );
+    error CallbackUnexpectedPool();
+    error CallbackDecodedTokenNotInPool();
     error CallbackInvalidDelta0Sign();
     error CallbackInvalidDelta1Sign();
     error WrapperOnlySelf();
