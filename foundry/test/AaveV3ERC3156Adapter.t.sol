@@ -29,7 +29,9 @@ contract MockAaveV3Pool {
     {
         require(asset == address(token), "unsupported asset");
 
-        uint256 premium = (amount * premiumBps) / 10_000;
+        uint256 product = amount * premiumBps;
+        uint256 premium =
+            product / 10_000 + (product % 10_000 == 0 ? 0 : 1);
         token.safeTransfer(receiverAddress, amount);
         bool callbackOk =
             IAaveFlashLoanSimpleReceiver(receiverAddress).executeOperation(asset, amount, premium, msg.sender, params);
@@ -97,12 +99,16 @@ contract AaveV3ERC3156AdapterTest is Test {
         TestToken otherToken = new TestToken("Other Token", "OTHER", 0);
 
         assertEq(adapter.maxFlashLoan(address(otherToken)), 0);
-        vm.expectRevert(bytes("unsupported token"));
+        vm.expectRevert(AaveV3ERC3156Adapter.UnsupportedToken.selector);
         adapter.flashFee(address(otherToken), 1);
     }
 
     function testRejectsNonAaveCallbackCaller() public {
-        vm.expectRevert(bytes("invalid pool caller"));
+        vm.expectRevert(AaveV3ERC3156Adapter.InvalidCallback.selector);
         adapter.executeOperation(address(token), 1, 0, address(adapter), bytes(""));
+    }
+
+    function testFeeUsesAaveCeilingRounding() public view {
+        assertEq(adapter.flashFee(address(token), 187_018), 94);
     }
 }

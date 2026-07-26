@@ -18,9 +18,9 @@ Most of the time the answer is no, and the hook exits almost immediately. When t
 
 The hook doesn't assume the arbitrage leg happens on another Uniswap v4 pool. Today the implemented external pool types are Uniswap V2/V3 and PancakeSwap V2/V3, so the v4 hook is acting as an observation point for broader cross-venue price discovery.
 
-The production execution path is flash-loan-funded for principal, so the hook does not need to hold full trading inventory. Router/pool approvals and flash-lender configuration are still required.
+The production execution path is flash-loan-funded for principal, so the hook does not need to hold full trading inventory. Router/pool approvals and flash-lender configuration are still required. A loan is attempted only when the token has a non-zero principal cap, fee cap, and minimum net profit.
 
-There is still required operator setup off-chain: pool registration, approvals, lender configuration, and runtime-parameter configuration (`hookMaxIterations`, `minSpreadBps`, `chunkSpreadConsumptionBps`, `maxImpactBps`). The Aave V3 integration uses the production adapter in `contracts/AaveV3ERC3156Adapter.sol`, with one configured reserve per adapter deployment.
+There is still required operator setup off-chain: pool registration, approvals, lender configuration, and runtime-parameter configuration (`hookMaxIterations`, `minSpreadBps`, `chunkSpreadConsumptionBps`, `maxImpactBps`). Hook execution is disabled by default (`hookMaxIterations = 0`). The Aave V3 integration uses the production adapter in `contracts/AaveV3ERC3156Adapter.sol`, with one configured reserve per adapter deployment.
 
 ## Canary Threat Model
 
@@ -63,6 +63,8 @@ The cached fork gate replays the ten rounds from `ParityTest/attemptAllOutput.tx
 The size gate caps each production runtime at 24,000 bytes, leaving at least 576 bytes below EIP-170's 24,576-byte limit. It currently covers `ArbHook`, `ArbitrageLogic`, and `AaveV3ERC3156Adapter`.
 
 `FlashLoanSettled` is the canonical execution record. It reports the lender, tokens, selected pools, borrowed principal, total input swapped, fee, net profit, iterations, and beneficiary without adding permanent per-trade storage writes to the hook.
+
+The swap router must pass the beneficiary as exactly 20 packed address bytes (`abi.encodePacked(beneficiary)`) in v4 `hookData`. Missing, malformed, or zero-address data disables the arb attempt for that swap. The hook does not fall back to the router or `tx.origin`.
 
 `ArbHook` uses Uniswap v4's normal hook-address validation. A production deployment must therefore use CREATE2 to mine an address whose permission bits specify `afterSwap` only. The arbitrary-address validation bypass exists only in `contracts/test/ArbHookHarness.sol`.
 
@@ -115,6 +117,17 @@ The main runtime knobs are owner-settable on `ArbHook`:
   Maximum estimated price impact allowed for guarded paths before skipping.
   This prevents trading when impact is likely to destroy expected edge.
 
+The per-token flash controls are:
+
+- `setFlashPrincipalForToken(address,uint256)`
+  Sets the maximum amount that adaptive sizing may borrow. Zero disables borrowing; it never means "use all lender liquidity."
+
+- `setMaxFlashFeeBpsForToken(address,uint256)`
+  Sets the maximum lender fee relative to principal. Zero disables borrowing. Both the quote and actual callback fee are checked with ceiling rounding.
+
+- `setMinNetProfitForToken(address,uint256)`
+  Sets the minimum profit after the flash fee, in raw units of the borrowed token. Zero disables borrowing. A result below this floor reverts the loan atomically, so tokens already sitting on the hook cannot subsidize an unprofitable attempt.
+
 ### Reference Sequence Profile
 
 In the legacy parity harness (`foundry/test/ArbHookParity.t.sol`), the runtime profile is:
@@ -123,6 +136,9 @@ In the legacy parity harness (`foundry/test/ArbHookParity.t.sol`), the runtime p
 - `minSpreadBps = 10`
 - `chunkSpreadConsumptionBps = 1500`
 - `maxImpactBps = 500`
+- `flashPrincipal cap = 100,000 USDC`
+- `maxFlashFeeBps = 100`
+- `minNetProfit = 1` raw USDC unit
 
 Why these values are used for parity:
 
@@ -130,6 +146,9 @@ Why these values are used for parity:
 - `10 bps` filters micro-spreads that are usually not robust after execution costs.
 - `1500` gives a moderate first-step aggressiveness instead of over-consuming spread immediately.
 - `500` (5%) blocks obviously excessive-impact paths.
+- The `100,000 USDC` value is a ceiling, not the amount borrowed. Existing route math derives each round's principal below that ceiling.
+- The `100 bps` fee cap is deliberately above Aave's 5 bps test-block premium and catches unexpected lender changes.
+- The `1` raw-unit profit floor keeps every historically profitable round observable, including very small rounds. It is a regression-test value, not a production recommendation; a canary floor should cover expected transaction cost and desired margin.
 
 `ArbHookParity.t.sol` remains an opt-in inventory-funded baseline that asserts the original gross-profit values exactly. To run it intentionally:
 - Set `RUN_LEGACY_INVENTORY_PARITY=true`

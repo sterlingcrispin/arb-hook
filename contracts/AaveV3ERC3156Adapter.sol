@@ -30,6 +30,11 @@ interface IAaveFlashLoanSimpleReceiver {
 contract AaveV3ERC3156Adapter is IERC3156FlashLender, IAaveFlashLoanSimpleReceiver {
     using SafeERC20 for IERC20;
 
+    error InvalidConfiguration();
+    error UnsupportedToken();
+    error InvalidReceiver();
+    error InvalidCallback();
+
     IAaveV3Pool public immutable pool;
     address public immutable supportedToken;
     address public immutable liquidityToken;
@@ -37,9 +42,9 @@ contract AaveV3ERC3156Adapter is IERC3156FlashLender, IAaveFlashLoanSimpleReceiv
     bytes32 private constant CALLBACK_SUCCESS = keccak256("ERC3156FlashBorrower.onFlashLoan");
 
     constructor(address pool_, address token_, address liquidityToken_) {
-        require(pool_ != address(0), "pool=0");
-        require(token_ != address(0), "token=0");
-        require(liquidityToken_ != address(0), "liquidityToken=0");
+        if (pool_ == address(0) || token_ == address(0) || liquidityToken_ == address(0)) {
+            revert InvalidConfiguration();
+        }
 
         pool = IAaveV3Pool(pool_);
         supportedToken = token_;
@@ -52,14 +57,15 @@ contract AaveV3ERC3156Adapter is IERC3156FlashLender, IAaveFlashLoanSimpleReceiv
     }
 
     function flashFee(address token, uint256 amount) external view returns (uint256) {
-        require(token == supportedToken, "unsupported token");
+        if (token != supportedToken) revert UnsupportedToken();
         uint256 premiumBps = uint256(pool.FLASHLOAN_PREMIUM_TOTAL());
-        return (amount * premiumBps) / 10_000;
+        uint256 product = amount * premiumBps;
+        return product / 10_000 + (product % 10_000 == 0 ? 0 : 1);
     }
 
     function flashLoan(address receiver, address token, uint256 amount, bytes calldata data) external returns (bool) {
-        require(receiver != address(0), "receiver=0");
-        require(token == supportedToken, "unsupported token");
+        if (receiver == address(0)) revert InvalidReceiver();
+        if (token != supportedToken) revert UnsupportedToken();
 
         bytes memory params = abi.encode(receiver, msg.sender, data);
         pool.flashLoanSimple(address(this), token, amount, params, 0);
@@ -70,15 +76,15 @@ contract AaveV3ERC3156Adapter is IERC3156FlashLender, IAaveFlashLoanSimpleReceiv
         external
         returns (bool)
     {
-        require(msg.sender == address(pool), "invalid pool caller");
-        require(initiator == address(this), "invalid aave initiator");
-        require(asset == supportedToken, "unexpected asset");
+        if (msg.sender != address(pool) || initiator != address(this) || asset != supportedToken) {
+            revert InvalidCallback();
+        }
 
         (address receiver, address flashInitiator, bytes memory data) = abi.decode(params, (address, address, bytes));
 
         IERC20(asset).safeTransfer(receiver, amount);
         bytes32 response = IERC3156FlashBorrower(receiver).onFlashLoan(flashInitiator, asset, amount, premium, data);
-        require(response == CALLBACK_SUCCESS, "bad borrower callback");
+        if (response != CALLBACK_SUCCESS) revert InvalidCallback();
 
         uint256 repayment = amount + premium;
         IERC20(asset).safeTransferFrom(receiver, address(this), repayment);

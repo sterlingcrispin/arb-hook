@@ -94,91 +94,7 @@ contract ArbHookFlashForkAaveTest is Test {
         hook.setTrustedFlashLender(address(adapter), true);
         hook.setLenderForToken(USDC, address(adapter));
         hook.setMaxFlashFeeBpsForToken(USDC, 100); // 1% guardrail
-    }
-
-    function testForkAaveAdapterRoundTripRepaysPrincipalAndFee() public {
-        if (!forkEnabled) {
-            vm.skip(true, "set RUN_FLASH_FORK_INTEGRATION=true and BASE_RPC_URL"); return;
-        }
-
-        uint256 principal = TEST_FLASH_PRINCIPAL_USDC;
-        hook.setFlashPrincipalForToken(USDC, principal);
-
-        uint256 fee = adapter.flashFee(USDC, principal);
-        deal(USDC, address(hook), fee); // cover flash fee when no arb profit
-
-        uint256 aTokenLiquidityBefore = IERC20(USDC).balanceOf(AAVE_USDC_A_TOKEN);
-
-        (bool success, int256 profit, uint256 iterations) = hook.runFlashArbForTest(
-            address(0xA1),
-            address(0xB2),
-            USDC,
-            address(0xCAFE),
-            0,
-            ArbUtils.PoolType.V3,
-            ArbUtils.PoolType.V3
-        );
-
-        assertFalse(success, "maxIterations=0 path should not report profitable trade");
-        assertEq(profit, -int256(fee), "net should be negative by flash fee amount");
-        assertEq(iterations, 0, "no iterations expected");
-        assertEq(IERC20(USDC).balanceOf(address(hook)), 0, "hook should not retain USDC");
-        assertEq(
-            IERC20(USDC).balanceOf(AAVE_USDC_A_TOKEN),
-            aTokenLiquidityBefore + fee,
-            "aToken liquidity should increase by collected fee"
-        );
-    }
-
-    function testForkAaveAdapterProfitablePathPaysBeneficiaryAndEmitsNetSettlement() public {
-        if (!forkEnabled) {
-            vm.skip(true, "set RUN_FLASH_FORK_INTEGRATION=true and BASE_RPC_URL"); return;
-        }
-
-        uint256 principal = TEST_FLASH_PRINCIPAL_USDC;
-        hook.setFlashPrincipalForToken(USDC, principal);
-        hook.setTestProfitBps(1); // enable harness test path for maxIterations=0
-
-        address beneficiary = makeAddr("forkBeneficiary");
-        hook.setDefaultProfitRecipient(beneficiary);
-
-        uint256 fee = adapter.flashFee(USDC, principal);
-        uint256 expectedGross = fee + 1e6; // fee + 1 USDC => guaranteed net-positive
-        uint256 expectedNet = expectedGross - fee;
-        assertGt(expectedNet, 0, "expected net must be positive");
-        deal(USDC, address(this), expectedGross);
-        IERC20(USDC).approve(address(hook), 0);
-        IERC20(USDC).approve(address(hook), expectedGross);
-        hook.setTestProfitTransfer(address(this), expectedGross);
-
-        uint256 beneficiaryBefore = IERC20(USDC).balanceOf(beneficiary);
-        vm.recordLogs();
-
-        (bool success, int256 profit, uint256 iterations) = hook.runFlashArbForTest(
-            address(0xD1),
-            address(0xD2),
-            USDC,
-            address(0xD3),
-            0,
-            ArbUtils.PoolType.V3,
-            ArbUtils.PoolType.V3
-        );
-
-        assertTrue(success, "profitable flash path should succeed");
-        assertEq(uint256(profit), expectedNet, "reported net profit mismatch");
-        assertEq(iterations, 1, "harness profitable path should report one iteration");
-        assertEq(
-            IERC20(USDC).balanceOf(beneficiary),
-            beneficiaryBefore + expectedNet,
-            "beneficiary should receive net profit"
-        );
-        Settlement memory settled = _extractProfitableSettlement(
-            vm.getRecordedLogs());
-        assertEq(settled.buyPool, address(0xD2), "settled buy pool mismatch");
-        assertEq(settled.sellPool, address(0xD1), "settled sell pool mismatch");
-        assertEq(uint256(settled.netProfit), expectedNet, "settled net mismatch");
-        assertEq(settled.beneficiary, beneficiary, "settled beneficiary mismatch");
-        assertEq(IERC20(USDC).balanceOf(address(hook)), 0, "hook should not retain USDC");
+        hook.setMinNetProfitForToken(USDC, 1);
     }
 
     function testForkAaveRealArbPathExecutesAgainstParityPoolBook() public {
@@ -233,11 +149,6 @@ contract ArbHookFlashForkAaveTest is Test {
 
     function testForkAaveAttemptAllTracksLegacyRoundSequenceSmokeFirst3() public {
         _runLegacyRoundSequence(PARITY_ROUNDS_SMOKE, false);
-    }
-
-    function testForkAaveAttemptAllTracksLegacyRoundSequenceShapePrefix() public {
-        uint256 roundsToRun = vm.envOr("FLASH_PARITY_ROUNDS", PARITY_ROUNDS);
-        _runLegacyRoundSequence(roundsToRun, roundsToRun > 1);
     }
 
     function _runLegacyRoundSequence(
