@@ -112,7 +112,8 @@ Tasks:
    - `setFlashPrincipalForToken`
    - `setMaxFlashFeeBpsForToken`
    - `setMinNetProfitForToken`
-3. Add strict lender/token allowlist checks.
+3. Bind each token to one owner-configured lender and reject callbacks that do
+   not match the active lender, token, amount, initiator, and context.
 4. Add helper to compute context hash and enforce single active flash context.
 
 Acceptance:
@@ -225,7 +226,7 @@ Acceptance:
 2. Enablement:
    - Deploy with flash-loan path active as the only production path.
 3. Operational controls:
-   - keep strict lender/token allowlists.
+   - keep one explicit lender binding and conservative principal/fee limits per token.
    - tune per-token principal/fee limits conservatively first.
 
 ## Risk Register
@@ -262,7 +263,8 @@ Acceptance:
   accounting in `FlashLoanSettled`.
 
 11. Operational rollback risk
-- Mitigation: keep owner controls for lender allowlist and principal limits so exposure can be reduced immediately without redeploying logic.
+- Mitigation: keep owner controls for each token's lender binding and principal
+  limit so exposure can be reduced immediately without redeploying logic.
 
 ## Deliverables
 1. Flash-loan-enabled `ArbHook` with strict callback validation.
