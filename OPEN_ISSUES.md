@@ -40,6 +40,16 @@ The initial deployment is owner-operated with a small set of manually verified, 
 - Summary: Discovery cost scales with configured bases, counters, and pools.
 - Decision: the canary uses a small bounded pool book; add explicit limits before supporting a broad registry.
 
+28. Non-USDC base-token price normalization
+- Status: `DEFERRED`
+- Summary: Legacy V2/V3 price normalization preserves relative ordering for the regression-tested USDC-base pool book, but V3 WETH-base prices can round to zero.
+- Decision: the canary registers and borrows USDC only. Correct both token orientations later behind dedicated parity coverage rather than changing legacy discovery immediately before the canary.
+
+29. Approximate V3 initialized-tick capacity
+- Status: `DEFERRED`
+- Summary: `_exactCapacity` advances by tick-spacing intervals rather than scanning the initialized-tick bitmap, so it can miss liquidity changes when the current tick is not aligned to an initialized boundary.
+- Decision: do not add expensive tick traversal for the canary. Pool price limits, atomic repayment, intermediate-balance restoration, and realized minimum-profit enforcement remain authoritative; revisit sizing precision after canary results.
+
 ## Addressed
 
 1. ArbHook EIP-170 deployability
@@ -105,7 +115,7 @@ The initial deployment is owner-operated with a small set of manually verified, 
 
 22. V2/V2 flash principal sizing and execution
 - Status: `ADDRESSED`
-- Notes: Pre-loan sizing now reuses the existing V2 reserve-based probe ladder against the configured principal cap. It borrows twice the selected chunk so the unchanged executor's half-balance starting candidate remains identical. A fixed-block Base fork test executes a real PancakeSwap V2 to Uniswap V2 route through Aave: 20 USDC borrowed, 10 USDC swapped, 0.01 USDC fee, and 0.984011 USDC net profit in the deliberately displaced test state.
+- Notes: Inventory-funded V2 execution was not historically broken; the flash migration lacked the route-specific principal decision that must happen before execution. Pre-loan sizing now reuses the existing V2 reserve-based probe ladder against the configured principal cap. It borrows twice the selected chunk so the unchanged executor's half-balance starting candidate remains identical. A fixed-block Base fork test executes a real PancakeSwap V2 to Uniswap V2 route through Aave: 20 USDC borrowed, 10 USDC swapped, 0.01 USDC fee, and 0.984011 USDC net profit in the deliberately displaced test state.
 
 2. Mixed-route flash principal sizing
 - Status: `ADDRESSED`
@@ -130,3 +140,15 @@ The initial deployment is owner-operated with a small set of manually verified, 
 27. Flash settlement can retain intermediate-token residue
 - Status: `ADDRESSED`
 - Notes: The flash callback snapshots the intermediate-token balance and requires exact restoration after route execution. A partial fill cannot settle while trapping new intermediate tokens or consuming an accidental pre-existing balance.
+
+30. Unused deployed calculation surfaces
+- Status: `ADDRESSED`
+- Notes: Removed unused dust checks, exact-output helpers, public passthroughs, and dead `ArbMath` pricing/profit routines. This removed 2,148 runtime bytes across `ArbitrageLogic` and `ArbMath` without changing hook behavior or exact parity.
+
+31. Mixed-route impact unit mismatch
+- Status: `ADDRESSED`
+- Notes: The local V3 impact estimate previously returned `10,000` for one tick-spacing interval while `_MAX_IMPACT_BPS` treats approximately one tick as one basis point. The estimate now scales interval capacity by tick spacing, preserving the existing cheap approximation without adding tick traversal.
+
+32. Mutable V3 binary-search scale denominator
+- Status: `ADDRESSED`
+- Notes: Midpoint output was scaled against the search's mutable upper bound even though the full-output quote came from the original upper bound. The search now retains that original bound; exact inventory parity and all fixed-fork flash routes remain unchanged.

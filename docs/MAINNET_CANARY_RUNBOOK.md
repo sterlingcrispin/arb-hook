@@ -22,7 +22,9 @@ Do not route mainnet swaps through the hook until all of these are true:
 
 V3/V3, V2/V2, V2-to-V3, and V3-to-V2 routes have route-specific pre-loan
 sizing and fixed-block Aave fork coverage. Register only the canonical route
-types and pools listed in the reviewed canary manifest.
+types and pools listed in the reviewed canary manifest. The initial manifest
+must use USDC as the registered base and flash-loan token; WETH-base V3 price
+discovery is not part of this canary.
 
 ## Reproduce The Release
 
@@ -36,8 +38,10 @@ forge test --summary
 npm run size
 ```
 
-The reviewed release toolchain is Foundry v1.7.1 with solc 0.8.26. Record the
-actual `forge --version`, commit, and runtime sizes with the release artifacts.
+Solc is pinned to 0.8.26 in `foundry.toml`; Foundry is not yet pinned. Select one
+Foundry release for the final clean gate and record its full `forge --version`,
+the release commit, and runtime sizes with the release artifacts. Do not mix
+artifacts produced by different Foundry versions.
 
 Run the fixed-block flash gate against Base block 33942262:
 
@@ -120,7 +124,8 @@ verify all four contracts from the exact release commit on the block explorer.
 Keep `hookMaxIterations` at zero until every other step is complete.
 
 1. Record the exact pool manifest, including base token, pool address, fee, type,
-   and registration order. Registration order changes route traversal.
+   and registration order. Registration order changes route traversal. For this
+   canary every entry must be registered under USDC as the base.
 2. Call `addPools` in that reviewed order. The registry is append-only; redeploy
    before traffic if any entry is wrong.
 3. Set the reviewed execution profile. The historical profile is `10` spread

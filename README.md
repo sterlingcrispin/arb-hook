@@ -23,6 +23,13 @@ The hook doesn't assume the arbitrage leg happens on another Uniswap v4 pool. To
 
 The production execution path is flash-loan-funded for principal, so the hook does not need to hold full trading inventory. External pool repayment is made directly from authenticated swap callbacks; no standing pool allowance is required. A loan is attempted only when the token has a configured lender plus a non-zero principal cap, fee cap, and minimum net profit.
 
+The initial canary is intentionally narrower than the long-term token-agnostic
+architecture: it registers routes under USDC as the base and borrows USDC.
+Legacy price normalization is regression-proven in that orientation. Do not
+register WETH as a base for the canary; V3 WETH-base discovery can round its
+price to zero and requires a parity-sensitive normalization fix after the
+canary.
+
 There is still required operator setup off-chain: pool registration, lender configuration, and runtime-parameter configuration (`hookMaxIterations`, `minSpreadBps`, `chunkSpreadConsumptionBps`, `maxImpactBps`). Hook execution is disabled by default (`hookMaxIterations = 0`). The Aave V3 integration uses the production adapter in `contracts/AaveV3ERC3156Adapter.sol`, with one configured reserve per adapter deployment.
 
 ## Canary Threat Model
@@ -141,8 +148,8 @@ The main runtime knobs are owner-settable on `ArbHook`:
 
 - `setMaxImpactBps(uint256)`  
   Caps each V3/V3 leg's adaptive tick movement before the pool-enforced
-  `sqrtPriceLimit` is derived. Mixed V2-to-V3 routes use the same value as an
-  estimated-impact rejection threshold.
+  `sqrtPriceLimit` is derived. Mixed routes use the same value as a local
+  liquidity-based estimate of the V3 leg's price movement.
 
 The per-token flash controls are:
 
@@ -192,7 +199,7 @@ Why these values are used for parity:
 2. During the swap, the hook is invoked with visibility into the pool's updated state.
 
 3. The hook calls into `ArbitrageLogic` to evaluate:
-   - Is this pool currently out of parity relative to other venues?
+   - Which registered external pools currently disagree?
    - Does an executable arbitrage path exist right now?
    - Is there enough liquidity to do it without self-destructing on price impact?
 
