@@ -205,6 +205,7 @@ contract ArbHookFlashForkAaveTest is Test {
         assertEq(iterations, 1, "expected one V2/V2 iteration");
         assertLt(settled.principal, principalCap, "V2/V2 borrowed the full cap");
         assertEq(settled.principal, settled.totalAmountSwapped * 2, "principal did not preserve V2 half-balance sizing");
+        assertEq(IERC20(WETH).balanceOf(address(hook)), 0, "V2/V2 retained WETH");
     }
 
     function testForkAaveMixedV2V3UsesRouteSizedPrincipal() public {
@@ -248,6 +249,7 @@ contract ArbHookFlashForkAaveTest is Test {
         assertEq(iterations, 1, "expected one mixed iteration");
         assertLt(settled.principal, principalCap, "mixed route borrowed the full cap");
         assertEq(settled.principal, settled.totalAmountSwapped * 2, "principal did not preserve mixed half-balance sizing");
+        assertEq(IERC20(WETH).balanceOf(address(hook)), 0, "V2/V3 retained WETH");
     }
 
     function testForkAaveMixedV3V2UsesRouteSizedPrincipal() public {
@@ -290,6 +292,7 @@ contract ArbHookFlashForkAaveTest is Test {
         assertEq(iterations, 1, "expected one reverse mixed iteration");
         assertLt(settled.principal, principalCap, "reverse mixed route borrowed the full cap");
         assertEq(settled.principal, settled.totalAmountSwapped * 2, "principal did not preserve mixed half-balance sizing");
+        assertEq(IERC20(WETH).balanceOf(address(hook)), 0, "V3/V2 retained WETH");
     }
 
     function testForkAaveAttemptAllTracksLegacyRoundSequenceFull() public {
@@ -447,6 +450,7 @@ contract ArbHookFlashForkAaveTest is Test {
             assertEq(sellPool, expected[round].sellPool, "sell route drifted from legacy");
 
             assertGt(profit, 0, "round should have positive net profit");
+            assertEq(IERC20(WETH).balanceOf(address(hook)), 0, "hook retained intermediate WETH");
         }
 
         emit log("");
