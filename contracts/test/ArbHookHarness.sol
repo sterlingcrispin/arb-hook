@@ -42,6 +42,32 @@ contract ArbHookHarness is ArbHook {
         return _attemptAllViaSelfCall(iterations);
     }
 
+    function getPoolsForToken(
+        address token
+    ) external view returns (ArbUtils.PoolInfo[] memory) {
+        return tokenPools[token];
+    }
+
+    function getSupportedTokenCount() external view returns (uint256) {
+        return supportedTokens.length;
+    }
+
+    function getAllSupportedTokens() external view returns (address[] memory) {
+        return supportedTokens;
+    }
+
+    // Legacy inventory tests reproduce the reference harness's pool approvals.
+    function approvePools(
+        address tokenAddress,
+        address[] calldata poolAddresses,
+        uint256 amount
+    ) external onlyOwner {
+        for (uint256 i = 0; i < poolAddresses.length; i++) {
+            IERC20(tokenAddress).approve(poolAddresses[i], 0);
+            IERC20(tokenAddress).approve(poolAddresses[i], amount);
+        }
+    }
+
     function runPairForTest(
         address tokenA,
         address tokenB,

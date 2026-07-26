@@ -25,11 +25,11 @@ abstract contract ArbUtils {
     /// @notice Minimum tick‑spread (in basis points) required to start an iteration.
     uint16 public minSpreadBps = 10; // 0.10 %
 
-    uint256 public BPS_DIVISOR = 10000;
+    uint256 internal constant BPS_DIVISOR = 10_000;
     uint16 public CHUNK_SPREAD_CONSUMPTION_BPS = 1500;
     uint256 public _MAX_IMPACT_BPS = 500;
-    uint24 public constant V2_POOL_FEE_PPM = 3000;
-    uint24 public constant PANCAKESWAP_V2_POOL_FEE_PPM = 2500;
+    uint24 internal constant V2_POOL_FEE_PPM = 3000;
+    uint24 internal constant PANCAKESWAP_V2_POOL_FEE_PPM = 2500;
 
     enum PoolType {
         V3,
@@ -61,10 +61,6 @@ abstract contract ArbUtils {
 
     // Stateless pricing/sizing engine shared by the hook execution paths.
     ArbitrageLogic internal arbLib;
-
-    // Mailbox written by inner execution and consumed by wrapper callsites.
-    // Keeping this on storage avoids pushing richer structs through low-level return data.
-    int256 public lastExecutionProfit;
 
     /* ---------------- Pool-list helpers ---------------- */
     function _clearCountersForBase(address base) internal {
