@@ -76,4 +76,23 @@ library ArbErrors {
     error HelperToken1Failed();
     error InvalidArbitrageLogicAddress();
     error SwapOutputTokenNotInV2Pair();
+
+    error InvalidPoolManagerAddress();
+    error InvalidLenderAddress();
+    error InvalidTokenAddress();
+    error UntrustedFlashLender();
+    error FlashFeeBpsTooHigh();
+    error InvalidProfitRecipient();
+    error InvalidFlashLender();
+    error InvalidFlashInitiator();
+    error FlashLoanMismatch();
+    error FlashContextMismatch();
+    error FlashTokenMismatch();
+    error InvalidFlashBeneficiary();
+    error FlashArbitrageExecutionFailed();
+    error InsufficientFlashRepaymentBalance();
+    error UnwindFailed();
+    error ERC20TransferFailed();
+    error UnsupportedPoolType();
+    error InvalidV2FlashSwapParams();
 }
