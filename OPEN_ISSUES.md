@@ -54,7 +54,7 @@ The initial deployment is owner-operated with a small set of manually verified, 
 
 1. ArbHook EIP-170 deployability
 - Status: `ADDRESSED`
-- Notes: Cold registration validation moved into the existing `ArbitrageLogic` dependency and unused runtime surfaces were removed. `npm run size` enforces a 24,000-byte budget, leaving at least 576 bytes below the 24,576-byte EIP-170 limit for every production contract.
+- Notes: Cold registration validation moved into the existing `ArbitrageLogic` dependency and unused runtime surfaces were removed. `ArbHook` is 21,945 runtime bytes: 2,055 bytes below the repository's 24,000-byte budget and 2,631 bytes below the 24,576-byte EIP-170 limit.
 
 7. Shared pool metadata removal
 - Status: `ADDRESSED`
