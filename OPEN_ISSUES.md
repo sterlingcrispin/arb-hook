@@ -95,7 +95,7 @@ The initial deployment is owner-operated with a small set of manually verified, 
 
 18. Persistent failed-quote poisoning
 - Status: `ADDRESSED`
-- Notes: Cross-callback failed-quote caches were removed. The bounded in-memory retry set remains, and a regression proves an unchanged quote retries after lender capacity recovers.
+- Notes: Cross-callback failed-quote caches and the redundant in-call quote set were removed. Each `_runPair` call still has at most two attempts, and the fallback excludes the first failed route's sell pool rather than poisoning the same quote across later hook callbacks.
 
 19. Write-only discovery and activity caches
 - Status: `ADDRESSED`
@@ -152,3 +152,31 @@ The initial deployment is owner-operated with a small set of manually verified, 
 32. Mutable V3 binary-search scale denominator
 - Status: `ADDRESSED`
 - Notes: Midpoint output was scaled against the search's mutable upper bound even though the full-output quote came from the original upper bound. The search now retains that original bound; exact inventory parity and all fixed-fork flash routes remain unchanged.
+
+33. Lossy V3 liquidity-delta arithmetic
+- Status: `ADDRESSED`
+- Notes: `_exactCapacity` converted the current `uint128` liquidity through `int128`, which could reinterpret valid high liquidity as negative before crossing a tick. It now uses Uniswap's canonical `LiquidityMath.addDelta` implementation.
+
+34. Reverted route did not advance fallback discovery
+- Status: `ADDRESSED`
+- Notes: A contained low-level execution revert incremented the retry count without excluding the failed sell pool, so the second and final attempt could rediscover the same route. The fallback now excludes that sell pool before discovery runs again.
+
+35. Unreachable two-attempt retry bookkeeping
+- Status: `ADDRESSED`
+- Notes: The removed quote-hash array and buy-pool rotation counters could not affect a two-attempt loop once every failed first route advances by excluding its sell pool. The two-attempt guardrail and deterministic fallback remain.
+
+36. Oversized internal calculation interfaces
+- Status: `ADDRESSED`
+- Notes: Removed unused simulator arguments and external selectors from helpers used only inside `ArbitrageLogic`. This changes no route math or hook-facing behavior.
+
+37. Write-only pool fee metadata
+- Status: `ADDRESSED`
+- Notes: Removed the duplicated `PoolMeta.fee` storage field. Pricing and execution continue to derive fees from the registered pool type or the pool itself.
+
+38. Duplicate flash-lender authorization state
+- Status: `ADDRESSED`
+- Notes: Removed the independent lender-trust mapping because only the owner can bind a lender to a token and the callback already requires the exact active lender, initiator, token, amount, and context hash. One per-token lender binding is now the single source of truth.
+
+39. Unreachable V2 sizing fallbacks
+- Status: `ADDRESSED`
+- Notes: Removed a duplicate minimum-chunk simulation and post-selection cap branches that could not change the result because the minimum is always the first probe and every probe is bounded before selection. The minimum, 1%, 10%, and 50% probe ladder, fee-aware reserve simulation, and best-profit choice remain unchanged.
