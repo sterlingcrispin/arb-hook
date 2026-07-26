@@ -19,11 +19,11 @@ import {ArbitrageLogic} from "./ArbitrageLogic.sol";
 ///      Registration order therefore determines evaluation order in `attemptAllInternal`.
 abstract contract ArbUtils {
     /// @notice Minimum tick‑spread (in basis points) required to start an iteration.
-    uint16 public minSpreadBps = 10; // 0.10 %
+    uint16 internal minSpreadBps = 10; // 0.10 %
 
     uint256 internal constant BPS_DIVISOR = 10_000;
-    uint16 public CHUNK_SPREAD_CONSUMPTION_BPS = 1500;
-    uint256 public _MAX_IMPACT_BPS = 500;
+    uint16 internal CHUNK_SPREAD_CONSUMPTION_BPS = 1500;
+    uint256 internal _MAX_IMPACT_BPS = 500;
     uint24 internal constant V2_POOL_FEE_PPM = 3000;
     uint24 internal constant PANCAKESWAP_V2_POOL_FEE_PPM = 2500;
 

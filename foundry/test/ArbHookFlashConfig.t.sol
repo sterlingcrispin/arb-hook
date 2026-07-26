@@ -49,7 +49,11 @@ contract ArbHookFlashConfigTest is Test {
 
         hook.setTrustedFlashLender(LENDER, true);
         hook.setLenderForToken(TOKEN, LENDER);
-        assertEq(hook.lenderByToken(TOKEN), LENDER);
+        (address configuredLender, , , bool isTrusted) = hook.getFlashConfig(
+            TOKEN
+        );
+        assertEq(configuredLender, LENDER);
+        assertTrue(isTrusted);
     }
 
     function testSetMaxFlashFeeBpsCap() public {

@@ -62,7 +62,7 @@ contract ArbHook is
     // Cache token decimals to make _minChunk cheaper
     mapping(address => uint8) private cachedTokenDecimals;
     // Default max iterations when attempting arb via hook callbacks (0 disables hook execution)
-    uint256 public hookMaxIterations;
+    uint256 internal hookMaxIterations;
 
     // Well-known tokens used by unwind heuristics
     address private constant USDC = 0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913;
@@ -92,11 +92,11 @@ contract ArbHook is
     );
 
     // Flash-loan config and runtime context.
-    mapping(address => address) public lenderByToken;
-    mapping(address => uint256) public flashPrincipalByToken;
-    mapping(address => uint256) public maxFlashFeeBpsByToken;
-    mapping(address => bool) public trustedFlashLender;
-    address public defaultProfitRecipient;
+    mapping(address => address) internal lenderByToken;
+    mapping(address => uint256) internal flashPrincipalByToken;
+    mapping(address => uint256) internal maxFlashFeeBpsByToken;
+    mapping(address => bool) internal trustedFlashLender;
+    address internal defaultProfitRecipient;
 
     address internal activeAttemptProfitRecipient;
     address private _activeLender;
@@ -217,6 +217,47 @@ contract ArbHook is
     }
 
     // ------------------------------- Admin ---------------------------------
+
+    function getExecutionConfig()
+        external
+        view
+        returns (
+            uint256 maxIterations,
+            uint16 minimumSpreadBps,
+            uint16 chunkSpreadConsumptionBps,
+            uint256 maxImpactBps,
+            address profitRecipient
+        )
+    {
+        return (
+            hookMaxIterations,
+            minSpreadBps,
+            CHUNK_SPREAD_CONSUMPTION_BPS,
+            _MAX_IMPACT_BPS,
+            defaultProfitRecipient
+        );
+    }
+
+    function getFlashConfig(
+        address token
+    )
+        external
+        view
+        returns (
+            address lender,
+            uint256 principalCap,
+            uint256 maxFeeBps,
+            bool lenderIsTrusted
+        )
+    {
+        lender = lenderByToken[token];
+        return (
+            lender,
+            flashPrincipalByToken[token],
+            maxFlashFeeBpsByToken[token],
+            trustedFlashLender[lender]
+        );
+    }
 
     function setMinSpreadBps(uint16 _minSpreadBps) external onlyOwner {
         minSpreadBps = _minSpreadBps;
