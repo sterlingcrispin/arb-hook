@@ -52,6 +52,8 @@ abstract contract ArbUtils {
 
     // Stateless pricing/sizing engine shared by the hook execution paths.
     ArbitrageLogic internal arbLib;
+    // Nonzero only while a registered pool swap is synchronously awaiting repayment.
+    bytes32 internal activeSwapContextHash;
 
     /* ---------------- Pool registration ---------------- */
     function _addPools(
@@ -148,10 +150,12 @@ abstract contract ArbUtils {
         } else {
             amount1Out = amountToReceive;
         }
+        activeSwapContextHash = keccak256(abi.encode(address(pair), data));
         try pair.swap(amount0Out, amount1Out, address(this), data) {
             success = true;
         } catch {
             success = false;
         }
+        activeSwapContextHash = bytes32(0);
     }
 }

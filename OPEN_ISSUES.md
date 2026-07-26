@@ -113,3 +113,7 @@ The initial deployment is owner-operated with a small set of manually verified, 
 23. Fail-closed canary economic configuration
 - Status: `ADDRESSED`
 - Notes: The owner-run configuration script requires explicit nonzero USDC principal, fee-cap, and minimum-net-profit values, applies the principal cap last, and does not enable hook iterations. The runbook defines the raw-unit differential-gas formula and records `0.10 USDC` only as a provisional rehearsal floor; the final value remains part of the current-head release gate.
+
+24. Swap callback binding to active execution
+- Status: `ADDRESSED`
+- Notes: V2 and V3 repayment callbacks now require the exact `(pool, callback data)` context installed immediately around the synchronous swap. A registered pool cannot spend residual hook balances by presenting a forged payload outside an ArbHook-initiated swap.

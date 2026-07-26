@@ -1471,6 +1471,7 @@ contract ArbHook is
             poolAddress
         );
 
+        activeSwapContextHash = keccak256(abi.encode(poolAddress, data));
         if (poolType == ArbUtils.PoolType.V3) {
             try
                 IUniswapV3Pool(poolAddress).swap(
@@ -1500,6 +1501,7 @@ contract ArbHook is
                 success = false;
             }
         }
+        activeSwapContextHash = bytes32(0);
     }
 
     // ----------------------------- Callbacks -------------------------------
@@ -1524,6 +1526,7 @@ contract ArbHook is
         int256 amount1Delta,
         bytes calldata data
     ) internal {
+        _requireActiveSwapCallback(data);
         (
             address decodedTokenIn,
             address decodedCaller,
@@ -1596,6 +1599,7 @@ contract ArbHook is
     }
 
     function _v2SwapCallback(bytes calldata data) private {
+        _requireActiveSwapCallback(data);
         (address tokenToPay, uint256 amountToPay) = abi.decode(
             data,
             (address, uint256)
@@ -1618,6 +1622,14 @@ contract ArbHook is
         if (amountToPay > 0) {
             IERC20(tokenToPay).safeTransfer(msg.sender, amountToPay);
         }
+    }
+
+    function _requireActiveSwapCallback(bytes calldata data) private view {
+        bytes32 context = activeSwapContextHash;
+        if (
+            context == bytes32(0) ||
+            context != keccak256(abi.encode(msg.sender, data))
+        ) revert ArbErrors.CallbackUnexpectedPool();
     }
 
     // ----------------------- Internal helpers ------------------------------

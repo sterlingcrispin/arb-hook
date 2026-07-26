@@ -127,6 +127,7 @@ Large-first probing is intentional: it converges quickly and cheaply with halvin
 
 V3 callbacks (`uniswapV3SwapCallback`, `pancakeV3SwapCallback`) enforce:
 
+- callback payload matches the exact pool swap currently awaiting repayment
 - callback payload caller is this contract
 - `msg.sender` equals expected pool in encoded callback data
 - pool exists in registered metadata
@@ -134,6 +135,7 @@ V3 callbacks (`uniswapV3SwapCallback`, `pancakeV3SwapCallback`) enforce:
 
 V2 callbacks (`uniswapV2Call`, `pancakeCall`) enforce:
 
+- callback payload matches the exact pair swap currently awaiting repayment
 - pair address matches trusted factory lookup
 - pair is also registered in local metadata
 - repayment token is one of pair tokens
