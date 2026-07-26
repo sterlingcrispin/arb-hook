@@ -5,6 +5,7 @@ import "./lib/ArbMath.sol";
 import "@uniswap/v3-core/contracts/libraries/FullMath.sol";
 import "@uniswap/v3-core/contracts/libraries/TickMath.sol";
 import "@uniswap/v3-core/contracts/interfaces/IUniswapV3Pool.sol"; // For pool interactions
+import "@uniswap/v3-core/contracts/interfaces/IUniswapV3Factory.sol";
 import "@openzeppelin/contracts/token/ERC20/extensions/IERC20Metadata.sol"; // For decimals
 import "./ArbUtils.sol"; // For PoolInfo struct
 import "./Errors.sol"; // For ArbErrors
@@ -19,6 +20,77 @@ import "./interfaces/IPancakeV3Pool.sol"; // NEW: Add PancakeV3 Pool interface
  */
 contract ArbitrageLogic {
     using Math for uint256; // Add using directive for Math
+
+    uint24 private constant UNISWAP_V2_FEE_PPM = 3000;
+    uint24 private constant PANCAKESWAP_V2_FEE_PPM = 2500;
+
+    /// @notice Read and validate immutable pool metadata during hook setup.
+    /// @dev Keeping cold registration introspection here leaves the hook focused
+    ///      on runtime discovery and execution without changing stored PoolInfo.
+    function getValidatedPoolInfo(
+        address baseToken,
+        address poolAddress,
+        uint24 providedFee,
+        ArbUtils.PoolType poolType
+    ) external view returns (ArbUtils.PoolInfo memory info) {
+        address token0;
+        address token1;
+        uint24 actualFee = providedFee;
+        int24 tickSpacing;
+        bool feeMustMatch;
+
+        if (
+            poolType == ArbUtils.PoolType.V3 ||
+            poolType == ArbUtils.PoolType.PANCAKESWAP_V3
+        ) {
+            if (poolType == ArbUtils.PoolType.V3) {
+                IUniswapV3Pool pool = IUniswapV3Pool(poolAddress);
+                token0 = pool.token0();
+                token1 = pool.token1();
+                actualFee = pool.fee();
+                tickSpacing = pool.tickSpacing();
+            } else {
+                IPancakeV3Pool pool = IPancakeV3Pool(poolAddress);
+                token0 = pool.token0();
+                token1 = pool.token1();
+                actualFee = pool.fee();
+                tickSpacing = IUniswapV3Factory(
+                    0x0BFbCF9fa4f9C56B0F40a671Ad40E0805A091865
+                ).feeAmountTickSpacing(actualFee);
+            }
+            feeMustMatch = true;
+        } else if (poolType == ArbUtils.PoolType.V2) {
+            actualFee = UNISWAP_V2_FEE_PPM;
+            IUniswapV2Pair pair = IUniswapV2Pair(poolAddress);
+            token0 = pair.token0();
+            token1 = pair.token1();
+        } else if (poolType == ArbUtils.PoolType.PANCAKESWAP_V2) {
+            actualFee = PANCAKESWAP_V2_FEE_PPM;
+            IUniswapV2Pair pair = IUniswapV2Pair(poolAddress);
+            token0 = pair.token0();
+            token1 = pair.token1();
+        } else {
+            revert ArbErrors.UnsupportedPoolType();
+        }
+
+        if (
+            !((baseToken == token0 && token1 != address(0)) ||
+                (baseToken == token1 && token0 != address(0)))
+        ) revert ArbErrors.AddPoolsInputTokenNotInPool();
+        if (feeMustMatch && actualFee != providedFee)
+            revert ArbErrors.AddPoolsProvidedFeeMismatch();
+
+        info = ArbUtils.PoolInfo({
+            poolAddress: poolAddress,
+            fee: actualFee,
+            poolType: poolType,
+            token0: token0,
+            token1: token1,
+            token0Decimals: IERC20Metadata(token0).decimals(),
+            token1Decimals: IERC20Metadata(token1).decimals(),
+            tickSpacing: tickSpacing
+        });
+    }
 
     /**
      * @notice Corrected calculation of tokenA price in terms of tokenB, scaled to 1e18.
