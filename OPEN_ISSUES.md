@@ -117,3 +117,7 @@ The initial deployment is owner-operated with a small set of manually verified, 
 24. Swap callback binding to active execution
 - Status: `ADDRESSED`
 - Notes: V2 and V3 repayment callbacks now require the exact `(pool, callback data)` context installed immediately around the synchronous swap. A registered pool cannot spend residual hook balances by presenting a forged payload outside an ArbHook-initiated swap.
+
+25. Linked library omitted from release inventory
+- Status: `ADDRESSED`
+- Notes: `ArbitrageLogic` has an external link to `ArbMath`, which Foundry deploys automatically through the CREATE2 factory. The runbook now requires recording and verifying that library alongside `ArbitrageLogic`, the Aave adapter, and `ArbHook`.

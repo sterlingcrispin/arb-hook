@@ -80,8 +80,10 @@ if imports or the OpenZeppelin version change.
 
 ## Simulate And Deploy
 
-The deployment script is intentionally limited to deploying
-`ArbitrageLogic`, the USDC Aave adapter, and a CREATE2-mined after-swap hook:
+The deployment is intentionally limited to the linked `ArbMath` library,
+`ArbitrageLogic`, the USDC Aave adapter, and a CREATE2-mined after-swap hook.
+Foundry deploys `ArbMath` automatically because `ArbitrageLogic` contains
+external library links:
 
 ```bash
 OWNER="$OWNER" PRIVATE_KEY="$PRIVATE_KEY" forge script \
@@ -110,7 +112,8 @@ cast codesize "$HOOK" --rpc-url "$BASE_RPC_URL"
 
 The hook address's low 14 bits must equal `0x40`, the after-swap-only flag. The
 constructor enforces this, but record the mined salt and address from the script.
-Verify the three contracts from the exact release commit on the block explorer.
+Record the linked `ArbMath` address from the simulation/broadcast artifact and
+verify all four contracts from the exact release commit on the block explorer.
 
 ## Configure While Disabled
 

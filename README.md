@@ -70,8 +70,9 @@ The swap router must pass the beneficiary as exactly 20 packed address bytes (`a
 
 ## Base Deployment
 
-`script/DeployArbHook.s.sol` deploys `ArbitrageLogic`, the USDC Aave adapter,
-and an after-swap-only hook mined against Base's canonical CREATE2 deployer.
+`script/DeployArbHook.s.sol` deploys the linked `ArbMath` library,
+`ArbitrageLogic`, the USDC Aave adapter, and an after-swap-only hook mined
+against Base's canonical CREATE2 deployer.
 The complete release, configuration, canary, and shutdown procedure is in
 [`docs/MAINNET_CANARY_RUNBOOK.md`](docs/MAINNET_CANARY_RUNBOOK.md).
 Simulate first:
