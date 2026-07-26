@@ -403,7 +403,6 @@ contract ArbitrageLogic {
         bool zeroForOneA; // Swap direction for pool A
         bool zeroForOneB; // Swap direction for pool B
         uint24 feeB; // Pool-B fee used in simulation
-        uint256 calculatedSellImpactBps; // Estimated impact on pool A for coarse chunk
     }
 
     struct IterationConfig {
@@ -634,6 +633,10 @@ contract ArbitrageLogic {
             move = int24(int256(tmpMove));
         }
         if (move == 0) move = 1;
+        if (config.maxImpactBps == 0) return params;
+        if (uint256(uint24(move)) > config.maxImpactBps) {
+            move = int24(uint24(config.maxImpactBps));
+        }
 
         // --- Price limits --------------------------------------------------------
         params.zeroForOneB = (IUniswapV3Pool(poolB_address).token0() ==
@@ -690,14 +693,7 @@ contract ArbitrageLogic {
             return params; // shouldContinue is false
         }
 
-        // Track estimated impact for observability/guardrails; refinement happens in part 2.
-        uint256 impactOnA_forChunkPreImpact = ArbMath._estImpactBps(
-            poolA_address,
-            startToken,
-            currentChunkPreImpact
-        );
         uint256 roughChunk = currentChunkPreImpact;
-        params.calculatedSellImpactBps = impactOnA_forChunkPreImpact;
 
         if (roughChunk < config.minChunkForStartToken) {
             return params; // still false

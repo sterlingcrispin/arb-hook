@@ -15,12 +15,6 @@ The initial deployment is owner-operated with a small set of manually verified, 
 - Summary: V3/V3 routes derive principal from existing liquidity math before borrowing. V2/V2 and mixed routes still begin with a generic quote-based principal and calculate their trade chunk after the loan fee is committed.
 - Decision: add route-specific tests before changing the legacy sizing loops.
 
-3. V3/V3 max-impact enforcement
-- Status: `OPEN`
-- Priority: `HIGH`
-- Summary: V3 sizing calculates estimated impact but does not currently apply `_MAX_IMPACT_BPS` as a hard cap.
-- Decision: enforce only with a regression that preserves the ten-round fixed-block route sequence.
-
 4. Production router recipient integration
 - Status: `OPEN`
 - Priority: `HIGH`
@@ -100,3 +94,7 @@ The initial deployment is owner-operated with a small set of manually verified, 
 19. Write-only discovery and activity caches
 - Status: `ADDRESSED`
 - Notes: Removed winner and pool-activity storage that had no read path. The ten-round route sequence remains unchanged.
+
+3. V3/V3 max-impact enforcement
+- Status: `ADDRESSED`
+- Notes: V3 sizing now caps each leg's adaptive tick movement before deriving the pool-enforced `sqrtPriceLimit`. This reuses the existing sizing path, removes a redundant impact read and write-only field, and preserves both exact inventory parity and the flash-loan ten-round route sequence.

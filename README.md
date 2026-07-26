@@ -114,8 +114,9 @@ The main runtime knobs are owner-settable on `ArbHook`:
   Lower values are more conservative (more, smaller chunks; less impact risk).
 
 - `setMaxImpactBps(uint256)`  
-  Maximum estimated price impact allowed for guarded paths before skipping.
-  This prevents trading when impact is likely to destroy expected edge.
+  Caps each V3/V3 leg's adaptive tick movement before the pool-enforced
+  `sqrtPriceLimit` is derived. Mixed V2-to-V3 routes use the same value as an
+  estimated-impact rejection threshold.
 
 The per-token flash controls are:
 
@@ -145,7 +146,8 @@ Why these values are used for parity:
 - `2` iterations keeps execution bounded while still allowing a follow-up chunk after the first fill.
 - `10 bps` filters micro-spreads that are usually not robust after execution costs.
 - `1500` gives a moderate first-step aggressiveness instead of over-consuming spread immediately.
-- `500` (5%) blocks obviously excessive-impact paths.
+- `500` caps adaptive V3 price-limit movement at 500 ticks (approximately 5%)
+  and rejects mixed routes whose estimated V3 impact exceeds 500 bps.
 - The `100,000 USDC` value is a ceiling, not the amount borrowed. Existing route math derives each round's principal below that ceiling.
 - The `100 bps` fee cap is deliberately above Aave's 5 bps test-block premium and catches unexpected lender changes.
 - The `1` raw-unit profit floor keeps every historically profitable round observable, including very small rounds. It is a regression-test value, not a production recommendation; a canary floor should cover expected transaction cost and desired margin.
