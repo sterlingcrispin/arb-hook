@@ -107,17 +107,10 @@ contract ArbitrageLogic {
         uint8 dec0_uint8,
         uint8 dec1_uint8
     ) private pure returns (uint256 price1e18) {
-        // console.log("_calculatePrice1e18_corrected");
-        // console.log("sqrtP_uint160:", sqrtP_uint160);
-        // console.log("aIsT0:", aIsT0);
-        // console.log("dec0_uint8:", dec0_uint8);
-        // console.log("dec1_uint8:", dec1_uint8);
 
         uint256 sqrtP = uint256(sqrtP_uint160);
         uint256 dec0 = uint256(dec0_uint8); // Cast to uint256 for 10**dec0
         uint256 dec1 = uint256(dec1_uint8); // Cast to uint256 for 10**dec1
-        // console.log("dec0:", dec0);
-        // console.log("dec1:", dec1);
 
         uint256 num;
         uint256 den;
@@ -128,11 +121,6 @@ contract ArbitrageLogic {
 
         uint256 sqrtPSquared = FullMath.mulDiv(sqrtP, sqrtP, 1);
 
-        // console.log("Q192:", Q192);
-        // console.log("tenPowDec0:", tenPowDec0);
-        // console.log("tenPowDec1:", tenPowDec1);
-        // console.log("sqrtPSquared:", sqrtPSquared);
-        // console.log("isT0:", aIsT0);
 
         if (aIsT0) {
             // Price of tokenA (token0) in terms of tokenB (token1)
@@ -150,11 +138,8 @@ contract ArbitrageLogic {
             den = FullMath.mulDiv(sqrtPSquared, tenPowDec1, 1); // sqrtP^2 * 10^dec1
         }
 
-        // console.log("num:", num);
-        // console.log("den:", den);
         if (den == 0) return 0; // Should not happen with Uniswap V3 properties
         price1e18 = FullMath.mulDiv(num, 1e18, den);
-        // console.log("price1e18:", price1e18);
         return price1e18;
     }
 
@@ -1160,7 +1145,6 @@ contract ArbitrageLogic {
     ) public pure returns (int256 profitInStartToken) {
         if (chunkToSwapStartToken == 0) return 0;
 
-        // console.log("simulateV2V2Profit");
 
         // Trade 1 (Pool A): startToken -> intermediateToken
         uint256 intermediateAmountOut = getAmountOut(
@@ -1170,18 +1154,11 @@ contract ArbitrageLogic {
             poolAFeePPM
         );
 
-        // console.log("intermediateAmountOut", intermediateAmountOut);
 
         if (intermediateAmountOut == 0) {
             return -int256(chunkToSwapStartToken); // Full loss if no intermediate token received
         }
 
-        // console.log("chunkToSwapStartToken", chunkToSwapStartToken);
-        // console.log("poolA", address(poolA));
-        // console.log("poolB", address(poolB));
-        // console.log("startToken", startToken);
-        // console.log("intermediateToken", intermediateToken);
-        // console.log("rA_start", rA_start);
 
         // Trade 2 (Pool B): intermediateToken -> startToken
         uint256 startTokenReceivedBack = getAmountOut(
@@ -1191,7 +1168,6 @@ contract ArbitrageLogic {
             poolBFeePPM
         );
 
-        // console.log("startTokenReceivedBack", startTokenReceivedBack);
 
         if (startTokenReceivedBack > chunkToSwapStartToken) {
             return int256(startTokenReceivedBack - chunkToSwapStartToken);
@@ -1302,28 +1278,6 @@ contract ArbitrageLogic {
         uint256 amountIn,
         uint16 slippageBps
     ) public view returns (uint160 sqrtPriceLimitX96) {
-        // console.log(
-        //     "calculateV3SqrtPriceLimitForAmountIn - amountIn:",
-        //     amountIn
-        // );
-        // console.log(
-        //     "calculateV3SqrtPriceLimitForAmountIn - slippageBps:",
-        //     slippageBps
-        // );
-        // console.log("calculateV3SqrtPriceLimitForAmountIn - tokenIn:", tokenIn);
-        // console.log(
-        //     "calculateV3SqrtPriceLimitForAmountIn - pool:",
-        //     address(pool)
-        // );
-        // console.log(
-        //     "calculateV3SqrtPriceLimitForAmountIn - token0:",
-        //     pool.token0()
-        // );
-        // console.log("calculateV3SqrtPriceLimitForAmountIn - fee:", pool.fee());
-        // console.log(
-        //     "calculateV3SqrtPriceLimitForAmountIn - zeroForOne:",
-        //     tokenIn == pool.token0()
-        // );
         if (amountIn == 0) return 0;
 
         // [OPT] Cache slot0 and liquidity once
@@ -1374,10 +1328,6 @@ contract ArbitrageLogic {
         if (!zeroForOne && sqrtPriceLimitX96 > TickMath.MAX_SQRT_RATIO - 1)
             return TickMath.MAX_SQRT_RATIO - 1;
 
-        // console.log(
-        //     "calculateV3SqrtPriceLimitForAmountIn - sqrtPriceLimitX96:",
-        //     sqrtPriceLimitX96
-        // );
 
         return sqrtPriceLimitX96;
     }
@@ -1402,7 +1352,6 @@ contract ArbitrageLogic {
     ) public view returns (int256 profitInStartToken) {
         if (chunkToSwapStartToken == 0) return 0;
 
-        // console.log("simulateV2V3Profit");
 
         // Step 1: Simulate V2 swap (startToken -> intermediateToken)
         (uint112 rA_start, uint112 rA_interm, ) = _getV2ReservesForTokens(
@@ -1413,13 +1362,6 @@ contract ArbitrageLogic {
         if (rA_start == 0 || rA_interm == 0)
             return -int256(chunkToSwapStartToken);
 
-        // console.log("rA_start", rA_start);
-        // console.log("rA_interm", rA_interm);
-        // console.log("chunkToSwapStartToken", chunkToSwapStartToken);
-        // console.log("poolA", address(poolA));
-        // console.log("poolB", address(poolB));
-        // console.log("startToken", startToken);
-        // console.log("intermediateToken", intermediateToken);
 
         uint256 intermediateAmountOut = getAmountOut(
             chunkToSwapStartToken,
@@ -1428,7 +1370,6 @@ contract ArbitrageLogic {
             poolAFeePPM
         );
 
-        // console.log("intermediateAmountOut", intermediateAmountOut);
         if (intermediateAmountOut == 0) return -int256(chunkToSwapStartToken);
 
         // Step 2: Accurately simulate V3 swap (intermediateToken -> startToken) using SwapMath
@@ -1437,10 +1378,6 @@ contract ArbitrageLogic {
         address v3_token0 = poolB.token0();
         bool zeroForOne = (intermediateToken == v3_token0);
 
-        // console.log("liquidity", liquidity);
-        // console.log("sqrtP", sqrtP);
-        // console.log("zeroForOne", zeroForOne);
-        // console.log("startToken", startToken);
 
         if (liquidity == 0) return -int256(chunkToSwapStartToken);
 
@@ -1461,9 +1398,7 @@ contract ArbitrageLogic {
                 poolB.fee()
             );
 
-        // console.log("startTokenReceivedBack", startTokenReceivedBack);
 
-        // console.log("chunkToSwapStartToken", chunkToSwapStartToken);
 
         if (startTokenReceivedBack > chunkToSwapStartToken) {
             return int256(startTokenReceivedBack - chunkToSwapStartToken);
@@ -1492,7 +1427,6 @@ contract ArbitrageLogic {
     ) public view returns (int256 profitInStartToken) {
         if (chunkToSwapStartToken == 0) return 0;
 
-        // console.log("simulateV3V2Profit");
 
         // Step 1: Accurately simulate V3 swap (startToken -> intermediateToken) using SwapMath
         (uint160 sqrtP, , , , , uint8 feeProtocol, ) = poolA.slot0();
@@ -1500,14 +1434,6 @@ contract ArbitrageLogic {
         address v3_token0 = poolA.token0();
         bool zeroForOne = (startToken == v3_token0);
 
-        // console.log("liquidity", liquidity);
-        // console.log("sqrtP", sqrtP);
-        // console.log("zeroForOne", zeroForOne);
-        // console.log("startToken", startToken);
-        // console.log("intermediateToken", intermediateToken);
-        // console.log("chunkToSwapStartToken", chunkToSwapStartToken);
-        // console.log("poolA", address(poolA));
-        // console.log("poolB", address(poolB));
 
         if (liquidity == 0) return -int256(chunkToSwapStartToken);
 
@@ -1528,7 +1454,6 @@ contract ArbitrageLogic {
                 poolA.fee()
             );
 
-        // console.log("intermediateAmountOut", intermediateAmountOut);
 
         if (intermediateAmountOut == 0) return -int256(chunkToSwapStartToken);
 
@@ -1541,8 +1466,6 @@ contract ArbitrageLogic {
         if (rB_start == 0 || rB_interm == 0)
             return -int256(chunkToSwapStartToken);
 
-        // console.log("rB_interm", rB_interm);
-        // console.log("rB_start", rB_start);
 
         uint256 startTokenReceivedBack = getAmountOut(
             intermediateAmountOut,
@@ -1551,7 +1474,6 @@ contract ArbitrageLogic {
             poolBFeePPM
         );
 
-        // console.log("startTokenReceivedBack", startTokenReceivedBack);
 
         if (startTokenReceivedBack > chunkToSwapStartToken) {
             profitInStartToken = int256(
@@ -1562,7 +1484,6 @@ contract ArbitrageLogic {
                 chunkToSwapStartToken - startTokenReceivedBack
             );
         }
-        // console.log("profitInStartToken", uint256(profitInStartToken));
         return profitInStartToken;
     }
 
