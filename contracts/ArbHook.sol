@@ -95,7 +95,6 @@ contract ArbHook is
     mapping(address => uint256) internal flashPrincipalByToken;
     mapping(address => uint256) internal maxFlashFeeBpsByToken;
     mapping(address => uint256) internal minNetProfitByToken;
-    mapping(address => bool) internal trustedFlashLender;
 
     address internal activeAttemptProfitRecipient;
     address private _activeLender;
@@ -240,8 +239,7 @@ contract ArbHook is
             address lender,
             uint256 principalCap,
             uint256 maxFeeBps,
-            uint256 minNetProfit,
-            bool lenderIsTrusted
+            uint256 minNetProfit
         )
     {
         lender = lenderByToken[token];
@@ -249,8 +247,7 @@ contract ArbHook is
             lender,
             flashPrincipalByToken[token],
             maxFlashFeeBpsByToken[token],
-            minNetProfitByToken[token],
-            trustedFlashLender[lender]
+            minNetProfitByToken[token]
         );
     }
 
@@ -272,22 +269,12 @@ contract ArbHook is
         hookMaxIterations = newMaxIterations;
     }
 
-    function setTrustedFlashLender(
-        address lender,
-        bool isTrusted
-    ) external onlyOwner {
-        if (lender == address(0)) revert ArbErrors.InvalidLenderAddress();
-        trustedFlashLender[lender] = isTrusted;
-    }
-
     function setLenderForToken(
         address token,
         address lender
     ) external onlyOwner {
         if (token == address(0)) revert ArbErrors.InvalidTokenAddress();
         if (lender == address(0)) revert ArbErrors.InvalidLenderAddress();
-        if (!trustedFlashLender[lender])
-            revert ArbErrors.UntrustedFlashLender();
         lenderByToken[token] = lender;
     }
 
@@ -610,7 +597,7 @@ contract ArbHook is
         if (maxIterations == 0) return (false, 0, 0);
 
         address lender = lenderByToken[startToken];
-        if (lender == address(0) || !trustedFlashLender[lender]) {
+        if (lender == address(0)) {
             return (false, 0, 0);
         }
 
@@ -757,7 +744,7 @@ contract ArbHook is
         uint256 fee,
         bytes calldata data
     ) external override returns (bytes32) {
-        if (msg.sender != _activeLender || !trustedFlashLender[msg.sender]) {
+        if (msg.sender != _activeLender) {
             revert ArbErrors.InvalidFlashLender();
         }
         if (initiator != address(this))
@@ -1735,11 +1722,7 @@ contract ArbHook is
         address lender
     ) private view returns (uint256) {
         uint256 configuredCap = flashPrincipalByToken[token];
-        if (
-            configuredCap == 0 ||
-            lender == address(0) ||
-            !trustedFlashLender[lender]
-        ) return 0;
+        if (configuredCap == 0 || lender == address(0)) return 0;
 
         try IERC3156FlashLender(lender).maxFlashLoan(token) returns (
             uint256 available

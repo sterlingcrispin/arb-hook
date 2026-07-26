@@ -111,7 +111,6 @@ contract ArbHookFlashForkAaveTest is Test {
             address(logic));
 
         adapter = new AaveV3ERC3156Adapter(AAVE_POOL, USDC, AAVE_USDC_A_TOKEN);
-        hook.setTrustedFlashLender(address(adapter), true);
         hook.setLenderForToken(USDC, address(adapter));
         hook.setMaxFlashFeeBpsForToken(USDC, 100); // 1% guardrail
         hook.setMinNetProfitForToken(USDC, 1);
@@ -328,7 +327,6 @@ contract ArbHookFlashForkAaveTest is Test {
         );
         assertEq(address(hook), expected, "mined hook address mismatch");
 
-        hook.setTrustedFlashLender(address(adapter), true);
         hook.setLenderForToken(USDC, address(adapter));
         hook.setFlashPrincipalForToken(USDC, PARITY_FLASH_CAP_USDC);
         hook.setMaxFlashFeeBpsForToken(USDC, 100);

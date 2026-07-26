@@ -25,7 +25,6 @@ library ArbErrors {
     error InvalidPoolManagerAddress();
     error InvalidLenderAddress();
     error InvalidTokenAddress();
-    error UntrustedFlashLender();
     error FlashFeeBpsTooHigh();
     error InvalidFlashLender();
     error InvalidFlashInitiator();

@@ -29,7 +29,6 @@ contract ConfigureArbHookCanary is Script {
         if (hook.owner() != vm.addr(privateKey)) revert NotHookOwner();
 
         vm.startBroadcast(privateKey);
-        hook.setTrustedFlashLender(adapter, true);
         hook.setLenderForToken(USDC, adapter);
         hook.setMaxFlashFeeBpsForToken(USDC, maxFeeBps);
         hook.setMinNetProfitForToken(USDC, minNetProfit);
