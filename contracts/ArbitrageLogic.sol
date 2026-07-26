@@ -1522,7 +1522,7 @@ contract ArbitrageLogic {
         uint256 minChunk,
         int256 cumulativeProfit,
         int256 minCumulativeProfit
-    ) public view returns (uint256 bestChunk) {
+    ) public view returns (uint256 bestChunk, int256 expectedProfit) {
         // Mixed-path sizing uses monotonic backoff.
         // Start from a large probe and halve until a profitable/safe chunk is found.
         // This minimizes quote simulations while still quickly adapting to impact.
@@ -1564,8 +1564,7 @@ contract ArbitrageLogic {
                 simulatedProfit > 0 &&
                 cumulativeProfit + simulatedProfit >= minCumulativeProfit
             ) {
-                bestChunk = testChunk;
-                break; // Found the first profitable chunk, exit.
+                return (testChunk, simulatedProfit);
             }
 
             if (halvings >= 9) break; // Max iterations
