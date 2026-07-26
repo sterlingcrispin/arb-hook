@@ -200,42 +200,6 @@ contract ArbitrageLogic {
             );
     }
 
-    /**
-     * @notice Checks if a pool is too thin for arbitrage (a "dust pool").
-     * @dev A pool is considered dust if moving its price by one tick spacing requires less than `minChunkIn` of the input token.
-     * @param sqrtPriceX96 Current sqrt price of the pool.
-     * @param tick Current tick of the pool.
-     * @param liquidity Current liquidity of the pool.
-     * @param tickSpacing The tick spacing of the pool.
-     * @param zeroForOne True if swapping token0 for token1, false otherwise.
-     * @param minChunkIn The minimum amount of input token considered significant for an arbitrage chunk.
-     * @return isDust True if the pool is considered a dust pool, false otherwise.
-     */
-    function isPoolDust(
-        uint160 sqrtPriceX96,
-        int24 tick,
-        uint128 liquidity,
-        int24 tickSpacing,
-        bool zeroForOne,
-        uint256 minChunkIn
-    ) public pure returns (bool isDust) {
-        if (liquidity == 0) return true; // Definitely dust if no liquidity
-
-        int24 nextTick = zeroForOne ? tick - tickSpacing : tick + tickSpacing;
-        if (nextTick < TickMath.MIN_TICK) nextTick = TickMath.MIN_TICK;
-        if (nextTick > TickMath.MAX_TICK) nextTick = TickMath.MAX_TICK;
-
-        uint160 sqrtPriceNextTick = TickMath.getSqrtRatioAtTick(nextTick);
-        (uint256 probeIn, ) = ArbMath._deltaAmounts(
-            zeroForOne,
-            sqrtPriceX96,
-            sqrtPriceNextTick,
-            liquidity
-        );
-
-        return probeIn < minChunkIn;
-    }
-
     // [NEW] Lightweight price fetch for a single pool
     function _getSinglePoolPrices(
         address tokenA,
@@ -854,68 +818,6 @@ contract ArbitrageLogic {
             FullMath.mulDiv(rawV2PriceScaled, 1_000_000 - v2FeePPM, 1_000_000);
     }
 
-    /**
-     * @notice Checks if a V2 pool is too thin for arbitrage (a "dust pool").
-     * @dev A pool is considered dust if its reserves are zero, or if swapping
-     *      `minChunkIn` of `tokenIn` yields less than 1 wei of `tokenOut`.
-     * @param pair The IUniswapV2Pair contract instance.
-     * @param tokenIn The address of the input token for the hypothetical swap.
-     * @param minChunkIn The minimum amount of input token considered significant.
-     * @return isDust True if the pool is considered a dust pool, false otherwise.
-     */
-    function isV2PoolDust(
-        IUniswapV2Pair pair,
-        address tokenIn,
-        uint256 minChunkIn, // minChunkIn is for tokenIn
-        uint24 v2FeePPM,
-        uint112 reserve0,
-        uint112 reserve1,
-        address pairToken0,
-        address pairToken1
-    ) public view returns (bool isDust) {
-        if (reserve0 == 0 || reserve1 == 0) {
-            return true; // No liquidity or one-sided liquidity is dust
-        }
-
-        uint256 reserveIn;
-        uint256 reserveOut;
-
-        if (tokenIn == pairToken0) {
-            reserveIn = reserve0;
-            reserveOut = reserve1;
-        } else if (tokenIn == pairToken1) {
-            reserveIn = reserve1;
-            reserveOut = reserve0;
-        } else {
-            revert ArbErrors.SwapInputTokenNotInPool(); // tokenIn must be one of the pair's tokens
-        }
-
-        if (minChunkIn == 0) {
-            return true; // Swapping zero input is not meaningful for a dust check
-        }
-
-        if (v2FeePPM >= 1_000_000) {
-            return true;
-        }
-        uint256 amountInWithFee = FullMath.mulDiv(
-            minChunkIn,
-            1_000_000 - v2FeePPM,
-            1_000_000
-        );
-        uint256 numerator = amountInWithFee * reserveOut;
-        uint256 denominator = reserveIn + amountInWithFee;
-
-        if (denominator == 0) {
-            return true; // Should not happen if reserves are non-zero and minChunkIn > 0
-        }
-
-        uint256 amountOut = numerator / denominator;
-
-        // If the calculated output is less than 1 wei, consider it dust.
-        // A more sophisticated check might use _minChunk for tokenOut.
-        return amountOut < 1;
-    }
-
     // --- NEW V2-V2 Arbitrage Calculation Logic ---
 
     struct V2TradeParams {
@@ -1216,14 +1118,6 @@ contract ArbitrageLogic {
     function getAmountOut(
         uint256 amountIn,
         uint256 reserveIn,
-        uint256 reserveOut
-    ) public pure returns (uint256 amountOut) {
-        return getAmountOut(amountIn, reserveIn, reserveOut, 3000);
-    }
-
-    function getAmountOut(
-        uint256 amountIn,
-        uint256 reserveIn,
         uint256 reserveOut,
         uint24 feePPM
     ) public pure returns (uint256 amountOut) {
@@ -1240,31 +1134,6 @@ contract ArbitrageLogic {
         uint256 denominator = reserveIn + amountInWithFee;
         amountOut = numerator / denominator;
         return amountOut;
-    }
-
-    /// @dev Calculates the required input amount for a given output amount for a V2 swap.
-    function getAmountIn(
-        uint256 amountOut,
-        uint256 reserveIn,
-        uint256 reserveOut
-    ) public pure returns (uint256 amountIn) {
-        return getAmountIn(amountOut, reserveIn, reserveOut, 3000);
-    }
-
-    function getAmountIn(
-        uint256 amountOut,
-        uint256 reserveIn,
-        uint256 reserveOut,
-        uint24 feePPM
-    ) public pure returns (uint256 amountIn) {
-        if (amountOut == 0) return 0;
-        if (reserveIn == 0 || reserveOut == 0) return type(uint256).max;
-        if (amountOut >= reserveOut) return type(uint256).max; // Not enough liquidity
-        if (feePPM >= 1_000_000) return type(uint256).max;
-        uint256 numerator = reserveIn * amountOut * 1_000_000;
-        uint256 denominator = (reserveOut - amountOut) * (1_000_000 - feePPM);
-        amountIn = (numerator / denominator) + 1;
-        return amountIn;
     }
 
     // [NEW] Improve multi-step simulation for better accuracy (reduce partials)
@@ -1481,34 +1350,6 @@ contract ArbitrageLogic {
             );
         }
         return profitInStartToken;
-    }
-
-    function deltaAmounts(
-        bool zeroForOne,
-        uint160 sqrtP0, // Current price
-        uint160 sqrtP1, // Target price
-        uint128 L
-    ) public pure returns (uint256 inAmt, uint256 outAmt) {
-        return ArbMath._deltaAmounts(zeroForOne, sqrtP0, sqrtP1, L);
-    }
-
-    function simulatedPL(
-        uint256 startInA, // token-A sent to pool A   (raw units)
-        uint256 intermOutA, // token-B received from A  (raw units)
-        uint256 intermCapB, // clamp you applied
-        uint24 feeB,
-        uint256 intermInB, // token-B you *would* push into B at limit
-        uint256 startOutB // token-A you *would* get back at limit
-    ) public pure returns (int256) {
-        return
-            ArbMath._simulatedPL(
-                startInA,
-                intermOutA,
-                intermCapB,
-                feeB,
-                intermInB,
-                startOutB
-            );
     }
 
     function findBestMixedPairChunk(

@@ -5,7 +5,6 @@ import {FullMath} from "@uniswap/v3-core/contracts/libraries/FullMath.sol";
 import {LiquidityAmounts} from "@uniswap/v3-periphery/contracts/libraries/LiquidityAmounts.sol";
 
 import {IUniswapV3Pool} from "@uniswap/v3-core/contracts/interfaces/IUniswapV3Pool.sol";
-import {IERC20Metadata} from "@openzeppelin/contracts/token/ERC20/extensions/IERC20Metadata.sol";
 
 import {TickMath} from "@uniswap/v3-core/contracts/libraries/TickMath.sol";
 import "@uniswap/v3-core/contracts/libraries/SwapMath.sol";
@@ -13,55 +12,6 @@ import "@uniswap/v3-core/contracts/libraries/SwapMath.sol";
 library ArbMath {
     error FailedPoolTicks();
     error FailedTickSpacing();
-
-    /*  returns: tokenB‑units per 1 tokenA‑unit, scaled by 1e18                     */
-    /**
-     * @dev Return token-B units per **1 token-A** (scaled by **1e18**),
-     *      correctly adjusting for token decimals.
-     *      This is the price orientation expected by `_expectedPL18`.
-     *
-     * @param sqrtPriceX96 The current sqrt price ratio (sqrt(token1/token0) * 2^96) from the pool.
-     * @param aIsToken0 True if tokenA (the token for which the price is being quoted) is pool.token0.
-     * @param dec0 Decimals of pool.token0.
-     * @param dec1 Decimals of pool.token1.
-     * @return price The price of tokenA in terms of tokenB, scaled by 1e18.
-     *               (e.g., if tokenA is WETH and tokenB is USDC, it's USDC per WETH).
-     */
-    function _price1e18(
-        uint160 sqrtPriceX96,
-        bool aIsToken0,
-        uint8 dec0,
-        uint8 dec1
-    ) internal pure returns (uint256 price) {
-        uint256 sqrtP = uint256(sqrtPriceX96);
-        uint256 tenPowDec0 = 10 ** uint256(dec0);
-        uint256 tenPowDec1 = 10 ** uint256(dec1);
-
-        // sqrtPSquared = sqrtPriceX96^2. Q192 = 2^192.
-        // The raw price of token1 in terms of token0 (unadjusted for decimals) is P_1/0_raw = sqrtP^2 / Q192.
-        uint256 sqrtPSquared = FullMath.mulDiv(sqrtP, sqrtP, 1);
-        uint256 Q192 = uint256(1) << 192;
-
-        uint256 num;
-        uint256 den;
-
-        if (aIsToken0) {
-            // tokenA is pool.token0. We want the price of token0 in terms of token1 (token1/token0).
-            // Formula: (P_1/0_raw) * (10^dec1 / 10^dec0)
-            // price = (sqrtP^2 / Q192) * (10^dec1 / 10^dec0)
-            num = FullMath.mulDiv(sqrtPSquared, tenPowDec1, Q192); // (sqrtP^2 / Q192) * 10^dec1 handles Q192 correctly
-            den = tenPowDec0;
-        } else {
-            // tokenA is pool.token1. We want the price of token1 in terms of token0 (token0/token1).
-            // Formula: (1 / P_1/0_raw) * (10^dec0 / 10^dec1)
-            // price = (Q192 / sqrtP^2) * (10^dec0 / 10^dec1)
-            num = FullMath.mulDiv(Q192, tenPowDec0, sqrtPSquared); // (Q192 / sqrtP^2) * 10^dec0 handles sqrtPSquared correctly
-            den = tenPowDec1;
-        }
-
-        if (den == 0) return 0; // Should generally not happen with valid pool data and decimals.
-        price = FullMath.mulDiv(num, 1e18, den); // Scale the final result by 1e18.
-    }
 
     /// @dev Returns the exact amounts that will flow **if** price moves from
     ///      `sqrtP0` to `sqrtP1` in a pool with liquidity `L`.
@@ -132,67 +82,6 @@ library ArbMath {
 
         startBack = FullMath.mulDiv(startBack, 1e6 - feeB, 1e6);
         return int256(startBack) - int256(startInA);
-    }
-
-    /// @dev Returns the exact amounts that will flow **if** price moves from
-    ///      `sqrtP0` to `sqrtP1` in a pool with liquidity `L`.
-    function _expectedPL18(
-        uint256 amtARaw,
-        uint8 decA,
-        uint8 decB, // Unused parameter
-        uint24 feeSell,
-        uint24 feeBuy,
-        uint256 priceSell,
-        uint256 priceBuy,
-        uint256 halfImpactBps
-    ) external pure returns (int256) {
-        unchecked {
-            uint256 amtA_18dec;
-            if (decA < 18) {
-                amtA_18dec = amtARaw * (10 ** (18 - decA));
-            } else if (decA > 18) {
-                amtA_18dec = amtARaw / (10 ** (decA - 18));
-            } else {
-                amtA_18dec = amtARaw;
-            }
-
-            uint256 amtB_18dec = FullMath.mulDiv(amtA_18dec, priceSell, 1e18);
-            amtB_18dec = FullMath.mulDiv(amtB_18dec, 1e6 - feeSell, 1e6);
-
-            if (halfImpactBps != 0) {
-                uint256 slipB_18dec = FullMath.mulDiv(
-                    amtB_18dec,
-                    halfImpactBps,
-                    10_000
-                );
-                if (slipB_18dec >= amtB_18dec) {
-                    amtB_18dec = 0;
-                } else {
-                    amtB_18dec -= slipB_18dec;
-                }
-            }
-
-            uint256 amtA_18dec_Back = FullMath.mulDiv(
-                amtB_18dec,
-                1e18,
-                priceBuy
-            );
-            amtA_18dec_Back = FullMath.mulDiv(
-                amtA_18dec_Back,
-                1e6 - feeBuy,
-                1e6
-            );
-
-            uint256 amtARawBack;
-            if (decA < 18) {
-                amtARawBack = amtA_18dec_Back / (10 ** (18 - decA));
-            } else if (decA > 18) {
-                amtARawBack = amtA_18dec_Back * (10 ** (decA - 18));
-            } else {
-                amtARawBack = amtA_18dec_Back;
-            }
-            return int256(amtARawBack) - int256(amtARaw);
-        }
     }
 
     function _estImpactBps(
