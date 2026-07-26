@@ -379,7 +379,10 @@ contract ArbHookFlashForkAaveTest is Test {
         uint256 chunkCount = 5;
         uint256 usdcChunk = 400e6;
         uint256 totalSeedUsdc = usdcChunk * chunkCount;
-        _pullToken(USDC, USDC_WHALE, totalSeedUsdc);
+        address source = IERC20(USDC).balanceOf(USDC_WHALE) >= totalSeedUsdc
+            ? USDC_WHALE
+            : AAVE_USDC_A_TOKEN;
+        _pullToken(USDC, source, totalSeedUsdc);
 
         IERC20(USDC).approve(SWAP_ROUTER, totalSeedUsdc);
         ISwapRouter02 router = ISwapRouter02(SWAP_ROUTER);
