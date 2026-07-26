@@ -51,7 +51,6 @@ contract ArbHook is
     struct PoolMeta {
         address token0;
         address token1;
-        uint24 fee;
         PoolType poolType;
         bool exists;
     }
@@ -341,7 +340,6 @@ contract ArbHook is
             PoolMeta storage m = poolMetaByAddr[info.poolAddress];
             m.token0 = info.token0;
             m.token1 = info.token1;
-            m.fee = info.fee;
             m.poolType = info.poolType;
             m.exists = true;
 
