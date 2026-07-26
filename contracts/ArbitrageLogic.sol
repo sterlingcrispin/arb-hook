@@ -393,6 +393,7 @@ contract ArbitrageLogic {
     ) public pure returns (uint256 bestChunk, int256 bestPL) {
         if (hi < lo) return (0, 0);
 
+        uint256 fullChunk = hi;
         bestPL = -type(int256).max;
         bestChunk = 0;
 
@@ -403,7 +404,11 @@ contract ArbitrageLogic {
 
             // Approximate scaling in the local execution window.
             // This is intentionally heuristic; exact tick-by-tick simulation is too costly here.
-            uint256 intermOut_mid = FullMath.mulDiv(intermOut_full, mid, hi);
+            uint256 intermOut_mid = FullMath.mulDiv(
+                intermOut_full,
+                mid,
+                fullChunk
+            );
             uint256 intermInB_mid = intermOut_mid > intermCapB
                 ? intermCapB
                 : intermOut_mid;
