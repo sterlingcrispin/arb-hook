@@ -320,7 +320,7 @@ contract ArbHookParityTest is Test {
             IPoolManager(address(ctx.poolManager)),
             address(this),
             address(ctx.logic));
-        ctx.hook.setTestLegacyTelemetryEnabled(true);
+        ctx.hook.setTestLegacyInventoryParityEnabled(true);
         ctx.hook.setHookMaxIterations(MAX_ITER);
         ctx.hook.setMinSpreadBps(MIN_SPREAD_BPS);
         ctx.hook.setChunkSpreadConsumptionBps(

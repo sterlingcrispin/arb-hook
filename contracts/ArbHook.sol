@@ -671,6 +671,7 @@ contract ArbHook is
         ArbUtils.PoolType poolBType
     )
         public
+        virtual
         returns (bool success, int256 cumulativeProfit, uint256 iterations)
     {
         if (msg.sender != address(this)) revert ArbErrors.WrapperOnlySelf();
