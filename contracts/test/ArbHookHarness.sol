@@ -4,7 +4,6 @@ pragma solidity ^0.8.20;
 import {ArbHook} from "../ArbHook.sol";
 import {ArbUtils} from "../ArbUtils.sol";
 import {IPoolManager} from "@uniswap/v4-core/src/interfaces/IPoolManager.sol";
-import {BaseHook} from "@uniswap/v4-periphery/src/utils/BaseHook.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 
@@ -36,7 +35,7 @@ contract ArbHookHarness is ArbHook {
 
     // Production ArbHook validates V4 permission bits. Tests deploy the harness
     // at arbitrary addresses and exercise callback behavior directly.
-    function validateHookAddress(BaseHook) internal pure override {}
+    function validateHookAddress(ArbHook) internal pure override {}
 
     function attemptAllForTest(uint256 iterations) external onlyOwner returns (bool) {
         return _attemptAllViaSelfCall(iterations);

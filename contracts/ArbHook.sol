@@ -6,8 +6,8 @@ import "./ArbUtils.sol";
 import "./ArbitrageLogic.sol";
 import {ArbErrors} from "./Errors.sol";
 
-import {BaseHook} from "@uniswap/v4-periphery/src/utils/BaseHook.sol";
 import {Hooks} from "@uniswap/v4-core/src/libraries/Hooks.sol";
+import {IHooks} from "@uniswap/v4-core/src/interfaces/IHooks.sol";
 import {IPoolManager} from "@uniswap/v4-core/src/interfaces/IPoolManager.sol";
 import {PoolKey} from "@uniswap/v4-core/src/types/PoolKey.sol";
 import {BalanceDelta} from "@uniswap/v4-core/src/types/BalanceDelta.sol";
@@ -38,12 +38,15 @@ import {IERC3156FlashLender} from "./interfaces/IERC3156FlashLender.sol";
 ///         registration, price discovery, sizing, execution, and callback safety
 ///         checks in one contract.
 contract ArbHook is
-    BaseHook,
     ArbUtils,
     Ownable,
     IERC3156FlashBorrower
 {
     using SafeERC20 for IERC20;
+
+    error NotPoolManager();
+
+    IPoolManager public immutable poolManager;
 
     struct PoolMeta {
         address token0;
@@ -117,13 +120,28 @@ contract ArbHook is
         address beneficiary;
     }
 
+    modifier onlyPoolManager() {
+        if (msg.sender != address(poolManager)) revert NotPoolManager();
+        _;
+    }
+
+    function afterSwap(
+        address sender,
+        PoolKey calldata key,
+        SwapParams calldata params,
+        BalanceDelta delta,
+        bytes calldata hookData
+    ) external onlyPoolManager returns (bytes4, int128) {
+        return _afterSwap(sender, key, params, delta, hookData);
+    }
+
     function _afterSwap(
         address sender,
         PoolKey calldata,
         SwapParams calldata,
         BalanceDelta,
         bytes calldata hookData
-    ) internal override returns (bytes4, int128) {
+    ) internal returns (bytes4, int128) {
         // Hook path is best-effort only: trade failure must never block user swap settlement.
         uint256 iterations = hookMaxIterations;
         if (iterations > 0) {
@@ -135,7 +153,7 @@ contract ArbHook is
             activeAttemptProfitRecipient = address(0);
         }
 
-        return (BaseHook.afterSwap.selector, 0);
+        return (IHooks.afterSwap.selector, 0);
     }
 
     function _attemptAllViaSelfCall(
@@ -154,7 +172,6 @@ contract ArbHook is
     function getHookPermissions()
         public
         pure
-        override
         returns (Hooks.Permissions memory)
     {
         return
@@ -176,11 +193,20 @@ contract ArbHook is
             });
     }
 
+    function validateHookAddress(ArbHook self) internal pure virtual {
+        Hooks.validateHookPermissions(
+            IHooks(address(self)),
+            getHookPermissions()
+        );
+    }
+
     constructor(
         IPoolManager _poolManager,
         address initialOwner,
         address _arbLib
-    ) BaseHook(_poolManager) Ownable(initialOwner) {
+    ) Ownable(initialOwner) {
+        poolManager = _poolManager;
+        validateHookAddress(this);
         require(address(_poolManager) != address(0), "poolManager=0");
         require(_arbLib != address(0), "arbLib=0");
         arbLib = ArbitrageLogic(_arbLib);
