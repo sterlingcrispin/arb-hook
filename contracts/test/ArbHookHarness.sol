@@ -14,8 +14,19 @@ contract ArbHookHarness is ArbHook {
 
     uint256 public testProfitBps;
     bool public testInjectProfitAnyIterations;
+    bool public testLegacyTelemetryEnabled;
     address public testProfitPayer;
     uint256 public testFixedProfitAmount;
+
+    event ArbitrageAttempted(
+        address indexed tokenA,
+        address indexed tokenB,
+        address indexed buyPool,
+        address sellPool,
+        uint256 totalAmountSwapped,
+        int256 cumulativeProfit,
+        uint256 iterations
+    );
 
     constructor(
         IPoolManager poolManager,
@@ -102,6 +113,10 @@ contract ArbHookHarness is ArbHook {
         testInjectProfitAnyIterations = enabled;
     }
 
+    function setTestLegacyTelemetryEnabled(bool enabled) external onlyOwner {
+        testLegacyTelemetryEnabled = enabled;
+    }
+
     function setTestProfitTransfer(address payer, uint256 amount) external onlyOwner {
         testProfitPayer = payer;
         testFixedProfitAmount = amount;
@@ -153,8 +168,8 @@ contract ArbHookHarness is ArbHook {
             return (true, int256(realizedProfit), 1, bal);
         }
 
-        return
-            super.executeIterativeArb(
+        (success, cumulativeProfit, iterations, totalAmountSwapped) = super
+            .executeIterativeArb(
                 poolA_addr,
                 poolB_addr,
                 startToken,
@@ -163,5 +178,20 @@ contract ArbHookHarness is ArbHook {
                 poolAType,
                 poolBType
             );
+        if (
+            testLegacyTelemetryEnabled &&
+            iterations > 0 &&
+            cumulativeProfit > 0
+        ) {
+            emit ArbitrageAttempted(
+                startToken,
+                intermediateToken,
+                poolB_addr,
+                poolA_addr,
+                totalAmountSwapped,
+                cumulativeProfit,
+                iterations
+            );
+        }
     }
 }

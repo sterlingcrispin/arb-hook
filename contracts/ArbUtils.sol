@@ -295,19 +295,6 @@ abstract contract ArbUtils {
     }
 
     // -------------------------------------------------------------------
-    //  Step 3 – swap helpers
-    // -------------------------------------------------------------------
-
-    // mirror of IterativeArbBot's event so the compiler can emit it here too
-    event SwapExecuted(
-        address indexed pool,
-        address indexed tokenIn,
-        address indexed tokenOut,
-        uint256 amountIn,
-        uint256 amountOut
-    );
-
-    // -------------------------------------------------------------------
     //  Step 3.1 – swap helpers (V2)
     // -------------------------------------------------------------------
 

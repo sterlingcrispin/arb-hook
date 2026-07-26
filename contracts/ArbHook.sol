@@ -78,46 +78,6 @@ contract ArbHook is
     IUniswapV2Factory private constant PANCAKESWAP_V2_FACTORY =
         IUniswapV2Factory(0x02a84c1b3BBD7401a5f7fa98a384EBC70bB5749E);
 
-    event ArbitrageAttempted(
-        address indexed tokenA,
-        address indexed tokenB,
-        address indexed buyPool,
-        address sellPool,
-        uint256 totalAmountSwapped,
-        int256 cumulativeProfit,
-        uint256 iterations
-    );
-
-    event AttemptAllFailed(bytes revertData);
-    event PairExecutionFailed(
-        address tokenA,
-        address tokenB,
-        address buyPool,
-        address sellPool,
-        bytes revertData
-    );
-
-    event PriceDiscoveryResult(
-        address indexed tokenA,
-        address indexed tokenB,
-        address indexed bestBuyPool,
-        address bestSellPool,
-        uint256 buyPrice,
-        uint256 sellPrice
-    );
-
-    event HookAttemptAll(
-        uint256 iterations,
-        bool callSuccess,
-        bool tradeProfitable
-    );
-
-    event FlashLoanRequested(
-        address indexed lender,
-        address indexed token,
-        uint256 principal,
-        address beneficiary
-    );
     event FlashLoanSettled(
         address indexed lender,
         address indexed tokenA,
@@ -131,7 +91,6 @@ contract ArbHook is
         uint256 iterations,
         address beneficiary
     );
-    event FlashLoanFailed(address indexed lender, address indexed token, bytes revertData);
 
     // Flash-loan config and runtime context.
     mapping(address => address) public lenderByToken;
@@ -192,14 +151,7 @@ contract ArbHook is
             abi.encodeWithSelector(this.attemptAllInternal.selector, iterations)
         );
 
-        bool tradeSuccess = false;
-        if (!successCall) {
-            emit AttemptAllFailed(returndata);
-        } else {
-            tradeSuccess = abi.decode(returndata, (bool));
-        }
-
-        emit HookAttemptAll(iterations, successCall, tradeSuccess);
+        bool tradeSuccess = successCall && abi.decode(returndata, (bool));
         return successCall && tradeSuccess;
     }
 
@@ -574,13 +526,6 @@ contract ArbHook is
             _activePrincipalHint = 0;
 
             if (!successCall) {
-                emit PairExecutionFailed(
-                    tokenA,
-                    tokenB,
-                    buyPool,
-                    sellPool,
-                    returndata
-                );
                 // Mark as tried to avoid infinite loops
                 if (state.triedCount < 5) {
                     state.tried[state.triedCount] = quoteKey;
@@ -866,7 +811,6 @@ contract ArbHook is
         _flashLastProfit = 0;
         _flashLastIterations = 0;
 
-        emit FlashLoanRequested(lender, token, principal, _currentProfitRecipient());
         try
             IERC3156FlashLender(lender).flashLoan(
                 address(this),
@@ -876,9 +820,8 @@ contract ArbHook is
             )
         returns (bool ok) {
             loanRequested = ok;
-        } catch (bytes memory reason) {
+        } catch {
             loanReverted = true;
-            emit FlashLoanFailed(lender, token, reason);
         }
 
         _clearActiveFlashContext();
@@ -1489,25 +1432,6 @@ contract ArbHook is
             cumulativeProfit += unwindProfit;
         }
 
-        if (
-            iterations > 0 &&
-            cumulativeProfit > 0
-        ) {
-
-            // In flash-loan execution, net accounting is finalized in onFlashLoan.
-            // Emit legacy gross event only when not in active flash context.
-            if (_activeLender == address(0)) {
-                emit ArbitrageAttempted(
-                    startToken,
-                    intermediateToken,
-                    poolB_addr,
-                    poolA_addr,
-                    totalAmountSwapped,
-                    cumulativeProfit,
-                    iterations
-                );
-            }
-        }
         return (true, cumulativeProfit, iterations, totalAmountSwapped);
     }
 
@@ -1591,14 +1515,7 @@ contract ArbHook is
                     sqrtPriceLimitX96,
                     data
                 )
-            returns (int256 amount0, int256 amount1) {
-                emit SwapExecuted(
-                    poolAddress,
-                    tokenIn,
-                    tokenOut,
-                    amountIn,
-                    uint256(zeroForOne ? -amount1 : -amount0)
-                );
+            returns (int256, int256) {
                 success = true;
             } catch {
                 success = false;
@@ -1612,14 +1529,7 @@ contract ArbHook is
                     sqrtPriceLimitX96,
                     data
                 )
-            returns (int256 amount0, int256 amount1) {
-                emit SwapExecuted(
-                    poolAddress,
-                    tokenIn,
-                    tokenOut,
-                    amountIn,
-                    uint256(zeroForOne ? -amount1 : -amount0)
-                );
+            returns (int256, int256) {
                 success = true;
             } catch {
                 success = false;
