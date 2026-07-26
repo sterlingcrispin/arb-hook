@@ -106,6 +106,11 @@ So the implementation uses bounded heuristics:
 
 - Probe ladder (`minChunk`, `1%`, `10%`, `50%` balance).
 - Start from best heuristic chunk and halve until profitable/safe.
+- Before a flash loan, run that same probe ladder with the configured principal
+  cap as its available balance. Borrow twice the selected chunk because the
+  unchanged executor limits its first candidate to half of its balance. This
+  preserves the executor's selected trade size without adding another sizing
+  model.
 
 ### Mixed V2/V3 path
 

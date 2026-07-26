@@ -216,16 +216,16 @@ contract ArbHookFlashLoanE2ETest is Test {
             new MockV2PricePair(
                 address(token),
                 address(counterToken),
-                1_000_000,
-                1_000_000
+                1_000_000e18,
+                1_000_000e18
             )
         );
         pools[1] = address(
             new MockV2PricePair(
                 address(token),
                 address(counterToken),
-                1_000_000,
-                2_000_000
+                1_000_000e18,
+                1_100_000e18
             )
         );
         types[0] = ArbUtils.PoolType.V2;
@@ -284,7 +284,7 @@ contract ArbHookFlashLoanE2ETest is Test {
         assertTrue(found, "settlement missing");
         assertEq(
             settled.principal,
-            (principalCap * 3500) / 10_000,
+            (principalCap * 2000) / 10_000,
             "adaptive principal changed"
         );
         assertGt(profit, 0, "route should profit");
@@ -400,7 +400,7 @@ contract ArbHookFlashLoanE2ETest is Test {
     }
 
     function testAfterSwapPaysPackedBeneficiary() public {
-        uint256 principal = 100_000;
+        uint256 principal = 100_000e18;
         MockERC3156Lender lender = new MockERC3156Lender(
             IERC20(address(token)),
             5
@@ -430,7 +430,7 @@ contract ArbHookFlashLoanE2ETest is Test {
     }
 
     function testAfterSwapSkipsMissingOrMalformedBeneficiary() public {
-        uint256 principal = 100_000;
+        uint256 principal = 100_000e18;
         MockERC3156Lender lender = new MockERC3156Lender(
             IERC20(address(token)),
             5
@@ -452,7 +452,7 @@ contract ArbHookFlashLoanE2ETest is Test {
     }
 
     function testAfterSwapContainsFlashFailure() public {
-        uint256 principal = 100_000;
+        uint256 principal = 100_000e18;
         BadInitiatorFlashLender lender = new BadInitiatorFlashLender(
             IERC20(address(token)),
             5

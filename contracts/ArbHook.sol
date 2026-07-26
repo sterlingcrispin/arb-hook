@@ -691,11 +691,16 @@ contract ArbHook is
         bool isPoolAV3 = poolAType == ArbUtils.PoolType.V3 || poolAType == ArbUtils.PoolType.PANCAKESWAP_V3;
         bool isPoolBV3 = poolBType == ArbUtils.PoolType.V3 || poolBType == ArbUtils.PoolType.PANCAKESWAP_V3;
         uint256 refinedV3Principal;
-        uint256 expectedV3Profit;
+        uint256 expectedRouteProfit;
         if (maxIterations > 0 && isPoolAV3 && isPoolBV3) {
             // Reuse the executor's existing V3 sizing model for the first loan.
             // This reads current pool state but does not add tick traversal.
-            (principal, refinedV3Principal, expectedV3Profit) = _deriveV3Principal(
+            (principal, refinedV3Principal, expectedRouteProfit) = _deriveV3Principal(
+                poolA_addr, poolB_addr, startToken, intermediateToken, poolAType, poolBType, principalCap
+            );
+            if (principal == 0) return (false, 0, 0);
+        } else if (maxIterations > 0 && !isPoolAV3 && !isPoolBV3) {
+            (principal, expectedRouteProfit) = _deriveV2Principal(
                 poolA_addr, poolB_addr, startToken, intermediateToken, poolAType, poolBType, principalCap
             );
             if (principal == 0) return (false, 0, 0);
@@ -719,8 +724,8 @@ contract ArbHook is
         if (_feeExceedsCap(principal, fee, maxFeeBps))
             return (false, 0, 0);
         if (
-            expectedV3Profit > 0 &&
-            expectedV3Profit < fee + minNetProfit
+            expectedRouteProfit > 0 &&
+            expectedRouteProfit < fee + minNetProfit
         ) return (false, 0, 0);
 
         address beneficiary = activeAttemptProfitRecipient;
@@ -1702,6 +1707,34 @@ contract ArbHook is
         if (principal < minPrincipal) principal = minPrincipal;
         if (principal > principalCap) principal = principalCap;
         return principal;
+    }
+
+    function _deriveV2Principal(
+        address poolA,
+        address poolB,
+        address startToken,
+        address intermediateToken,
+        ArbUtils.PoolType poolAType,
+        ArbUtils.PoolType poolBType,
+        uint256 principalCap
+    ) internal view returns (uint256 principal, uint256 expectedProfit) {
+        ArbitrageLogic.V2TradeParams memory params = arbLib.calculateV2TradeParams(
+            poolA,
+            poolB,
+            startToken,
+            intermediateToken,
+            principalCap,
+            _minChunk(startToken),
+            _v2FeeForPoolType(poolAType),
+            _v2FeeForPoolType(poolBType)
+        );
+        if (!params.opportunityExists || params.expectedProfitFromChunk <= 0) return (0, 0);
+
+        // The unchanged V2 executor starts at no more than half its balance.
+        // Fund twice its selected chunk so that exact candidate is available.
+        uint256 chunk = params.estimatedChunkToSwap;
+        principal = chunk > principalCap / 2 ? principalCap : chunk * 2;
+        expectedProfit = uint256(params.expectedProfitFromChunk);
     }
 
     /// @dev Determines the V3/V3 flash principal with the same bounded liquidity,
