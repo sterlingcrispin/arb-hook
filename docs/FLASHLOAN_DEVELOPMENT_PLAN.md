@@ -73,6 +73,7 @@ Add to `ArbHook`:
   - `uint256 private _activeLoanAmount`
   - `address private _activeLender`
   - `bytes32 private _activeFlashContextHash`
+  - `bytes32 internal activeSwapContextHash`
 
 Production telemetry:
 - `FlashLoanSettled` is the sole execution event and records the completed

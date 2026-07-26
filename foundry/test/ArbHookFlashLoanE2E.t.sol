@@ -7,6 +7,7 @@ import {ArbHookHarness} from "../../contracts/test/ArbHookHarness.sol";
 import {PoolManagerHarness} from "../../contracts/test/PoolManagerHarness.sol";
 import {ArbitrageLogic} from "../../contracts/ArbitrageLogic.sol";
 import {ArbUtils} from "../../contracts/ArbUtils.sol";
+import {ArbErrors} from "../../contracts/Errors.sol";
 import {TestToken} from "../../contracts/test/TestToken.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {IERC3156FlashBorrower} from "../../contracts/interfaces/IERC3156FlashBorrower.sol";
@@ -158,7 +159,21 @@ contract MockV2PricePair is IUniswapV2Pair {
     function sync() external pure {}
 }
 
+contract MockV3MetadataPool {
+    address public immutable token0;
+    address public immutable token1;
+    uint24 public constant fee = 500;
+    int24 public constant tickSpacing = 10;
+
+    constructor(address token0_, address token1_) {
+        token0 = token0_;
+        token1 = token1_;
+    }
+}
+
 contract ArbHookFlashLoanE2ETest is Test {
+    address private constant BASE_UNISWAP_V2_FACTORY =
+        0x8909Dc15e40173Ff4699343b6eB8132c65e18eC6;
     bytes32 private constant FLASH_LOAN_SETTLED_TOPIC =
         keccak256(
             "FlashLoanSettled(address,address,address,address,address,uint256,uint256,uint256,int256,uint256,address)"
@@ -348,6 +363,53 @@ contract ArbHookFlashLoanE2ETest is Test {
 
         (bool success, , ) = _runDirect();
         assertFalse(success, "tampered callback data must fail");
+    }
+
+    function testSwapCallbacksRejectRegisteredPoolsOutsideActiveSwap() public {
+        address[] memory pools = new address[](1);
+        uint24[] memory fees = new uint24[](1);
+        ArbUtils.PoolType[] memory types = new ArbUtils.PoolType[](1);
+
+        pools[0] = address(directPoolA);
+        types[0] = ArbUtils.PoolType.V2;
+        hook.addPools(address(token), pools, fees, types);
+        vm.mockCall(
+            BASE_UNISWAP_V2_FACTORY,
+            abi.encodeWithSignature(
+                "getPair(address,address)",
+                address(token),
+                address(counterToken)
+            ),
+            abi.encode(address(directPoolA))
+        );
+
+        token.mint(address(hook), 10);
+        vm.prank(address(directPoolA));
+        vm.expectRevert(ArbErrors.CallbackUnexpectedPool.selector);
+        hook.uniswapV2Call(
+            address(hook),
+            0,
+            1,
+            abi.encode(address(token), 1)
+        );
+
+        MockV3MetadataPool v3Pool = new MockV3MetadataPool(
+            address(token),
+            address(counterToken)
+        );
+        pools[0] = address(v3Pool);
+        fees[0] = 500;
+        types[0] = ArbUtils.PoolType.V3;
+        hook.addPools(address(token), pools, fees, types);
+
+        vm.prank(address(v3Pool));
+        vm.expectRevert(ArbErrors.CallbackUnexpectedPool.selector);
+        hook.uniswapV3SwapCallback(
+            1,
+            -1,
+            abi.encode(address(token), address(hook), 1, address(v3Pool))
+        );
+        assertEq(token.balanceOf(address(hook)), 10);
     }
 
     function testSubThresholdTradeCannotSpendHookBalance() public {
