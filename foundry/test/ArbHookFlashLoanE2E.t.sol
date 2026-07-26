@@ -12,6 +12,7 @@ import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {IERC3156FlashBorrower} from "../../contracts/interfaces/IERC3156FlashBorrower.sol";
 import {IERC3156FlashLender} from "../../contracts/interfaces/IERC3156FlashLender.sol";
 import {IUniswapV2Pair} from "../../contracts/interfaces/IUniswapV2Pair.sol";
+import {IHooks} from "@uniswap/v4-core/src/interfaces/IHooks.sol";
 import {IPoolManager} from "@uniswap/v4-core/src/interfaces/IPoolManager.sol";
 
 contract MockERC3156Lender is IERC3156FlashLender {
@@ -854,7 +855,7 @@ contract ArbHookFlashLoanE2ETest is Test {
 
         vm.recordLogs();
         (bytes4 selector, int128 delta) = poolManager.callAfterSwap(
-            hook,
+            IHooks(address(hook)),
             senderRecipient,
             bytes("")
         );
@@ -909,7 +910,7 @@ contract ArbHookFlashLoanE2ETest is Test {
 
         vm.recordLogs();
         (bytes4 selector, int128 delta) = poolManager.callAfterSwap(
-            hook,
+            IHooks(address(hook)),
             sender,
             abi.encode(overrideRecipient)
         );
@@ -965,7 +966,7 @@ contract ArbHookFlashLoanE2ETest is Test {
 
         vm.recordLogs();
         (bytes4 selector, int128 delta) = poolManager.callAfterSwap(
-            hook,
+            IHooks(address(hook)),
             sender,
             bytes("")
         );

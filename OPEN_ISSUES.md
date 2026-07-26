@@ -89,7 +89,7 @@ The initial deployment is owner-operated with a small set of manually verified, 
 
 16. V4 hook-address validation disabled
 - Status: `ADDRESSED`
-- Notes: Production `ArbHook` now uses BaseHook permission-bit validation. Only `ArbHookHarness` bypasses validation for arbitrary-address tests.
+- Notes: Production `ArbHook` validates the exact afterSwap permission bits and restricts callback entry to its immutable PoolManager. Only `ArbHookHarness` bypasses address-bit validation for arbitrary-address tests.
 
 17. False-green opt-in tests
 - Status: `ADDRESSED`
