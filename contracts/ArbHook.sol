@@ -260,55 +260,32 @@ contract ArbHook is
         ArbUtils.PoolType[] memory poolTypes
     ) external onlyOwner nonReentrant {
         // Registration order matters: it affects supportedTokens/baseCounterList traversal order.
+        uint256 firstAddedPool = tokenPools[token].length;
         _addPools(token, poolAddresses, fees, poolTypes);
-        // Populate pool meta for callbacks and cheaper checks
+
+        // _addPools already fetched and validated this metadata. Reuse its stored
+        // PoolInfo instead of repeating external calls to every pool and token.
         for (uint256 i = 0; i < poolAddresses.length; i++) {
-            address p = poolAddresses[i];
-            PoolMeta storage m = poolMetaByAddr[p];
-            if (poolTypes[i] == ArbUtils.PoolType.V3) {
-                IUniswapV3Pool vp = IUniswapV3Pool(p);
-                m.token0 = vp.token0();
-                m.token1 = vp.token1();
-                m.fee = vp.fee();
-                m.poolType = ArbUtils.PoolType.V3;
-                m.exists = true;
-            } else if (poolTypes[i] == ArbUtils.PoolType.PANCAKESWAP_V3) {
-                IPancakeV3Pool vp = IPancakeV3Pool(p);
-                m.token0 = vp.token0();
-                m.token1 = vp.token1();
-                m.fee = vp.fee();
-                m.poolType = ArbUtils.PoolType.PANCAKESWAP_V3;
-                m.exists = true;
-            } else if (poolTypes[i] == ArbUtils.PoolType.V2) {
-                IUniswapV2Pair vp = IUniswapV2Pair(p);
-                m.token0 = vp.token0();
-                m.token1 = vp.token1();
-                m.fee = fees[i];
-                m.poolType = ArbUtils.PoolType.V2;
-                m.exists = true;
-            } else if (poolTypes[i] == ArbUtils.PoolType.PANCAKESWAP_V2) {
-                IUniswapV2Pair vp = IUniswapV2Pair(p);
-                m.token0 = vp.token0();
-                m.token1 = vp.token1();
-                m.fee = fees[i];
-                m.poolType = ArbUtils.PoolType.PANCAKESWAP_V2;
-                m.exists = true;
-            }
+            ArbUtils.PoolInfo storage info = tokenPools[token][
+                firstAddedPool + i
+            ];
+            PoolMeta storage m = poolMetaByAddr[info.poolAddress];
+            m.token0 = info.token0;
+            m.token1 = info.token1;
+            m.fee = info.fee;
+            m.poolType = info.poolType;
+            m.exists = true;
 
             // Cache decimals for both tokens to make _minChunk cheaper later
             if (m.token0 != address(0) && cachedTokenDecimals[m.token0] == 0) {
-                try IERC20Metadata(m.token0).decimals() returns (uint8 d0) {
-                    cachedTokenDecimals[m.token0] = d0 == 0 ? 18 : d0;
-                } catch {
-                    cachedTokenDecimals[m.token0] = 18;
-                }
+                cachedTokenDecimals[m.token0] = info.token0Decimals == 0
+                    ? 18
+                    : info.token0Decimals;
             }
             if (m.token1 != address(0) && cachedTokenDecimals[m.token1] == 0) {
-                try IERC20Metadata(m.token1).decimals() returns (uint8 d1) {
-                    cachedTokenDecimals[m.token1] = d1 == 0 ? 18 : d1;
-                } catch {
-                    cachedTokenDecimals[m.token1] = 18;
-                }
+                cachedTokenDecimals[m.token1] = info.token1Decimals == 0
+                    ? 18
+                    : info.token1Decimals;
             }
         }
     }
