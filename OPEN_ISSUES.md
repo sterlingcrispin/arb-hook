@@ -25,6 +25,7 @@ The initial deployment is owner-operated with a small set of manually verified, 
 - Status: `BLOCKS DEPLOYMENT`
 - Priority: `CRITICAL`
 - Summary: The deterministic fork gates use Base block 33942262. They cannot prove current lender premiums, liquidity, canonical contract state, route economics, or transaction cost.
+- Evidence: The canonical router lifecycle passed on Base block 49149499 with the live Aave premium at 5 bps. The successful hook path used 1,076,889 gas and settled through the expected beneficiary path.
 - Decision: run the intended manifest through a fresh current-head fork, verify canonical addresses and code, and set the minimum net-profit floor from current total transaction cost before deployment.
 
 6. Mandatory on-chain trade-history persistence

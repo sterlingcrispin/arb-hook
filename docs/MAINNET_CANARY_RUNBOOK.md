@@ -157,6 +157,12 @@ routes reuse the existing sizing estimate to reject opportunities that cannot
 cover the quoted flash fee plus this floor before borrowing. The realized
 post-loan check remains authoritative because the estimate is not exact.
 
+The 2026-07-26 rehearsal at Base block 49149499 measured 1,076,889 gas inside
+the successful hook path. At that block's 0.006 gwei gas price and observed
+WETH/USDC price, L2 execution alone was about 0.012324 USDC. This excludes L1
+data cost, volatility, and user margin; it is a calibration example, not a
+production floor.
+
 ## Route Canary Traffic
 
 Initialize and fund only the intended v4 canary pool after verifying its
