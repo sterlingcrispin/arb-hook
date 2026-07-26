@@ -510,6 +510,7 @@ contract ArbHook is
                     state.triedCount++;
                 }
                 state.attempts++;
+                state.skipSellPool = sellPool;
                 continue;
             }
 
