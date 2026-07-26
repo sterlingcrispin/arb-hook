@@ -32,7 +32,7 @@ contract ArbHookFlashConfigTest is Test {
             address(logic));
     }
 
-    function testSetTrustedFlashLenderOnlyOwner() public {
+    function testSetLenderForTokenOnlyOwner() public {
         address stranger = makeAddr("stranger");
         vm.prank(stranger);
         vm.expectRevert(
@@ -41,20 +41,15 @@ contract ArbHookFlashConfigTest is Test {
                 stranger
             )
         );
-        hook.setTrustedFlashLender(LENDER, true);
+        hook.setLenderForToken(TOKEN, LENDER);
     }
 
-    function testSetLenderForTokenRequiresTrustedLender() public {
-        vm.expectRevert(ArbErrors.UntrustedFlashLender.selector);
+    function testSetLenderForToken() public {
         hook.setLenderForToken(TOKEN, LENDER);
-
-        hook.setTrustedFlashLender(LENDER, true);
-        hook.setLenderForToken(TOKEN, LENDER);
-        (address configuredLender, , , , bool isTrusted) = hook.getFlashConfig(
+        (address configuredLender, , , ) = hook.getFlashConfig(
             TOKEN
         );
         assertEq(configuredLender, LENDER);
-        assertTrue(isTrusted);
     }
 
     function testSetMaxFlashFeeBpsCap() public {

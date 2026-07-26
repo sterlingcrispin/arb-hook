@@ -228,7 +228,6 @@ contract ArbHookFlashLoanE2ETest is Test {
         uint256 maxFeeBps,
         uint256 minNetProfit
     ) private {
-        hook.setTrustedFlashLender(address(lender), true);
         hook.setLenderForToken(address(token), address(lender));
         hook.setFlashPrincipalForToken(address(token), principal);
         hook.setMaxFlashFeeBpsForToken(address(token), maxFeeBps);
@@ -275,7 +274,6 @@ contract ArbHookFlashLoanE2ETest is Test {
             5
         );
         token.mint(address(lender), principal);
-        hook.setTrustedFlashLender(address(lender), true);
         hook.setLenderForToken(address(token), address(lender));
         hook.setTestProfitBps(100);
 

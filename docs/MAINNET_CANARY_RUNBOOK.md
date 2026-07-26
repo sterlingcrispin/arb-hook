@@ -138,8 +138,8 @@ cast call "$AAVE_POOL" \
   --rpc-url "$BASE_RPC_URL"
 ```
 
-5. Trust the deployed adapter, assign it to USDC, then set the principal cap,
-   maximum fee, and minimum net profit. All three economic values must be
+5. Assign the deployed adapter to USDC, then set the principal cap, maximum fee,
+   and minimum net profit. All three economic values must be
    nonzero or borrowing remains disabled. Simulate the owner-only configuration
    script with explicit raw-unit values, then add `--broadcast`:
 
@@ -158,7 +158,7 @@ forge script script/ConfigureArbHookCanary.s.sol:ConfigureArbHookCanary \
 
 ```bash
 cast call "$HOOK" \
-  "getFlashConfig(address)(address,uint256,uint256,uint256,bool)" "$USDC" \
+  "getFlashConfig(address)(address,uint256,uint256,uint256)" "$USDC" \
   --rpc-url "$BASE_RPC_URL"
 cast call "$HOOK" \
   "getExecutionConfig()(uint256,uint16,uint16,uint256)" \
@@ -228,7 +228,7 @@ cast send "$HOOK" "setHookMaxIterations(uint256)" 0 \
   --private-key "$OWNER_KEY" --rpc-url "$BASE_RPC_URL"
 ```
 
-Then set the USDC principal cap to zero and, if the lender itself is in doubt,
-mark the adapter untrusted. Remove application routing to the hooked pool.
+Then set the USDC principal cap to zero and remove application routing to the
+hooked pool.
 The hook attached to an initialized v4 pool is immutable; disabling execution
 does not remove the hook from that pool.

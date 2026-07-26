@@ -38,7 +38,7 @@ The initial canary is owner-operated and targets a small, explicitly curated set
 
 The canary pool book is append-only. If registration is wrong, deploy a fresh hook before routing traffic instead of mutating a live registry and risking traversal-order or shared-metadata corruption.
 
-Runtime safety still treats external callers and callbacks as untrusted. Flash callbacks must come from the active trusted lender, swap callbacks must match the active registered route, repayment remains atomic, and an arbitrage failure must be contained from the triggering user swap.
+Runtime safety still treats external callers and callbacks as untrusted. Flash callbacks must come from the exact configured lender for the active loan, swap callbacks must match the active registered route, repayment remains atomic, and an arbitrage failure must be contained from the triggering user swap.
 
 Factory attestation for owner-supplied V3 pools and arbitrary registry-scale hardening are deferred because they do not address the initial deployment model. Economic correctness, route selection, fee accounting, and recipient routing remain in scope.
 
