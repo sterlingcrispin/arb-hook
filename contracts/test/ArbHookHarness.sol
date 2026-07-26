@@ -38,7 +38,10 @@ contract ArbHookHarness is ArbHook {
     function validateHookAddress(ArbHook) internal pure override {}
 
     function attemptAllForTest(uint256 iterations) external onlyOwner returns (bool) {
-        return _attemptAllViaSelfCall(iterations);
+        activeAttemptProfitRecipient = owner();
+        bool success = _attemptAllViaSelfCall(iterations);
+        activeAttemptProfitRecipient = address(0);
+        return success;
     }
 
     function getPoolsForToken(
@@ -72,7 +75,9 @@ contract ArbHookHarness is ArbHook {
         address tokenB,
         uint256 maxIter
     ) external onlyOwner returns (int256 profit, uint256 iterations) {
-        return _runPair(tokenA, tokenB, maxIter);
+        activeAttemptProfitRecipient = owner();
+        (profit, iterations) = _runPair(tokenA, tokenB, maxIter);
+        activeAttemptProfitRecipient = address(0);
     }
 
     function runFlashArbForTest(
@@ -84,35 +89,7 @@ contract ArbHookHarness is ArbHook {
         ArbUtils.PoolType poolAType,
         ArbUtils.PoolType poolBType
     ) external onlyOwner returns (bool success, int256 profit, uint256 iterations) {
-        (bool callOk, bytes memory returndata) = address(this).call(
-            abi.encodeWithSelector(
-                this.executeIterativeArbViaFlash.selector,
-                poolA,
-                poolB,
-                tokenA,
-                tokenB,
-                maxIter,
-                poolAType,
-                poolBType
-            )
-        );
-        if (!callOk) return (false, 0, 0);
-        return abi.decode(returndata, (bool, int256, uint256));
-    }
-
-    function runFlashArbWithContextForTest(
-        address sender,
-        bytes calldata hookData,
-        address poolA,
-        address poolB,
-        address tokenA,
-        address tokenB,
-        uint256 maxIter,
-        ArbUtils.PoolType poolAType,
-        ArbUtils.PoolType poolBType
-    ) external onlyOwner returns (bool success, int256 profit, uint256 iterations) {
-        // Mirrors _afterSwap recipient resolution for routing-focused tests.
-        activeAttemptProfitRecipient = _resolveProfitRecipient(sender, hookData);
+        activeAttemptProfitRecipient = owner();
         (bool callOk, bytes memory returndata) = address(this).call(
             abi.encodeWithSelector(
                 this.executeIterativeArbViaFlash.selector,

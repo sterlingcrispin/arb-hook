@@ -49,7 +49,7 @@ contract ArbHookFlashConfigTest is Test {
 
         hook.setTrustedFlashLender(LENDER, true);
         hook.setLenderForToken(TOKEN, LENDER);
-        (address configuredLender, , , bool isTrusted) = hook.getFlashConfig(
+        (address configuredLender, , , , bool isTrusted) = hook.getFlashConfig(
             TOKEN
         );
         assertEq(configuredLender, LENDER);

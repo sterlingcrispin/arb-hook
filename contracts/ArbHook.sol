@@ -95,8 +95,8 @@ contract ArbHook is
     mapping(address => address) internal lenderByToken;
     mapping(address => uint256) internal flashPrincipalByToken;
     mapping(address => uint256) internal maxFlashFeeBpsByToken;
+    mapping(address => uint256) internal minNetProfitByToken;
     mapping(address => bool) internal trustedFlashLender;
-    address internal defaultProfitRecipient;
 
     address internal activeAttemptProfitRecipient;
     address private _activeLender;
@@ -126,17 +126,16 @@ contract ArbHook is
     }
 
     function afterSwap(
-        address sender,
+        address,
         PoolKey calldata key,
         SwapParams calldata params,
         BalanceDelta delta,
         bytes calldata hookData
     ) external onlyPoolManager returns (bytes4, int128) {
-        return _afterSwap(sender, key, params, delta, hookData);
+        return _afterSwap(key, params, delta, hookData);
     }
 
     function _afterSwap(
-        address sender,
         PoolKey calldata,
         SwapParams calldata,
         BalanceDelta,
@@ -145,12 +144,12 @@ contract ArbHook is
         // Hook path is best-effort only: trade failure must never block user swap settlement.
         uint256 iterations = hookMaxIterations;
         if (iterations > 0) {
-            activeAttemptProfitRecipient = _resolveProfitRecipient(
-                sender,
-                hookData
-            );
-            _attemptAllViaSelfCall(iterations);
-            activeAttemptProfitRecipient = address(0);
+            address beneficiary = _resolveProfitRecipient(hookData);
+            if (beneficiary != address(0)) {
+                activeAttemptProfitRecipient = beneficiary;
+                _attemptAllViaSelfCall(iterations);
+                activeAttemptProfitRecipient = address(0);
+            }
         }
 
         return (IHooks.afterSwap.selector, 0);
@@ -212,8 +211,6 @@ contract ArbHook is
         if (_arbLib == address(0))
             revert ArbErrors.InvalidArbitrageLogicAddress();
         arbLib = ArbitrageLogic(_arbLib);
-        hookMaxIterations = 2;
-        defaultProfitRecipient = initialOwner;
     }
 
     // ------------------------------- Admin ---------------------------------
@@ -225,16 +222,14 @@ contract ArbHook is
             uint256 maxIterations,
             uint16 minimumSpreadBps,
             uint16 chunkSpreadConsumptionBps,
-            uint256 maxImpactBps,
-            address profitRecipient
+            uint256 maxImpactBps
         )
     {
         return (
             hookMaxIterations,
             minSpreadBps,
             CHUNK_SPREAD_CONSUMPTION_BPS,
-            _MAX_IMPACT_BPS,
-            defaultProfitRecipient
+            _MAX_IMPACT_BPS
         );
     }
 
@@ -247,6 +242,7 @@ contract ArbHook is
             address lender,
             uint256 principalCap,
             uint256 maxFeeBps,
+            uint256 minNetProfit,
             bool lenderIsTrusted
         )
     {
@@ -255,6 +251,7 @@ contract ArbHook is
             lender,
             flashPrincipalByToken[token],
             maxFlashFeeBpsByToken[token],
+            minNetProfitByToken[token],
             trustedFlashLender[lender]
         );
     }
@@ -314,10 +311,12 @@ contract ArbHook is
         maxFlashFeeBpsByToken[token] = maxFeeBps;
     }
 
-    function setDefaultProfitRecipient(address recipient) external onlyOwner {
-        if (recipient == address(0))
-            revert ArbErrors.InvalidProfitRecipient();
-        defaultProfitRecipient = recipient;
+    function setMinNetProfitForToken(
+        address token,
+        uint256 minNetProfit
+    ) external onlyOwner {
+        if (token == address(0)) revert ArbErrors.InvalidTokenAddress();
+        minNetProfitByToken[token] = minNetProfit;
     }
 
     // ------------------------- Pool-book API -------------------------------
@@ -681,6 +680,11 @@ contract ArbHook is
             return (false, 0, 0);
         }
 
+        uint256 maxFeeBps = maxFlashFeeBpsByToken[startToken];
+        if (maxFeeBps == 0 || minNetProfitByToken[startToken] == 0) {
+            return (false, 0, 0);
+        }
+
         uint256 principalCap = _resolvePrincipalCap(startToken, lender);
         uint256 principal = _activePrincipalHint;
         bool isPoolAV3 = poolAType == ArbUtils.PoolType.V3 || poolAType == ArbUtils.PoolType.PANCAKESWAP_V3;
@@ -710,22 +714,10 @@ contract ArbHook is
             return (false, 0, 0);
         }
 
-        uint256 maxFeeBps = maxFlashFeeBpsByToken[startToken];
-        if (maxFeeBps > 0) {
-            uint256 maxFee = (principal * maxFeeBps) / FEE_BPS_DIVISOR;
-            if (fee > maxFee) return (false, 0, 0);
-        }
-        uint256 available;
-        try IERC3156FlashLender(lender).maxFlashLoan(startToken) returns (
-            uint256 maxLoan
-        ) {
-            available = maxLoan;
-        } catch {
+        if (_feeExceedsCap(principal, fee, maxFeeBps))
             return (false, 0, 0);
-        }
-        if (available < principal) return (false, 0, 0);
 
-        address beneficiary = _currentProfitRecipient();
+        address beneficiary = activeAttemptProfitRecipient;
         if (beneficiary == address(0)) return (false, 0, 0);
 
         FlashLoanExecutionParams memory params = FlashLoanExecutionParams({
@@ -761,10 +753,8 @@ contract ArbHook is
             } catch {
                 return (false, 0, 0);
             }
-            if (maxFeeBps > 0) {
-                uint256 maxRefinedFee = (retryPrincipal * maxFeeBps) / FEE_BPS_DIVISOR;
-                if (fee > maxRefinedFee) return (false, 0, 0);
-            }
+            if (_feeExceedsCap(retryPrincipal, fee, maxFeeBps))
+                return (false, 0, 0);
 
             (loanRequested, loanReverted) = _requestFlashLoan(lender, startToken, retryPrincipal, loanData);
             if (loanRequested) {
@@ -845,6 +835,9 @@ contract ArbHook is
         if (params.tokenA != token) revert ArbErrors.FlashTokenMismatch();
         if (params.beneficiary == address(0))
             revert ArbErrors.InvalidFlashBeneficiary();
+        if (
+            _feeExceedsCap(amount, fee, maxFlashFeeBpsByToken[token])
+        ) revert ArbErrors.FlashFeeExceedsCap();
 
         uint256 balanceBefore = IERC20(token).balanceOf(address(this));
 
@@ -872,13 +865,18 @@ contract ArbHook is
             int256(balanceBefore) -
             int256(fee);
 
-        _flashLastTradeSuccess = tradeSuccess && netProfit > 0;
+        uint256 minNetProfit = minNetProfitByToken[token];
+        if (
+            !tradeSuccess ||
+            netProfit <= 0 ||
+            uint256(netProfit) < minNetProfit
+        ) revert ArbErrors.FlashProfitBelowMinimum();
+
+        _flashLastTradeSuccess = true;
         _flashLastProfit = netProfit;
         _flashLastIterations = iters;
 
-        if (_flashLastTradeSuccess && params.beneficiary != address(0)) {
-            IERC20(token).safeTransfer(params.beneficiary, uint256(netProfit));
-        }
+        IERC20(token).safeTransfer(params.beneficiary, uint256(netProfit));
 
         uint256 repayAmount = amount + fee;
         uint256 repaymentBalance = IERC20(token).balanceOf(address(this));
@@ -1643,22 +1641,12 @@ contract ArbHook is
 
     // ----------------------- Internal helpers ------------------------------
     function _resolveProfitRecipient(
-        address sender,
         bytes calldata hookData
-    ) internal view returns (address) {
-        if (hookData.length == 32) {
-            address decoded = abi.decode(hookData, (address));
-            if (decoded != address(0)) return decoded;
+    ) internal pure returns (address recipient) {
+        if (hookData.length != 20) return address(0);
+        assembly ("memory-safe") {
+            recipient := shr(96, calldataload(hookData.offset))
         }
-        if (sender != address(0)) return sender;
-        return defaultProfitRecipient;
-    }
-
-    function _currentProfitRecipient() private view returns (address) {
-        if (activeAttemptProfitRecipient != address(0)) {
-            return activeAttemptProfitRecipient;
-        }
-        return defaultProfitRecipient;
     }
 
     function _flashContextHash(
@@ -1800,19 +1788,30 @@ contract ArbHook is
         address lender
     ) private view returns (uint256) {
         uint256 configuredCap = flashPrincipalByToken[token];
-        uint256 lenderCap = 0;
+        if (
+            configuredCap == 0 ||
+            lender == address(0) ||
+            !trustedFlashLender[lender]
+        ) return 0;
 
-        if (lender != address(0) && trustedFlashLender[lender]) {
-            try IERC3156FlashLender(lender).maxFlashLoan(token) returns (
-                uint256 available
-            ) {
-                lenderCap = available;
-            } catch {}
+        try IERC3156FlashLender(lender).maxFlashLoan(token) returns (
+            uint256 available
+        ) {
+            return configuredCap < available ? configuredCap : available;
+        } catch {
+            return 0;
         }
+    }
 
-        if (configuredCap == 0) return lenderCap;
-        if (lenderCap == 0) return configuredCap;
-        return configuredCap < lenderCap ? configuredCap : lenderCap;
+    function _feeExceedsCap(
+        uint256 amount,
+        uint256 fee,
+        uint256 maxFeeBps
+    ) private pure returns (bool) {
+        uint256 product = amount * maxFeeBps;
+        uint256 maxFee = product / FEE_BPS_DIVISOR;
+        if (product % FEE_BPS_DIVISOR != 0) ++maxFee;
+        return fee > maxFee;
     }
 
     function _v2FeeForPoolType(

@@ -28,13 +28,14 @@ library ArbErrors {
     error InvalidTokenAddress();
     error UntrustedFlashLender();
     error FlashFeeBpsTooHigh();
-    error InvalidProfitRecipient();
     error InvalidFlashLender();
     error InvalidFlashInitiator();
     error FlashLoanMismatch();
     error FlashContextMismatch();
     error FlashTokenMismatch();
     error InvalidFlashBeneficiary();
+    error FlashFeeExceedsCap();
+    error FlashProfitBelowMinimum();
     error FlashArbitrageExecutionFailed();
     error InsufficientFlashRepaymentBalance();
     error UnwindFailed();
