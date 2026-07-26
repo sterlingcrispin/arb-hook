@@ -7,6 +7,7 @@ import {LiquidityAmounts} from "@uniswap/v3-periphery/contracts/libraries/Liquid
 import {IUniswapV3Pool} from "@uniswap/v3-core/contracts/interfaces/IUniswapV3Pool.sol";
 
 import {TickMath} from "@uniswap/v3-core/contracts/libraries/TickMath.sol";
+import {LiquidityMath} from "@uniswap/v4-core/src/libraries/LiquidityMath.sol";
 import "@uniswap/v3-core/contracts/libraries/SwapMath.sol";
 
 library ArbMath {
@@ -256,16 +257,8 @@ library ArbMath {
                 }
 
                 if (initialized) {
-                    int128 L_int = int128(L);
-                    if (zeroForOne) {
-                        L_int = L_int - liquidityNet;
-                    } else {
-                        L_int = L_int + liquidityNet;
-                    }
-
-                    if (L_int < 0) L = 0;
-                    else if (L_int > type(int128).max) L = type(uint128).max;
-                    else L = uint128(L_int);
+                    if (zeroForOne) liquidityNet = -liquidityNet;
+                    L = LiquidityMath.addDelta(L, liquidityNet);
                 }
             } else if (sqrtP == sqrtTarget && sqrtP != sqrtLimit) {
                 // Intermediate target reached, continue
