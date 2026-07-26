@@ -40,7 +40,7 @@ Factory attestation for owner-supplied V3 pools and arbitrary registry-scale har
 - Preserve bounded loop and early-stop behavior in iterative execution.
 - Maintain failure isolation: arb failures must not break user swap settlement.
 - Preserve the legacy reference route sequence in the flash fork regression test.
-- Defer deep deploy-size optimization to a dedicated post-migration pass.
+- Keep size reductions behavior-preserving and enforce the runtime-byte budget.
 
 ## Primary Test Gate
 
@@ -54,7 +54,13 @@ forge test
 BASE_RPC_URL="$BASE_RPC_URL" scripts/test_flash_fork_cached.sh
 ```
 
+```bash
+npm run size
+```
+
 The cached fork gate replays the ten rounds from `ParityTest/attemptAllOutput.txt` with a real Aave-backed ERC-3156 adapter. It requires the same buy/sell route in every round and positive net profit after the loan fee. It does not require legacy gross-profit equality because the flash fee and a bounded capacity refinement can change trade size and net result.
+
+The size gate caps each production runtime at 24,000 bytes, leaving at least 576 bytes below EIP-170's 24,576-byte limit. It currently covers `ArbHook`, `ArbitrageLogic`, and `AaveV3ERC3156Adapter`.
 
 `FlashLoanSettled` is the canonical execution record. It reports the lender, tokens, selected pools, borrowed principal, total input swapped, fee, net profit, iterations, and beneficiary without adding permanent per-trade storage writes to the hook.
 

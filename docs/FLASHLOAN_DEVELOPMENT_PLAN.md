@@ -26,13 +26,12 @@ Migrate `ArbHook` from inventory-funded arbitrage to flash-loan-funded arbitrage
 - Multi-lender auctioning/routing.
 - Full optimal on-chain sizing solver or tick-by-tick simulation.
 - Exact legacy gross-profit equality after lender fees. The required compatibility target is route sequence plus positive net settlement.
-- Solving contract-size deployability limits (EIP-170/24KB) in this migration pass.
 - A permissionless or adversarial asset registry.
 
-## Explicit Out-of-Scope Note (Size/Gas)
-- The current contract is likely too large for mainnet deployment today.
-- We will still keep edits gas-conscious during this refactor, but deep size-reduction work is intentionally deferred.
-- A dedicated post-migration pass will handle deployment-size and final gas optimization once flash-loan correctness and safety are stable.
+## Deployment Size
+- The post-migration size pass moved cold registration validation into `ArbitrageLogic` and removed unused production surfaces without changing the execution loops.
+- `npm run size` enforces a 24,000-byte runtime budget for every production contract, preserving margin below EIP-170.
+- Further gas optimization remains separate from flash-loan correctness and parity work.
 
 ## Refactor Constraints (Critical)
 1. Flash-loan path is the only production execution path after this refactor.
@@ -275,7 +274,7 @@ Acceptance:
 - V2/V2 and mixed V2/V3 routes still need route-specific pre-loan principal tests. The initial V3/V3 canary uses the existing V3 liquidity-derived sizing path.
 - `_MAX_IMPACT_BPS` is enforced on the mixed V2-to-V3 guard but is not yet applied as a hard cap inside the V3/V3 sizing path. Any change must run through the fixed ten-round fork gate.
 - Profit-recipient behavior still needs an integration test through the intended production V4 router and its `hookData` encoding.
-- Moving execution into a separate engine is deferred. It would add synchronization and deployment surface during the canary and should be evaluated as part of the dedicated EIP-170 size pass.
+- Moving execution into a separate engine remains deferred because the runtime budget was met by relocating cold registration validation instead of splitting the hot execution path.
 
 ## Definition of Done
 - Contract can execute arb without prefunded principal inventory.

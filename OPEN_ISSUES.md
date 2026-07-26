@@ -9,12 +9,6 @@ The initial deployment is owner-operated with a small set of manually verified, 
 
 ## Open For Canary
 
-1. [Critical] ArbHook undeployable on EVM chains due to code size
-- Status: `OPEN`
-- Priority: `CRITICAL`
-- Summary: Runtime code size exceeded EIP-170 deployment limit.
-- Decision: deferred for now per current development priority.
-
 2. V2 and mixed-route flash principal sizing
 - Status: `OPEN`
 - Priority: `HIGH`
@@ -37,7 +31,7 @@ The initial deployment is owner-operated with a small set of manually verified, 
 - Status: `OPEN`
 - Priority: `HIGH`
 - Summary: Production `ArbHook` now validates V4 permission bits, but the repository does not yet include the mined-address deployment script.
-- Decision: add the deployment workflow during the EIP-170 deployment pass.
+- Decision: add and test the mined-address deployment workflow before canary deployment.
 
 6. Mandatory on-chain trade-history persistence
 - Status: `RESOLVED`
@@ -58,6 +52,10 @@ The initial deployment is owner-operated with a small set of manually verified, 
 - Decision: the canary uses a small bounded pool book; add explicit limits before supporting a broad registry.
 
 ## Addressed
+
+1. ArbHook EIP-170 deployability
+- Status: `ADDRESSED`
+- Notes: Cold registration validation moved into the existing `ArbitrageLogic` dependency and unused runtime surfaces were removed. `npm run size` enforces a 24,000-byte budget, leaving at least 576 bytes below the 24,576-byte EIP-170 limit for every production contract.
 
 7. Shared pool metadata removal
 - Status: `ADDRESSED`
