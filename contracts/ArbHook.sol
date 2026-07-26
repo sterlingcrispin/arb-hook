@@ -1191,6 +1191,13 @@ contract ArbHook is
                     poolAType == ArbUtils.PoolType.V3 ||
                     poolAType == ArbUtils.PoolType.PANCAKESWAP_V3
                 ) {
+                    if (
+                        arbLib.estimateImpactBps(
+                            poolA_addr,
+                            startToken,
+                            chunkToSwap
+                        ) > _MAX_IMPACT_BPS
+                    ) break;
                     address cachedT0A = poolMetaByAddr[poolA_addr].token0;
                     bool zeroForOne_V3A = cachedT0A == startToken;
                     sqrtPriceLimitA_v3 = zeroForOne_V3A
