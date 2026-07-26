@@ -16,7 +16,6 @@ library ArbErrors {
     error SwapMismatchedTokens1To0();
     error SwapInputTokenNotInPool();
     error CallbackCallerMismatch();
-    error CallbackCallerIsEOA();
     error CallbackUnexpectedPool();
     error CallbackDecodedTokenNotInPool();
     error CallbackInvalidDelta0Sign();

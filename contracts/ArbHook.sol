@@ -1542,9 +1542,6 @@ contract ArbHook is
         if (decodedCaller != address(this)) {
             revert ArbErrors.CallbackCallerMismatch();
         }
-        if (msg.sender == tx.origin) {
-            revert ArbErrors.CallbackCallerIsEOA();
-        }
         if (msg.sender != expectedPool) {
             revert ArbErrors.CallbackUnexpectedPool();
         }
@@ -1590,6 +1587,19 @@ contract ArbHook is
         uint256 /*amount1*/,
         bytes calldata data
     ) external {
+        _v2SwapCallback(data);
+    }
+
+    function pancakeCall(
+        address /*sender*/,
+        uint256 /*amount0*/,
+        uint256 /*amount1*/,
+        bytes calldata data
+    ) external {
+        _v2SwapCallback(data);
+    }
+
+    function _v2SwapCallback(bytes calldata data) private {
         (address tokenToPay, uint256 amountToPay) = abi.decode(
             data,
             (address, uint256)
@@ -1599,39 +1609,10 @@ contract ArbHook is
         address t0 = pair.token0();
         address t1 = pair.token1();
         // Verify msg.sender is a canonical pair from one of the trusted factories.
-        address uniPair = V2_FACTORY.getPair(t0, t1);
-        address pcsPair = PANCAKESWAP_V2_FACTORY.getPair(t0, t1);
-        if (msg.sender != uniPair && msg.sender != pcsPair) {
-            revert ArbErrors.CallbackUnexpectedPool();
-        }
-        _requireRegisteredV2CallbackPool(msg.sender, t0, t1);
-        if (tokenToPay != t0 && tokenToPay != t1) {
-            revert ArbErrors.CallbackDecodedTokenNotInPool();
-        }
-        if (amountToPay > 0) {
-            bool ok = IERC20(tokenToPay).transfer(msg.sender, amountToPay);
-            if (!ok) revert ArbErrors.ERC20TransferFailed();
-        }
-    }
-
-    function pancakeCall(
-        address /*sender*/,
-        uint256 /*amount0*/,
-        uint256 /*amount1*/,
-        bytes calldata data
-    ) external {
-        (address tokenToPay, uint256 amountToPay) = abi.decode(
-            data,
-            (address, uint256)
-        );
-
-        IUniswapV2Pair pair = IUniswapV2Pair(msg.sender);
-        address t0 = pair.token0();
-        address t1 = pair.token1();
-        // Same factory and registration checks as uniswapV2Call; Pancake uses a distinct callback selector.
-        address uniPair = V2_FACTORY.getPair(t0, t1);
-        address pcsPair = PANCAKESWAP_V2_FACTORY.getPair(t0, t1);
-        if (msg.sender != uniPair && msg.sender != pcsPair) {
+        if (
+            msg.sender != V2_FACTORY.getPair(t0, t1) &&
+            msg.sender != PANCAKESWAP_V2_FACTORY.getPair(t0, t1)
+        ) {
             revert ArbErrors.CallbackUnexpectedPool();
         }
         _requireRegisteredV2CallbackPool(msg.sender, t0, t1);
@@ -1853,7 +1834,7 @@ contract ArbHook is
     }
 
     function removeTokens(address token) external onlyOwner {
-        IERC20(token).transfer(
+        IERC20(token).safeTransfer(
             msg.sender,
             IERC20(token).balanceOf(address(this))
         );
