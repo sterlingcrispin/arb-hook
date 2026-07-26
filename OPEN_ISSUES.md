@@ -122,3 +122,11 @@ The initial deployment is owner-operated with a small set of manually verified, 
 25. Linked library omitted from release inventory
 - Status: `ADDRESSED`
 - Notes: `ArbitrageLogic` has an external link to `ArbMath`, which Foundry deploys automatically through the CREATE2 factory. The runbook now requires recording and verifying that library alongside `ArbitrageLogic`, the Aave adapter, and `ArbHook`.
+
+26. Triggering v4 pool is not an arbitrage venue
+- Status: `DOCUMENTED`
+- Notes: `afterSwap` uses the v4 swap only as an execution trigger. Current route discovery and execution compare registered V2/V3 pools and do not quote or trade against the triggering v4 pool.
+
+27. Flash settlement can retain intermediate-token residue
+- Status: `ADDRESSED`
+- Notes: The flash callback snapshots the intermediate-token balance and requires exact restoration after route execution. A partial fill cannot settle while trapping new intermediate tokens or consuming an accidental pre-existing balance.

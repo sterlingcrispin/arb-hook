@@ -4,7 +4,10 @@ A Uniswap v4 hook-driven arbitrage system that checks for opportunities during s
 
 On L2's where gas is cheap this may be economically viable. When a user attempts a swap, we piggyback some logic to search for arbs and close them as we can.
 
-Either an opportunity already exists, or the swap creates one. Either way, the hook gets a guaranteed execution point with fresh prices and known state, and uses that moment to see if a profitable, safe arb is possible.
+The swap gives the hook an execution point with current state. The present route
+planner compares registered external pools; it does not quote or trade against
+the triggering v4 pool. An opportunity therefore needs to exist in that external
+pool book when the callback runs.
 
 If yes, it executes atomically inside the same transaction. If not, it does nothing and the swap proceeds normally.
 

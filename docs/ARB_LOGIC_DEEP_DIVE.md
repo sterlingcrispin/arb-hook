@@ -8,6 +8,9 @@ This note explains the intent behind the main loops and sizing heuristics in:
 
 ## 1) Route Planning Model
 
+The v4 swap is the execution trigger only. The current planner does not include
+the triggering v4 pool as a route leg.
+
 The route graph is intentionally shallow and deterministic:
 
 - `tokenPools[baseToken]`: all pools registered under that base token.
@@ -39,19 +42,18 @@ Why this is done:
 
 This is the pair-level controller with bounded retries.
 
-- Reads `lastFailedAttemptForPair` and skips if quantized prices have not changed.
 - Up to 2 attempts:
   - find best pools
-  - skip repeated/known-bad quote keys
+  - skip a duplicate quantized quote within this invocation
   - execute via low-level self-call to isolate reverts
-- Maintains two caches:
-  - `lastFailedQuote`: quote-level failure suppression
-  - `lastFailedAttemptForPair`: pair-level stale-route suppression
+- Excludes the failed pool combination before its fallback discovery pass.
 
 Why this is done:
 
-- Prevents repeated retries on identical market states.
+- Prevents repeated retries on the same quote during one scan.
 - Avoids revert cascades from one bad route.
+- Keeps no failed-quote state across later user swaps, so a temporary lender or
+  route failure cannot poison a future opportunity.
 
 ## 3) Pool Selection
 

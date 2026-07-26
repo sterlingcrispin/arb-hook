@@ -842,6 +842,9 @@ contract ArbHook is
         ) revert ArbErrors.FlashFeeExceedsCap();
 
         uint256 balanceBefore = IERC20(token).balanceOf(address(this));
+        uint256 intermediateBalanceBefore = IERC20(params.tokenB).balanceOf(
+            address(this)
+        );
 
         (bool successCall, bytes memory returndata) = address(this).call(
             abi.encodeWithSelector(
@@ -856,6 +859,10 @@ contract ArbHook is
             )
         );
         if (!successCall) revert ArbErrors.FlashArbitrageExecutionFailed();
+        if (
+            IERC20(params.tokenB).balanceOf(address(this)) !=
+            intermediateBalanceBefore
+        ) revert ArbErrors.UnwindFailed();
 
         (bool tradeSuccess, , uint256 iters, uint256 totalAmountSwapped) = abi.decode(
             returndata,
