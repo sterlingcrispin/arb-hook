@@ -47,11 +47,6 @@ The initial deployment is owner-operated with a small set of manually verified, 
 
 ## Deferred Outside Canary Threat Model
 
-7. Shared pool metadata removal
-- Status: `DEFERRED`
-- Summary: Removing a pool registered under multiple base tokens clears global metadata for surviving registrations.
-- Decision: the canary uses a static curated registry and will not mutate shared registrations while live.
-
 8. V3 factory attestation
 - Status: `DEFERRED`
 - Summary: V3 registration trusts the owner-supplied pool address rather than proving it against a factory.
@@ -63,6 +58,10 @@ The initial deployment is owner-operated with a small set of manually verified, 
 - Decision: the canary uses a small bounded pool book; add explicit limits before supporting a broad registry.
 
 ## Addressed
+
+7. Shared pool metadata removal
+- Status: `ADDRESSED`
+- Notes: The canary registry is append-only. Removing/resetting live registrations was removed; a bad pre-traffic configuration requires redeployment, so one base registration cannot invalidate another registration's shared callback metadata.
 
 10. Public execution surface for `executeIterativeArb`
 - Status: `ADDRESSED`

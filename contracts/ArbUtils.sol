@@ -62,40 +62,7 @@ abstract contract ArbUtils {
     // Stateless pricing/sizing engine shared by the hook execution paths.
     ArbitrageLogic internal arbLib;
 
-    /* ---------------- Pool-list helpers ---------------- */
-    function _clearCountersForBase(address base) internal {
-        address[] storage ctrs = baseCounterList[base];
-        uint256 n = ctrs.length;
-        for (uint256 i; i < n; ++i) {
-            isCounterKnown[base][ctrs[i]] = false;
-        }
-        delete baseCounterList[base];
-    }
-
-    // Key is symmetric for (A,B) and (B,A) so both directions share one cache slot.
-    function _getPairKey(
-        address tokenA,
-        address tokenB
-    ) internal pure returns (bytes32) {
-        return
-            tokenA < tokenB
-                ? keccak256(abi.encodePacked(tokenA, tokenB))
-                : keccak256(abi.encodePacked(tokenB, tokenA));
-    }
-
-    function _removeTokenFromSupported(address token) internal {
-        uint256 n = supportedTokens.length;
-        for (uint256 i; i < n; ++i) {
-            if (supportedTokens[i] == token) {
-                supportedTokens[i] = supportedTokens[n - 1];
-                supportedTokens.pop();
-                break;
-            }
-        }
-        _clearCountersForBase(token); // idempotent
-    }
-
-    /* ---------------- add / remove pools ---------------- */
+    /* ---------------- Pool registration ---------------- */
     function _addPools(
         address token,
         address[] memory poolAddresses,
@@ -213,40 +180,6 @@ abstract contract ArbUtils {
         }
     }
 
-    function _removePool(address token, uint256 poolIndex) internal {
-        PoolInfo[] storage pools = tokenPools[token];
-        uint256 numPools = pools.length;
-        if (numPools == 0) revert ArbErrors.TokenHasNoPools();
-        if (poolIndex >= numPools) revert ArbErrors.PoolIndexOutOfBounds();
-
-        address poolAddr = pools[poolIndex].poolAddress;
-        (address t0, address t1) = _tokens(IUniswapV3Pool(poolAddr));
-        address counter = (t0 == token) ? t1 : t0;
-
-        if (poolIndex != numPools - 1) pools[poolIndex] = pools[numPools - 1];
-        pools.pop();
-
-        /* orphan-pruning skipped for brevity; unchanged behaviour */
-        if (pools.length == 0) _removeTokenFromSupported(token);
-    }
-
-    function _resetTokenPools(address token) internal {
-        if (tokenPools[token].length == 0) return;
-        _clearCountersForBase(token);
-        delete tokenPools[token];
-        _removeTokenFromSupported(token);
-    }
-
-    function _resetAllPools() internal {
-        uint256 s = supportedTokens.length;
-        for (uint256 i; i < s; ++i) {
-            address token = supportedTokens[i];
-            _clearCountersForBase(token);
-            delete tokenPools[token];
-        }
-        delete supportedTokens;
-    }
-
     /* ---------------- wallet / treasury helpers ---------------- */
     function _withdrawTokens(address token, address to, uint256 amt) internal {
         if (to == address(0)) revert ArbErrors.WithdrawToZeroAddress();
@@ -272,22 +205,6 @@ abstract contract ArbUtils {
     function _minChunk(address token) internal view virtual returns (uint256) {
         uint8 d = IERC20Metadata(token).decimals();
         return d > 4 ? 10 ** (d - 4) : 1; // never below 1 wei
-    }
-
-    /// @dev Fetch token0 / token1 with uniform custom errors.
-    function _tokens(
-        IUniswapV3Pool p
-    ) internal view returns (address t0, address t1) {
-        try p.token0() returns (address _t0) {
-            t0 = _t0;
-        } catch {
-            revert ArbErrors.HelperToken0Failed();
-        }
-        try p.token1() returns (address _t1) {
-            t1 = _t1;
-        } catch {
-            revert ArbErrors.HelperToken1Failed();
-        }
     }
 
     // -------------------------------------------------------------------

@@ -26,9 +26,11 @@ There is still required operator setup off-chain: pool registration, approvals, 
 
 The initial canary is owner-operated and targets a small, explicitly curated set of canonical Base tokens, pools, and lender contracts. Pool registration is not permissionless. The canary assumes the operator has verified those addresses and does not spend runtime gas trying to protect the owner from deliberately registering a malicious token or fake pool.
 
+The canary pool book is append-only. If registration is wrong, deploy a fresh hook before routing traffic instead of mutating a live registry and risking traversal-order or shared-metadata corruption.
+
 Runtime safety still treats external callers and callbacks as untrusted. Flash callbacks must come from the active trusted lender, swap callbacks must match the active registered route, repayment remains atomic, and an arbitrage failure must be contained from the triggering user swap.
 
-Factory attestation for owner-supplied V3 pools, shared-pool registration reference counting, and arbitrary registry-scale hardening are deferred because they do not address the initial deployment model. Economic correctness, route selection, fee accounting, and recipient routing remain in scope.
+Factory attestation for owner-supplied V3 pools and arbitrary registry-scale hardening are deferred because they do not address the initial deployment model. Economic correctness, route selection, fee accounting, and recipient routing remain in scope.
 
 ## Flash Migration Checklist
 

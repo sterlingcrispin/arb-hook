@@ -249,6 +249,9 @@ contract ArbHook is
     }
 
     // ------------------------- Pool-book API -------------------------------
+    /// @notice Append owner-verified pools to the canary registry.
+    /// @dev Registration is intentionally append-only. Correct a bad canary
+    ///      configuration by deploying a fresh hook before routing traffic.
     function addPools(
         address token,
         address[] memory poolAddresses,
@@ -284,39 +287,6 @@ contract ArbHook is
                     : info.token1Decimals;
             }
         }
-    }
-
-    function removePool(
-        address token,
-        uint256 idx
-    ) external onlyOwner {
-        // Clear meta before removal
-        if (idx < tokenPools[token].length) {
-            address p = tokenPools[token][idx].poolAddress;
-            delete poolMetaByAddr[p];
-        }
-        _removePool(token, idx);
-    }
-
-    function resetTokenPools(address token) external onlyOwner {
-        // Clear metas for this token
-        ArbUtils.PoolInfo[] storage pools = tokenPools[token];
-        for (uint256 i = 0; i < pools.length; i++) {
-            delete poolMetaByAddr[pools[i].poolAddress];
-        }
-        _resetTokenPools(token);
-    }
-
-    function resetAllPools() external onlyOwner {
-        // Clear metas for all tokens
-        for (uint256 i = 0; i < supportedTokens.length; i++) {
-            address t = supportedTokens[i];
-            ArbUtils.PoolInfo[] storage pools = tokenPools[t];
-            for (uint256 j = 0; j < pools.length; j++) {
-                delete poolMetaByAddr[pools[j].poolAddress];
-            }
-        }
-        _resetAllPools();
     }
 
     // Override to use cached decimals instead of external call each time
