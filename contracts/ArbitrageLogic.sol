@@ -311,41 +311,6 @@ contract ArbitrageLogic {
         return (effBuyPrice, effSellPrice, true);
     }
 
-    // --- Constants --- (Moved from ArbUtils)
-    /// @dev 0.0001 % granularity – keeps price hashes compact (uint128)
-    uint256 private constant PRICE_GRANULARITY = 1e10;
-
-    // --- Quote Helpers --- (Moved from ArbUtils & made public)
-    /**
-     * @notice Compresses a 256-bit price into uint128 using PRICE_GRANULARITY.
-     * @param price The full 256-bit price.
-     * @return qPrice The quantized 128-bit price.
-     */
-    function quantise(uint256 price) public pure returns (uint128 qPrice) {
-        return uint128(price / PRICE_GRANULARITY);
-    }
-
-    /**
-     * @notice Generates a quote-normalised cache key.
-     * @dev Ensures the key is identical for (A,B) and (B,A) pairs.
-     * @param tokenA Address of the first token.
-     * @param tokenB Address of the second token.
-     * @param qBuy Quantized buy price.
-     * @param qSell Quantized sell price.
-     * @return key The keccak256 hash representing the quote key.
-     */
-    function quoteKey(
-        address tokenA,
-        address tokenB,
-        uint128 qBuy,
-        uint128 qSell
-    ) public pure returns (bytes32 key) {
-        return
-            tokenA < tokenB
-                ? keccak256(abi.encodePacked(tokenA, tokenB, qBuy, qSell))
-                : keccak256(abi.encodePacked(tokenB, tokenA, qBuy, qSell));
-    }
-
     // Snapshot fields reused across sizing/simulation in one iteration.
     struct PoolStatesForIteration {
         uint160 sqrtPrice;

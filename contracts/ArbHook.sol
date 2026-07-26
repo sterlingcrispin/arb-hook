@@ -416,17 +416,10 @@ contract ArbHook is
 
     // ---------------------------- Pair runner ------------------------------
     struct LoopState {
-        // Quote keys attempted during this _runPair invocation.
-        bytes32[10] tried;
-        uint8 triedCount;
         // Bounded retry count for alternative pool combinations.
         uint8 attempts;
-        // Tracks repeated failures for the same buy pool to force buy-pool rotation.
-        uint8 sellFailsForBuy;
-        // Pools excluded in the next discovery pass after a failed attempt.
+        // Pool excluded in the fallback discovery pass after a failed attempt.
         address skipSellPool;
-        address skipBuyPool;
-        address lastBuyPool;
     }
 
     function _runPair(
@@ -435,56 +428,27 @@ contract ArbHook is
         uint256 maxIter
     ) internal returns (int256 cumulativeProfit, uint256 iterations) {
         LoopState memory state;
-        state.triedCount = 0;
-        state.attempts = 0;
-        state.sellFailsForBuy = 0;
-        state.skipSellPool = address(0);
-        state.skipBuyPool = address(0);
-        state.lastBuyPool = address(0);
 
         // Up to two discovery/execute attempts:
-        // first on best quote, then one fallback excluding previously failing side(s).
+        // first on the best route, then one fallback excluding its sell pool.
         while (state.attempts < 2) {
             (
                 address buyPool,
                 address sellPool,
-                uint256 buyPrice,
-                uint256 sellPrice,
+                ,
+                ,
                 ArbUtils.PoolType buyPoolType,
                 ArbUtils.PoolType sellPoolType
             ) = findBestPools(
                     tokenA,
                     tokenB,
-                    state.skipBuyPool,
+                    address(0),
                     state.skipSellPool
                 );
 
             if (buyPool == address(0)) return (0, 0);
             if (buyPool == sellPool) {
                 ++state.attempts;
-                state.skipSellPool = sellPool;
-                continue;
-            }
-
-            uint128 qBuy = arbLib.quantise(buyPrice);
-            uint128 qSell = arbLib.quantise(sellPrice);
-            bytes32 quoteKey = arbLib.quoteKey(tokenA, tokenB, qBuy, qSell);
-
-            // Prevent duplicate execution attempts for identical quantised quotes in one pass.
-            bool alreadyTried = false;
-            for (uint8 k = 0; k < state.triedCount; ) {
-                if (state.tried[k] == quoteKey) {
-                    alreadyTried = true;
-                    break;
-                }
-                unchecked {
-                    ++k;
-                }
-            }
-            if (alreadyTried) {
-                unchecked {
-                    ++state.attempts;
-                }
                 state.skipSellPool = sellPool;
                 continue;
             }
@@ -504,11 +468,6 @@ contract ArbHook is
             );
 
             if (!successCall) {
-                // Mark as tried to avoid infinite loops
-                if (state.triedCount < 5) {
-                    state.tried[state.triedCount] = quoteKey;
-                    state.triedCount++;
-                }
                 state.attempts++;
                 state.skipSellPool = sellPool;
                 continue;
@@ -526,26 +485,10 @@ contract ArbHook is
                 return (cumulativeProfit, iterations);
             }
 
-            if (state.triedCount < 5) {
-                state.tried[state.triedCount] = quoteKey;
-                unchecked {
-                    ++state.triedCount;
-                }
-            }
             unchecked {
                 ++state.attempts;
             }
             state.skipSellPool = sellPool;
-            if (buyPool == state.lastBuyPool) {
-                if (++state.sellFailsForBuy >= 2) {
-                    state.skipBuyPool = buyPool;
-                    state.sellFailsForBuy = 0;
-                    state.lastBuyPool = address(0);
-                }
-            } else {
-                state.lastBuyPool = buyPool;
-                state.sellFailsForBuy = 1;
-            }
         }
         return (cumulativeProfit, iterations);
     }
