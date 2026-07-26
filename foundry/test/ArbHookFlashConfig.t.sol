@@ -3,11 +3,13 @@ pragma solidity ^0.8.20;
 
 import "forge-std/Test.sol";
 
+import {ArbHook} from "../../contracts/ArbHook.sol";
+
 import {ArbHookHarness} from "../../contracts/test/ArbHookHarness.sol";
 import {PoolManagerHarness} from "../../contracts/test/PoolManagerHarness.sol";
 import {ArbitrageLogic} from "../../contracts/ArbitrageLogic.sol";
-import {DataStorage} from "../../contracts/DataStorage.sol";
 import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
+import {Hooks} from "@uniswap/v4-core/src/libraries/Hooks.sol";
 import {IPoolManager} from "@uniswap/v4-core/src/interfaces/IPoolManager.sol";
 
 contract ArbHookFlashConfigTest is Test {
@@ -19,14 +21,10 @@ contract ArbHookFlashConfigTest is Test {
     function setUp() public {
         PoolManagerHarness poolManager = new PoolManagerHarness(address(this));
         ArbitrageLogic logic = new ArbitrageLogic();
-        DataStorage dataStorage = new DataStorage(address(this));
         hook = new ArbHookHarness(
             IPoolManager(address(poolManager)),
             address(this),
-            address(logic),
-            address(dataStorage)
-        );
-        dataStorage.setWriter(address(hook));
+            address(logic));
     }
 
     function testSetTrustedFlashLenderOnlyOwner() public {
@@ -59,4 +57,17 @@ contract ArbHookFlashConfigTest is Test {
         vm.expectRevert(bytes("invalid flash lender"));
         hook.onFlashLoan(address(this), TOKEN, 1, 0, hex"01");
     }
+
+    function testProductionHookRejectsUnminedAddress() public {
+        PoolManagerHarness poolManager = new PoolManagerHarness(address(this));
+        ArbitrageLogic logic = new ArbitrageLogic();
+
+        uint256 nonce = vm.getNonce(address(this));
+        address nextDeployment = vm.computeCreateAddress(address(this), nonce);
+        uint160 permissionBits = uint160(nextDeployment) & uint160((1 << 14) - 1);
+        assertNotEq(permissionBits, uint160(1 << 6), "test deployment unexpectedly has exact afterSwap permission bits");
+
+        vm.expectRevert(abi.encodeWithSelector(Hooks.HookAddressNotValid.selector, nextDeployment));
+        new ArbHook(IPoolManager(address(poolManager)), address(this), address(logic));
+}
 }

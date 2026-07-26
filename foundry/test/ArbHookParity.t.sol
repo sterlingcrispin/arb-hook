@@ -6,9 +6,7 @@ import "forge-std/Test.sol";
 import {ArbHookHarness} from "../../contracts/test/ArbHookHarness.sol";
 import {PoolManagerHarness} from "../../contracts/test/PoolManagerHarness.sol";
 import {ArbitrageLogic} from "../../contracts/ArbitrageLogic.sol";
-import {DataStorage} from "../../contracts/DataStorage.sol";
 import {ArbUtils} from "../../contracts/ArbUtils.sol";
-import {IDataStorage} from "../../contracts/interfaces/IDataStorage.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {IWETH9} from "../../contracts/interfaces/IWETH9.sol";
 import {IUniswapV2Pair} from "../../contracts/interfaces/IUniswapV2Pair.sol";
@@ -33,7 +31,6 @@ contract ArbHookParityTest is Test {
     uint16 internal constant MIN_SPREAD_BPS = 10; // Mirrors ArbLightweight default
     uint16 internal constant CHUNK_SPREAD_CONSUMPTION_BPS = 1500;
     uint256 internal constant MAX_IMPACT_BPS = 500;
-    uint256 internal constant MIN_PROFIT_TO_EMIT = 0;
     bool internal constant ENFORCE_PARITY = true;
 
     address internal constant USDC = 0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913;
@@ -50,7 +47,6 @@ contract ArbHookParityTest is Test {
     struct DeployContext {
         ArbHookHarness hook;
         ArbitrageLogic logic;
-        DataStorage storageContract;
         PoolManagerHarness poolManager;
     }
 
@@ -88,14 +84,14 @@ contract ArbHookParityTest is Test {
 
     function _legacyParityPrecheck() private returns (bool) {
         if (!legacyParityEnabled) {
-            emit log(
-                "skipping legacy parity suite; set RUN_LEGACY_INVENTORY_PARITY=true to enable"
+            vm.skip(
+                true, "set RUN_LEGACY_INVENTORY_PARITY=true to enable legacy parity"
             );
             return false;
         }
         if (bytes(baseRpcUrl).length == 0) {
-            emit log(
-                "skipping legacy parity suite; BASE_RPC_URL must be set when RUN_LEGACY_INVENTORY_PARITY=true"
+            vm.skip(
+                true, "set BASE_RPC_URL when RUN_LEGACY_INVENTORY_PARITY=true"
             );
             return false;
         }
@@ -140,12 +136,6 @@ contract ArbHookParityTest is Test {
 
         _expectOwnableRevert(stranger);
         ctx.hook.setMaxImpactBps(100);
-
-        _expectOwnableRevert(stranger);
-        ctx.hook.setMinProfitToEmit(1 ether);
-
-        _expectOwnableRevert(stranger);
-        ctx.hook.setDataStorage(address(0));
 
         _expectOwnableRevert(stranger);
         ctx.hook.attemptAllForTest(MAX_ITER);
@@ -214,16 +204,6 @@ contract ArbHookParityTest is Test {
         }
 
         assertGt(successfulRounds, 0, "at least one profitable round expected");
-        uint256 tradeCount = ctx.storageContract.getTradeCount();
-        if (ENFORCE_PARITY) {
-            assertEq(
-                tradeCount,
-                MAX_ROUNDS,
-                "each round should record a trade while parity enforced"
-            );
-        } else {
-            assertGt(tradeCount, 0, "trades should be recorded");
-        }
 
         // Print summary similar to JS harness
         _logSummary(actual, expected, successfulRounds);
@@ -328,11 +308,6 @@ contract ArbHookParityTest is Test {
             assertTrue(success, "attemptAll should not revert in replay");
             RoundResult memory result = _decodeAttempt(vm.getRecordedLogs());
             emit log_named_int("replay profit", _toUsdcUnits(result.cumulativeProfit));
-            assertEq(
-                ctx.storageContract.getTradeCount(),
-                1,
-                "storage should increment per replay"
-            );
         }
     }
 
@@ -343,21 +318,16 @@ contract ArbHookParityTest is Test {
     function _deploySystem() private returns (DeployContext memory ctx) {
         ctx.poolManager = new PoolManagerHarness(address(this));
         ctx.logic = new ArbitrageLogic();
-        ctx.storageContract = new DataStorage(address(this));
         ctx.hook = new ArbHookHarness(
             IPoolManager(address(ctx.poolManager)),
             address(this),
-            address(ctx.logic),
-            address(ctx.storageContract)
-        );
-        ctx.storageContract.setWriter(address(ctx.hook));
+            address(ctx.logic));
         ctx.hook.setHookMaxIterations(MAX_ITER);
         ctx.hook.setMinSpreadBps(MIN_SPREAD_BPS);
         ctx.hook.setChunkSpreadConsumptionBps(
             CHUNK_SPREAD_CONSUMPTION_BPS
         );
         ctx.hook.setMaxImpactBps(MAX_IMPACT_BPS);
-        ctx.hook.setMinProfitToEmit(MIN_PROFIT_TO_EMIT);
     }
 
     function _registerParityPools(

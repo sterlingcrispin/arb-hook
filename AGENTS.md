@@ -78,7 +78,6 @@ The `poolsByToken` Map iteration order determines `supportedTokens` order, which
 - `minSpreadBps = 10`
 - `CHUNK_SPREAD_CONSUMPTION_BPS = 1500`
 - `_MAX_IMPACT_BPS = 500`
-- `minProfitToEmit = 0`
 
 ### 5. Token Ordering Rule
 **The JS harness NEVER calls `_getSinglePoolPrices` with WETH as tokenA.**

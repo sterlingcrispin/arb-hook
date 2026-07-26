@@ -6,20 +6,27 @@ Migrate `ArbHook` from inventory-funded arbitrage to flash-loan-funded arbitrage
 ## Context
 - Current execution is hook-triggered and best-effort via `_afterSwap -> _attemptAllViaSelfCall -> attemptAllInternal -> _runPair -> executeIterativeArb`.
 - Current implementation uses contract balances as principal in iterative sizing and callback repayment logic.
-- Existing parity tests target a legacy non-hook implementation and should no longer gate shipping once flash-loan mode becomes the primary execution model.
+- The legacy inventory parity suite is the historical gross-profit baseline. The flash fork suite must preserve its natural per-round route sequence while remaining net-positive after lender fees.
+
+## Canary Threat Model
+- The owner/operator is trusted and registers a small set of pre-verified, canonical Base tokens, pools, and lender contracts.
+- Permissionless pool or token registration is not supported.
+- Protecting the owner from intentionally or accidentally registering a malicious token or fake pool is not part of the initial canary.
+- External callers, forged callbacks, incorrect flash-loan context, repayment failure, profit accounting, and beneficiary routing remain untrusted runtime boundaries.
+- Factory attestation, shared-pool metadata reference counting, and arbitrary registry-scale limits are deferred unless the operating model changes.
 
 ## Scope
 - Add a production-capable flash-loan execution path (initially ERC-3156 lenders).
 - Preserve current route discovery and sizing logic where possible.
 - Add deterministic beneficiary payout logic.
-- Deprecate parity test as a release gate and replace with flash-loan-focused correctness/safety tests.
+- Keep a flash-loan fork regression gate alongside local correctness and safety tests.
 
 ## Non-Goals (for this phase)
-- Full optimal on-chain sizing solver for concentrated liquidity.
 - Multi-lender auctioning/routing.
-- Automatic dynamic principal optimization beyond guardrailed heuristics.
-- Backward compatibility guarantees for exact parity sequence/profits.
+- Full optimal on-chain sizing solver or tick-by-tick simulation.
+- Exact legacy gross-profit equality after lender fees. The required compatibility target is route sequence plus positive net settlement.
 - Solving contract-size deployability limits (EIP-170/24KB) in this migration pass.
+- A permissionless or adversarial asset registry.
 
 ## Explicit Out-of-Scope Note (Size/Gas)
 - The current contract is likely too large for mainnet deployment today.
@@ -34,7 +41,7 @@ Migrate `ArbHook` from inventory-funded arbitrage to flash-loan-funded arbitrage
 4. Minimize line churn:
    - Small, targeted edits are preferred over broad restructuring.
 5. Preserve behavioral invariants:
-   - Pair traversal order and cache behavior.
+   - Pair traversal order and bounded per-attempt retry behavior.
    - Early-stop conditions and bounded loops.
    - Failure isolation (arb failure must not break user swap settlement).
 6. Any guardrail removal requires:
@@ -51,7 +58,7 @@ Migrate `ArbHook` from inventory-funded arbitrage to flash-loan-funded arbitrage
    - `onFlashLoan` executes existing iterative arb path and repays lender principal + fee.
 4. Profit settlement:
    - Net profit is transferred to beneficiary derived from swap context.
-   - Trade storage/event data stores net profit (or both gross/net explicitly).
+   - `FlashLoanSettled` records route details and net profit without permanent trade storage.
 5. Failure containment stays the same:
    - Any flash-path failure is isolated by existing self-call boundary.
    - User swap settlement should never be blocked by arbitrage failure.
@@ -90,7 +97,7 @@ Rules:
 ## Implementation Plan (Phased)
 
 ### Phase 0: Branching and Baseline
-- Create feature branch: `codex/flashloan-dev-plan` (done).
+- Create a dedicated flash-loan feature branch (done).
 - Record baseline gas and behavior on current tests for before/after comparison.
 - If A/B comparison against legacy inventory flow is needed, keep any dual-path toggle in test-only harnesses, not in production `ArbHook`.
 
@@ -141,20 +148,17 @@ Acceptance:
 ### Phase 3: Accounting and Safety
 Files:
 - `contracts/ArbHook.sol`
-- `contracts/DataStorage.sol` (if schema changes)
-- `contracts/interfaces/IDataStorage.sol` (if schema changes)
 
 Tasks:
 1. Distinguish gross profit vs net profit:
    - `gross = postArbStartBal - preArbStartBal`
    - `net = gross - flashFee` (plus any explicit lender fee token handling rules)
-2. Enforce net-positive threshold before payout and trade persistence.
-3. Update event/store semantics:
-   - Either store net only, or store both `grossProfit` and `netProfit`.
+2. Enforce net-positive accounting before payout.
+3. Emit route, principal, fee, net profit, iterations, and recipient in the final settlement event.
 4. Ensure unwind logic cannot strand non-repayable balances.
 
 Acceptance:
-- No profitable event/storage emission on net-negative outcomes.
+- Every completed callback emits its final net settlement without permanent trade-history writes.
 - Recipient balance increases exactly by net profit on success.
 
 ### Phase 4: Hook Context and Recipient Routing
@@ -170,22 +174,22 @@ Tasks:
 Acceptance:
 - Tests cover direct user, router sender, and hookData override scenarios.
 
-### Phase 5: Deprecate Parity as Gate
+### Phase 5: Preserve Reference Sequence as Flash Gate
 Files:
 - `foundry/test/ArbHookParity.t.sol`
+- `foundry/test/ArbHookFlashForkAave.t.sol`
 - `README.md`
-- Optional: `foundry/test/legacy/ArbHookParity.t.sol` (move)
 
 Tasks:
-1. Mark parity test as legacy/non-gating.
-2. Optionally move parity test file under a legacy folder and run only when explicitly targeted.
-3. Update README testing guidance:
-   - Primary gates are flash-loan safety and correctness tests.
-   - Legacy parity available for historical diagnostics only.
+1. Keep `ArbHookParity.t.sol` as an opt-in inventory-funded baseline that asserts the historical gross-profit values.
+2. Run `ArbHookFlashForkAave.t.sol` against the same fixed block, funding setup, pool order, and reference rounds using a real lender adapter.
+3. Require the flash fork test to assert every expected buy/sell route and positive net profit after loan fees.
+4. Document that exact legacy gross-profit equality is not expected once a lender fee and bounded capacity retry are introduced.
 
 Acceptance:
-- Default `forge test` does not fail release flow due to parity drift.
-- Documentation clearly reflects new source of truth.
+- Local flash safety suites pass without an RPC.
+- The cached fork sequence test is required for release validation.
+- Documentation distinguishes inventory gross parity from flash net-profit parity.
 
 ### Phase 6: Flash Loan Test Suite (New Primary Gate)
 Add tests in `foundry/test/`:
@@ -246,7 +250,7 @@ Acceptance:
 - Mitigation: enforce minimal-diff policy, preserve existing checks by default, and require explicit justification + tests for any removed guardrail.
 
 7. Accidental routing behavior changes
-- Mitigation: add invariant tests for traversal order, cache skip behavior, and first-profitable-path stop behavior.
+- Mitigation: add invariant tests for traversal order, per-attempt retry behavior, and first-profitable-path stop behavior.
 
 8. Hook gas envelope expansion
 - Mitigation: track gas snapshots for `_afterSwap` path and set acceptance ceilings before merge.
@@ -263,8 +267,14 @@ Acceptance:
 ## Deliverables
 1. Flash-loan-enabled `ArbHook` with strict callback validation.
 2. Recipient payout mechanism for net profits.
-3. Updated docs and test strategy (parity deprecated as non-gating).
+3. Updated docs and test strategy with a required flash route-sequence gate.
 4. New flash-loan test suite passing on fork and local harnesses.
+
+## Deferred Correctness Work
+- V2/V2 and mixed V2/V3 routes still need route-specific pre-loan principal tests. The initial V3/V3 canary uses the existing V3 liquidity-derived sizing path.
+- `_MAX_IMPACT_BPS` is enforced on the mixed V2-to-V3 guard but is not yet applied as a hard cap inside the V3/V3 sizing path. Any change must run through the fixed ten-round fork gate.
+- Profit-recipient behavior still needs an integration test through the intended production V4 router and its `hookData` encoding.
+- Moving execution into a separate engine is deferred. It would add synchronization and deployment surface during the canary and should be evaluated as part of the dedicated EIP-170 size pass.
 
 ## Definition of Done
 - Contract can execute arb without prefunded principal inventory.
@@ -272,4 +282,5 @@ Acceptance:
 - Net profits are transferred to resolved swap beneficiary.
 - Unauthorized flash callbacks are rejected.
 - Flash-loan test suite is green and designated as release gate.
-- README and test docs reflect parity deprecation and new validation approach.
+- Cached fork sequence test preserves all reference routes and positive net settlement.
+- README and test docs distinguish inventory gross parity from flash net-profit parity.

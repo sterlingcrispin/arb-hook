@@ -8,8 +8,6 @@ Either an opportunity already exists, or the swap creates one. Either way, the h
 
 If yes, it executes atomically inside the same transaction. If not, it does nothing and the swap proceeds normally.
 
-The current implementation executes arbitrage from hook callbacks only. There is no manual owner-triggered `attemptAll` entrypoint in `ArbHook`.
-
 ## Big Picture
 
 Instead of constantly scanning markets or competing in gas wars, we wait for real trades to happen and then ask:
@@ -22,27 +20,43 @@ The hook doesn't assume the arbitrage leg happens on another Uniswap v4 pool. To
 
 The production execution path is flash-loan-funded for principal, so the hook does not need to hold full trading inventory. Router/pool approvals and flash-lender configuration are still required.
 
-There is still required operator setup off-chain: pool registration, approvals, lender configuration, and runtime-parameter configuration (`hookMaxIterations`, `minSpreadBps`, `chunkSpreadConsumptionBps`, `maxImpactBps`, `minProfitToEmit`).
+There is still required operator setup off-chain: pool registration, approvals, lender configuration, and runtime-parameter configuration (`hookMaxIterations`, `minSpreadBps`, `chunkSpreadConsumptionBps`, `maxImpactBps`). The Aave V3 integration uses the production adapter in `contracts/AaveV3ERC3156Adapter.sol`, with one configured reserve per adapter deployment.
+
+## Canary Threat Model
+
+The initial canary is owner-operated and targets a small, explicitly curated set of canonical Base tokens, pools, and lender contracts. Pool registration is not permissionless. The canary assumes the operator has verified those addresses and does not spend runtime gas trying to protect the owner from deliberately registering a malicious token or fake pool.
+
+Runtime safety still treats external callers and callbacks as untrusted. Flash callbacks must come from the active trusted lender, swap callbacks must match the active registered route, repayment remains atomic, and an arbitrage failure must be contained from the triggering user swap.
+
+Factory attestation for owner-supplied V3 pools, shared-pool registration reference counting, and arbitrary registry-scale hardening are deferred because they do not address the initial deployment model. Economic correctness, route selection, fee accounting, and recipient routing remain in scope.
 
 ## Flash Migration Checklist
 
 - Keep changes minimal and localized; avoid broad rewrites.
 - Preserve existing guardrails unless there is a concrete flash-loan incompatibility.
-- Keep route traversal/order behavior stable (`supportedTokens`, `baseCounterList`, cache semantics).
+- Keep route traversal/order behavior stable (`supportedTokens`, `baseCounterList`, and per-attempt retry order).
 - Preserve bounded loop and early-stop behavior in iterative execution.
 - Maintain failure isolation: arb failures must not break user swap settlement.
-- Treat legacy parity harness as optional diagnostics, not release gating.
+- Preserve the legacy reference route sequence in the flash fork regression test.
 - Defer deep deploy-size optimization to a dedicated post-migration pass.
 
 ## Primary Test Gate
 
-Use the flash-loan suites as the primary release gate:
+Run the fast flash safety suites and the fixed-block flash sequence gate:
 
 ```bash
-forge test --match-contract ArbHookFlash
+forge test
 ```
 
-Legacy parity remains opt-in diagnostics only.
+```bash
+BASE_RPC_URL="$BASE_RPC_URL" scripts/test_flash_fork_cached.sh
+```
+
+The cached fork gate replays the ten rounds from `ParityTest/attemptAllOutput.txt` with a real Aave-backed ERC-3156 adapter. It requires the same buy/sell route in every round and positive net profit after the loan fee. It does not require legacy gross-profit equality because the flash fee and a bounded capacity refinement can change trade size and net result.
+
+`FlashLoanSettled` is the canonical execution record. It reports the lender, tokens, selected pools, borrowed principal, total input swapped, fee, net profit, iterations, and beneficiary without adding permanent per-trade storage writes to the hook.
+
+`ArbHook` uses Uniswap v4's normal hook-address validation. A production deployment must therefore use CREATE2 to mine an address whose permission bits specify `afterSwap` only. The arbitrary-address validation bypass exists only in `contracts/test/ArbHookHarness.sol`.
 
 ## Cached Fork Workflow (Fast Re-runs)
 
@@ -61,7 +75,7 @@ BASE_RPC_URL="$BASE_RPC_URL" npm run test:flash:fork:cached
 
 `test:flash:fork:cached` defaults to:
 - `ArbHookFlashForkAaveTest`
-- `testForkAaveAttemptAllTracksLegacyRoundSequenceShape`
+- `testForkAaveAttemptAllTracksLegacyRoundSequenceFull`
 
 You can pass any other forge test args:
 
@@ -93,11 +107,7 @@ The main runtime knobs are owner-settable on `ArbHook`:
   Maximum estimated price impact allowed for guarded paths before skipping.
   This prevents trading when impact is likely to destroy expected edge.
 
-- `setMinProfitToEmit(uint256)`  
-  Minimum cumulative profit required before emitting/storing trade data.
-  Unit is raw `tokenA` units (not 1e18 normalized).
-
-### Legacy Parity Profile (Optional)
+### Reference Sequence Profile
 
 In the legacy parity harness (`foundry/test/ArbHookParity.t.sol`), the runtime profile is:
 
@@ -105,7 +115,6 @@ In the legacy parity harness (`foundry/test/ArbHookParity.t.sol`), the runtime p
 - `minSpreadBps = 10`
 - `chunkSpreadConsumptionBps = 1500`
 - `maxImpactBps = 500`
-- `minProfitToEmit = 0`
 
 Why these values are used for parity:
 
@@ -113,12 +122,12 @@ Why these values are used for parity:
 - `10 bps` filters micro-spreads that are usually not robust after execution costs.
 - `1500` gives a moderate first-step aggressiveness instead of over-consuming spread immediately.
 - `500` (5%) blocks obviously excessive-impact paths.
-- `0` ensures every profitable round is emitted/stored, which makes round-by-round parity assertions observable.
 
-`ArbHookParity.t.sol` is now opt-in and disabled by default.
-To run it intentionally:
+`ArbHookParity.t.sol` remains an opt-in inventory-funded baseline that asserts the original gross-profit values exactly. To run it intentionally:
 - Set `RUN_LEGACY_INVENTORY_PARITY=true`
 - Set `BASE_RPC_URL`
+
+`ArbHookFlashForkAave.t.sol` uses the same fixed block, funding setup, pool registration order, and ten-round route sequence with borrowed USDC. It asserts each route and positive net profit after the Aave fee.
 
 
 ## How an Arbitrage Actually Happens (Step by Step)
@@ -184,4 +193,4 @@ The expected behavior is defined by the legacy reference artifacts in `ParityTes
 
 Legacy comments that referred to a "worker bot" or "worker deployment" were describing that earlier non-hook implementation.
 
-The purpose of the parity test is to confirm the current Uniswap v4 hook path reproduces that same outcome sequence and total profit profile, including per-round buy/sell pool choices and profit values.
+The inventory parity test confirms the historical gross-profit values exactly. The flash fork test keeps the same per-round buy/sell route sequence while requiring positive profit after real lender fees; its gross and net amounts can differ from the inventory reference.

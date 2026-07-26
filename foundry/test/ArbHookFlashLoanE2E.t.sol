@@ -6,13 +6,11 @@ import "forge-std/Test.sol";
 import {ArbHookHarness} from "../../contracts/test/ArbHookHarness.sol";
 import {PoolManagerHarness} from "../../contracts/test/PoolManagerHarness.sol";
 import {ArbitrageLogic} from "../../contracts/ArbitrageLogic.sol";
-import {DataStorage} from "../../contracts/DataStorage.sol";
 import {ArbUtils} from "../../contracts/ArbUtils.sol";
 import {TestToken} from "../../contracts/test/TestToken.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {IERC3156FlashBorrower} from "../../contracts/interfaces/IERC3156FlashBorrower.sol";
 import {IERC3156FlashLender} from "../../contracts/interfaces/IERC3156FlashLender.sol";
-import {IDataStorage} from "../../contracts/interfaces/IDataStorage.sol";
 import {IUniswapV2Pair} from "../../contracts/interfaces/IUniswapV2Pair.sol";
 import {IPoolManager} from "@uniswap/v4-core/src/interfaces/IPoolManager.sol";
 
@@ -195,30 +193,36 @@ contract ArbHookFlashLoanE2ETest is Test {
         keccak256("FlashLoanRequested(address,address,uint256,address)");
     bytes32 private constant FLASH_LOAN_SETTLED_TOPIC =
         keccak256(
-            "FlashLoanSettled(address,address,uint256,uint256,int256,address)"
+            "FlashLoanSettled(address,address,address,address,address,uint256,uint256,uint256,int256,uint256,address)"
         );
     bytes32 private constant FLASH_LOAN_FAILED_TOPIC =
         keccak256("FlashLoanFailed(address,address,bytes)");
     bytes32 private constant HOOK_ATTEMPT_ALL_TOPIC =
         keccak256("HookAttemptAll(uint256,bool,bool)");
 
+    struct Settlement {
+        address buyPool;
+        address sellPool;
+        uint256 principal;
+        uint256 totalAmountSwapped;
+        uint256 fee;
+        int256 netProfit;
+        uint256 iterations;
+        address beneficiary;
+    }
+
     PoolManagerHarness internal poolManager;
     ArbHookHarness internal hook;
     TestToken internal token;
     TestToken internal counterToken;
-    DataStorage internal dataStorage;
 
     function setUp() public {
         poolManager = new PoolManagerHarness(address(this));
         ArbitrageLogic logic = new ArbitrageLogic();
-        dataStorage = new DataStorage(address(this));
         hook = new ArbHookHarness(
             IPoolManager(address(poolManager)),
             address(this),
-            address(logic),
-            address(dataStorage)
-        );
-        dataStorage.setWriter(address(hook));
+            address(logic));
 
         token = new TestToken("Flash Loan Token", "FLT", 0);
         counterToken = new TestToken("Counter Token", "CTR", 0);
@@ -262,7 +266,6 @@ contract ArbHookFlashLoanE2ETest is Test {
         hook.setLenderForToken(address(token), address(lender));
         hook.setFlashPrincipalForToken(address(token), principal);
         hook.setMaxFlashFeeBpsForToken(address(token), maxFeeBps);
-        hook.setMinProfitToEmit(1);
         hook.setHookMaxIterations(1);
         hook.setTestProfitBps(testProfitBps);
         hook.setTestInjectProfitAnyIterations(true);
@@ -282,8 +285,9 @@ contract ArbHookFlashLoanE2ETest is Test {
         token.mint(address(hook), fee); // cover flash fee when no arb profit
 
         uint256 lenderBefore = token.balanceOf(address(lender));
-        uint256 tradesBefore = dataStorage.getTradeCount();
         assertEq(lenderBefore, principal);
+
+        vm.recordLogs();
 
         (bool success, int256 profit, uint256 iterations) = hook.runFlashArbForTest(
             address(0xA1),
@@ -309,10 +313,17 @@ contract ArbHookFlashLoanE2ETest is Test {
             0,
             "hook should not retain principal/fee after repayment"
         );
+
+        (bool sawSettlement, Settlement memory settled) = _findLastSettlement(vm.getRecordedLogs());
+        assertTrue(sawSettlement, "completed loan should emit settlement");
         assertEq(
-            dataStorage.getTradeCount(),
-            tradesBefore,
-            "non-profitable run must not store trade data"
+            settled.principal, principal, "settled principal mismatch");
+        assertEq(settled.totalAmountSwapped, 0, "unexpected swapped amount");
+        assertEq(settled.fee, fee, "settled fee mismatch");
+        assertEq(settled.netProfit, -int256(fee),
+            "settled net mismatch");
+        assertEq(settled.iterations,
+            0, "settled iterations mismatch"
         );
     }
 
@@ -376,6 +387,25 @@ contract ArbHookFlashLoanE2ETest is Test {
         );
     }
 
+    function testLenderCapacityRecoveryRetriesUnchangedQuote() public {
+        uint256 principalCap = 100_000e18;
+        MockERC3156Lender lender = new MockERC3156Lender(IERC20(address(token)), 5);
+        _configureAfterSwapV2Route(lender, principalCap, 20, 100);
+
+        (int256 firstProfit, uint256 firstIterations) = hook.runPairForTest(address(token), address(counterToken), 1);
+        assertEq(firstProfit, 0, "capacity failure should not report profit");
+        assertEq(firstIterations, 0, "capacity failure should not execute");
+        assertEq(lender.flashLoanCallCount(), 0, "insufficient capacity should block the lender call");
+
+        token.mint(address(lender), principalCap);
+        (int256 recoveredProfit, uint256 recoveredIterations) =
+            hook.runPairForTest(address(token), address(counterToken), 1);
+
+        assertGt(recoveredProfit, 0, "unchanged quote should retry after lender capacity recovers");
+        assertEq(recoveredIterations, 1, "recovered route should execute once");
+        assertEq(lender.flashLoanCallCount(), 1, "recovered route should borrow");
+    }
+
     function testFlashLoanSkipsWhenFeeExceedsCap() public {
         uint256 principal = 200_000e18;
         MockERC3156Lender lender = new MockERC3156Lender(IERC20(address(token)), 50); // 0.50%
@@ -386,7 +416,7 @@ contract ArbHookFlashLoanE2ETest is Test {
         hook.setFlashPrincipalForToken(address(token), principal);
         hook.setMaxFlashFeeBpsForToken(address(token), 20); // 0.20% cap
 
-        uint256 tradesBefore = dataStorage.getTradeCount();
+        vm.recordLogs();
         (bool success, int256 profit, uint256 iterations) = hook.runFlashArbForTest(
             address(0xA5),
             address(0xB6),
@@ -400,11 +430,10 @@ contract ArbHookFlashLoanE2ETest is Test {
         assertFalse(success, "fee cap should block flash request");
         assertEq(profit, 0, "blocked flash request should not report profit");
         assertEq(iterations, 0, "blocked flash request should not run iterations");
-        assertEq(lender.flashLoanCallCount(), 0, "flashLoan should not be called");
-        assertEq(
-            dataStorage.getTradeCount(),
-            tradesBefore,
-            "blocked flash request must not store trade data"
+        assertEq(lender.flashLoanCallCount(), 0, "flashLoan should not be called");(
+            bool sawSettlement,) = _findLastSettlement(vm.getRecordedLogs());
+        assertFalse(sawSettlement,
+            "blocked request must not emit settlement"
         );
     }
 
@@ -419,7 +448,7 @@ contract ArbHookFlashLoanE2ETest is Test {
         hook.setFlashPrincipalForToken(address(token), principal);
         hook.setMaxFlashFeeBpsForToken(address(token), 20);
 
-        uint256 tradesBefore = dataStorage.getTradeCount();
+        vm.recordLogs();
         (bool success, int256 profit, uint256 iterations) = hook.runFlashArbForTest(
             address(0xA7),
             address(0xB8),
@@ -433,11 +462,10 @@ contract ArbHookFlashLoanE2ETest is Test {
         assertFalse(success, "insufficient lender capacity should block flash request");
         assertEq(profit, 0, "blocked flash request should not report profit");
         assertEq(iterations, 0, "blocked flash request should not run iterations");
-        assertEq(lender.flashLoanCallCount(), 0, "flashLoan should not be called");
-        assertEq(
-            dataStorage.getTradeCount(),
-            tradesBefore,
-            "blocked flash request must not store trade data"
+        assertEq(lender.flashLoanCallCount(), 0, "flashLoan should not be called");(
+            bool sawSettlement,) = _findLastSettlement(vm.getRecordedLogs());
+        assertFalse(sawSettlement,
+            "blocked request must not emit settlement"
         );
     }
 
@@ -481,8 +509,6 @@ contract ArbHookFlashLoanE2ETest is Test {
         hook.setLenderForToken(address(token), address(lender));
         hook.setFlashPrincipalForToken(address(token), principal);
         hook.setMaxFlashFeeBpsForToken(address(token), 20);
-
-        uint256 tradesBefore = dataStorage.getTradeCount();
         vm.recordLogs();
         (bool success, int256 profit, uint256 iterations) = hook.runFlashArbForTest(
             address(0xE1),
@@ -510,15 +536,14 @@ contract ArbHookFlashLoanE2ETest is Test {
                 break;
             }
         }
-        assertTrue(sawFlashLoanFailed, "expected FlashLoanFailed event");
-        assertEq(
-            dataStorage.getTradeCount(),
-            tradesBefore,
-            "forged callback must not store trade data"
+        assertTrue(sawFlashLoanFailed, "expected FlashLoanFailed event");(
+            bool sawSettlement,) = _findLastSettlement(entries);
+        assertFalse(sawSettlement,
+            "forged callback must not emit settlement"
         );
     }
 
-    function testFlashLoanNetNegativeRunDoesNotPayBeneficiaryOrStoreTrade() public {
+    function testFlashLoanNetNegativeRunDoesNotPayBeneficiaryAndEmitsSettlement() public {
         uint256 principal = 100_000e18;
         MockERC3156Lender lender = new MockERC3156Lender(IERC20(address(token)), 50); // 0.50%
         token.mint(address(lender), principal);
@@ -527,7 +552,6 @@ contract ArbHookFlashLoanE2ETest is Test {
         hook.setLenderForToken(address(token), address(lender));
         hook.setFlashPrincipalForToken(address(token), principal);
         hook.setMaxFlashFeeBpsForToken(address(token), 100); // allow 1%
-        hook.setMinProfitToEmit(1);
         hook.setTestProfitBps(10); // +0.10% gross
 
         uint256 fee = lender.flashFee(address(token), principal);
@@ -544,7 +568,7 @@ contract ArbHookFlashLoanE2ETest is Test {
 
         uint256 lenderBefore = token.balanceOf(address(lender));
         uint256 beneficiaryBefore = token.balanceOf(beneficiary);
-        uint256 tradesBefore = dataStorage.getTradeCount();
+        vm.recordLogs();
 
         (bool success, int256 profit, uint256 iterations) = hook.runFlashArbForTest(
             address(0xF1),
@@ -565,18 +589,21 @@ contract ArbHookFlashLoanE2ETest is Test {
             "beneficiary must not be paid on net-negative result"
         );
         assertEq(
-            dataStorage.getTradeCount(),
-            tradesBefore,
-            "net-negative run must not store trade data"
-        );
-        assertEq(
             token.balanceOf(address(lender)),
             lenderBefore + fee,
             "lender should still be repaid principal+fee"
         );
+
+        (bool sawSettlement, Settlement memory settled) = _findLastSettlement(vm.getRecordedLogs());
+        assertTrue(sawSettlement, "net-negative loan should emit settlement");
+        assertEq(settled.buyPool, address(0xF2), "settled buy pool mismatch");
+        assertEq(settled.sellPool, address(0xF1), "settled sell pool mismatch");
+        assertEq(settled.netProfit, profit, "settled net loss mismatch");
+        assertEq(settled.iterations, iterations, "settled iterations mismatch");
+        assertEq(settled.beneficiary, beneficiary, "settled beneficiary mismatch");
     }
 
-    function testFlashLoanProfitablePathPaysBeneficiaryAndStoresTrade() public {
+    function testFlashLoanProfitablePathPaysBeneficiaryAndEmitsSettlement() public {
         uint256 principal = 100_000e18;
         MockERC3156Lender lender = new MockERC3156Lender(IERC20(address(token)), 5); // 0.05%
         token.mint(address(lender), principal);
@@ -585,7 +612,6 @@ contract ArbHookFlashLoanE2ETest is Test {
         hook.setLenderForToken(address(token), address(lender));
         hook.setFlashPrincipalForToken(address(token), principal);
         hook.setMaxFlashFeeBpsForToken(address(token), 20);
-        hook.setMinProfitToEmit(1);
 
         // Configure harness-only deterministic profit injection for maxIterations=0.
         hook.setTestProfitBps(100); // +1.00% over current balance
@@ -600,7 +626,6 @@ contract ArbHookFlashLoanE2ETest is Test {
 
         uint256 lenderBefore = token.balanceOf(address(lender));
         uint256 beneficiaryBefore = token.balanceOf(beneficiary);
-        uint256 tradesBefore = dataStorage.getTradeCount();
 
         vm.recordLogs();
         (bool success, int256 profit, uint256 iterations) = hook.runFlashArbForTest(
@@ -627,34 +652,30 @@ contract ArbHookFlashLoanE2ETest is Test {
             lenderBefore + fee,
             "lender should only gain fee"
         );
-        assertEq(
-            dataStorage.getTradeCount(),
-            tradesBefore + 1,
-            "successful net-profit flash trade should be stored"
-        );
-
-        uint256[] memory stored = dataStorage.fetchTradeData(tradesBefore);
-        assertEq(stored[0], uint256(uint160(address(0xD2))), "stored buy pool mismatch");
-        assertEq(stored[1], uint256(uint160(address(0xD1))), "stored sell pool mismatch");
-        assertEq(stored[5], expectedNet, "stored trade profit should be net");
 
         Vm.Log[] memory entries = vm.getRecordedLogs();
-        bool sawFlashSettled = false;
+        (
+        bool sawFlashSettled, Settlement memory settled) = _findLastSettlement(entries);
         bool sawArbAttempted = false;
         for (uint256 i = 0; i < entries.length; i++) {
             if (
                 entries[i].emitter == address(hook) &&
                 entries[i].topics.length > 0
             ) {
-                if (entries[i].topics[0] == FLASH_LOAN_SETTLED_TOPIC) {
-                    sawFlashSettled = true;
-                }
                 if (entries[i].topics[0] == ARBITRAGE_ATTEMPTED_TOPIC) {
                     sawArbAttempted = true;
                 }
             }
         }
         assertTrue(sawFlashSettled, "flash settlement event missing");
+        assertEq(settled.buyPool, address(0xD2), "settled buy pool mismatch");
+        assertEq(settled.sellPool, address(0xD1), "settled sell pool mismatch");
+        assertEq(settled.principal, principal, "settled principal mismatch");
+        assertEq(settled.totalAmountSwapped, principal, "settled amount mismatch");
+        assertEq(settled.fee, fee, "settled fee mismatch");
+        assertEq(settled.netProfit, int256(expectedNet), "settled net mismatch");
+        assertEq(settled.iterations, iterations, "settled iterations mismatch");
+        assertEq(settled.beneficiary, beneficiary, "settled beneficiary mismatch");
         assertFalse(
             sawArbAttempted,
             "legacy gross ArbitrageAttempted event should be suppressed in flash flow"
@@ -670,7 +691,6 @@ contract ArbHookFlashLoanE2ETest is Test {
         hook.setLenderForToken(address(token), address(lender));
         hook.setFlashPrincipalForToken(address(token), principal);
         hook.setMaxFlashFeeBpsForToken(address(token), 20);
-        hook.setMinProfitToEmit(1);
         hook.setTestProfitBps(100);
 
         address defaultRecipient = makeAddr("defaultRecipient");
@@ -718,7 +738,6 @@ contract ArbHookFlashLoanE2ETest is Test {
         hook.setLenderForToken(address(token), address(lender));
         hook.setFlashPrincipalForToken(address(token), principal);
         hook.setMaxFlashFeeBpsForToken(address(token), 20);
-        hook.setMinProfitToEmit(1);
         hook.setTestProfitBps(100);
 
         address defaultRecipient = makeAddr("defaultRecipient2");
@@ -773,7 +792,6 @@ contract ArbHookFlashLoanE2ETest is Test {
         hook.setLenderForToken(address(token), address(lender));
         hook.setFlashPrincipalForToken(address(token), principal);
         hook.setMaxFlashFeeBpsForToken(address(token), 20);
-        hook.setMinProfitToEmit(1);
         hook.setTestProfitBps(100);
 
         address defaultRecipient = makeAddr("defaultRecipient3");
@@ -813,7 +831,6 @@ contract ArbHookFlashLoanE2ETest is Test {
         hook.setLenderForToken(address(token), address(lender));
         hook.setFlashPrincipalForToken(address(token), principal);
         hook.setMaxFlashFeeBpsForToken(address(token), 20);
-        hook.setMinProfitToEmit(1);
         hook.setTestProfitBps(100);
 
         address defaultRecipient = makeAddr("defaultRecipient4");
@@ -868,7 +885,6 @@ contract ArbHookFlashLoanE2ETest is Test {
 
         uint256 senderBefore = token.balanceOf(senderRecipient);
         uint256 defaultBefore = token.balanceOf(defaultRecipient);
-        uint256 tradesBefore = dataStorage.getTradeCount();
 
         vm.recordLogs();
         (bytes4 selector, int128 delta) = poolManager.callAfterSwap(
@@ -896,10 +912,15 @@ contract ArbHookFlashLoanE2ETest is Test {
             defaultBefore,
             "default recipient should not receive payout when sender is present"
         );
+
+        (bool sawSettlement, Settlement memory settled) = _findLastSettlement(entries);
+        assertTrue(sawSettlement, "callback path should emit settlement");
         assertEq(
-            dataStorage.getTradeCount(),
-            tradesBefore + 1,
-            "profitable callback-path run should store trade data"
+            settled.principal, borrowedPrincipal, "settled principal mismatch");
+        assertEq(settled.netProfit, int256(expectedNet),
+            "settled net mismatch");
+        assertEq(settled.beneficiary,
+            senderRecipient, "settled recipient mismatch"
         );
     }
 
@@ -949,6 +970,11 @@ contract ArbHookFlashLoanE2ETest is Test {
             defaultBefore,
             "default recipient should not receive payout when hookData override is set"
         );
+
+        (bool sawSettlement, Settlement memory settled) = _findLastSettlement(entries);
+        assertTrue(sawSettlement, "callback path should emit settlement");
+        assertEq(settled.netProfit, int256(expectedNet), "settled net mismatch");
+        assertEq(settled.beneficiary, overrideRecipient, "settled recipient mismatch");
     }
 
     function testAfterSwapCallbackPathContainsFlashFailure() public {
@@ -966,7 +992,6 @@ contract ArbHookFlashLoanE2ETest is Test {
 
         uint256 senderBefore = token.balanceOf(sender);
         uint256 defaultBefore = token.balanceOf(defaultRecipient);
-        uint256 tradesBefore = dataStorage.getTradeCount();
 
         vm.recordLogs();
         (bytes4 selector, int128 delta) = poolManager.callAfterSwap(
@@ -986,11 +1011,6 @@ contract ArbHookFlashLoanE2ETest is Test {
             token.balanceOf(defaultRecipient),
             defaultBefore,
             "default recipient should not receive payout when flash execution fails"
-        );
-        assertEq(
-            dataStorage.getTradeCount(),
-            tradesBefore,
-            "failed callback-path run must not store trade data"
         );
 
         Vm.Log[] memory entries = vm.getRecordedLogs();
@@ -1024,6 +1044,29 @@ contract ArbHookFlashLoanE2ETest is Test {
             "failed flash callback should not report profitable hook execution"
         );
         assertTrue(sawFlashLoanFailed, "expected FlashLoanFailed event");
+        (bool sawSettlement,) = _findLastSettlement(entries);
+        assertFalse(sawSettlement, "failed flash callback must not emit settlement");
+    }
+
+    function _findLastSettlement(Vm.Log[] memory entries) private view returns (bool found, Settlement memory settled) {
+        for (uint256 i = 0; i < entries.length; i++) {
+            if (
+                entries[i].emitter == address(hook) && entries[i].topics.length > 0
+                    && entries[i].topics[0] == FLASH_LOAN_SETTLED_TOPIC
+            ) {
+                (
+                    settled.buyPool,
+                    settled.sellPool,
+                    settled.principal,
+                    settled.totalAmountSwapped,
+                    settled.fee,
+                    settled.netProfit,
+                    settled.iterations,
+                    settled.beneficiary
+                ) = abi.decode(entries[i].data, (address, address, uint256, uint256, uint256, int256, uint256, address));
+                found = true;
+            }
+        }
     }
 
     function _extractRequestedPrincipal(

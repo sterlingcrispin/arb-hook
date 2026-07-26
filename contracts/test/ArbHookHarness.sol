@@ -3,8 +3,8 @@ pragma solidity ^0.8.20;
 
 import {ArbHook} from "../ArbHook.sol";
 import {ArbUtils} from "../ArbUtils.sol";
-import {IDataStorage} from "../interfaces/IDataStorage.sol";
 import {IPoolManager} from "@uniswap/v4-core/src/interfaces/IPoolManager.sol";
+import {BaseHook} from "@uniswap/v4-periphery/src/utils/BaseHook.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 
@@ -20,9 +20,12 @@ contract ArbHookHarness is ArbHook {
     constructor(
         IPoolManager poolManager,
         address owner,
-        address arbLib,
-        address dataStorage
-    ) ArbHook(poolManager, owner, arbLib, dataStorage) {}
+        address arbLib
+    ) ArbHook(poolManager, owner, arbLib) {}
+
+    // Production ArbHook validates V4 permission bits. Tests deploy the harness
+    // at arbitrary addresses and exercise callback behavior directly.
+    function validateHookAddress(BaseHook) internal pure override {}
 
     function attemptAllForTest(uint256 iterations) external onlyOwner returns (bool) {
         return _attemptAllViaSelfCall(iterations);
@@ -115,7 +118,7 @@ contract ArbHookHarness is ArbHook {
     )
         public
         override
-        returns (bool success, int256 cumulativeProfit, uint256 iterations)
+        returns (bool success, int256 cumulativeProfit, uint256 iterations, uint256 totalAmountSwapped)
     {
         if (
             testProfitBps > 0 &&
@@ -147,20 +150,7 @@ contract ArbHookHarness is ArbHook {
                 }
                 realizedProfit = mintAmount;
             }
-
-            lastTradeData = IDataStorage.TradeData({
-                tokenA: startToken,
-                tokenB: intermediateToken,
-                buyPool: poolB_addr,
-                sellPool: poolA_addr,
-                buyPoolIndex: _getPoolIndex(startToken, poolB_addr),
-                sellPoolIndex: _getPoolIndex(startToken, poolA_addr),
-                totalAmountSwapped: bal,
-                profit: realizedProfit,
-                iterations: 1,
-                timestamp: block.timestamp
-            });
-            return (true, int256(realizedProfit), 1);
+            return (true, int256(realizedProfit), 1, bal);
         }
 
         return

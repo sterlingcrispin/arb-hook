@@ -32,7 +32,6 @@ import {
 import {IUniswapV2Factory} from "./interfaces/IUniswapV2Factory.sol";
 import {IUniswapV2Pair} from "./interfaces/IUniswapV2Pair.sol";
 import {IPancakeV3Pool} from "./interfaces/IPancakeV3Pool.sol";
-import {IDataStorage} from "./interfaces/IDataStorage.sol";
 import {IERC3156FlashBorrower} from "./interfaces/IERC3156FlashBorrower.sol";
 import {IERC3156FlashLender} from "./interfaces/IERC3156FlashLender.sol";
 
@@ -61,14 +60,8 @@ contract ArbHook is
     // Quick lookup for callbacks and validation without extra external calls
     mapping(address => PoolMeta) private poolMetaByAddr;
 
-    // Last winning pools for a pair; useful for telemetry and future warm-start heuristics.
-    mapping(bytes32 => address) private lastBestBuyPoolForPair;
-    mapping(bytes32 => address) private lastBestSellPoolForPair;
-
     // Cache token decimals to make _minChunk cheaper
     mapping(address => uint8) private cachedTokenDecimals;
-    // Only emit/store trades when profit ≥ this (in tokenA units)
-    uint256 public minProfitToEmit;
     // Default max iterations when attempting arb via hook callbacks (0 disables hook execution)
     uint256 public hookMaxIterations;
 
@@ -127,10 +120,15 @@ contract ArbHook is
     );
     event FlashLoanSettled(
         address indexed lender,
-        address indexed token,
+        address indexed tokenA,
+        address indexed tokenB,
+        address buyPool,
+        address sellPool,
         uint256 principal,
+        uint256 totalAmountSwapped,
         uint256 fee,
         int256 netProfit,
+        uint256 iterations,
         address beneficiary
     );
     event FlashLoanFailed(address indexed lender, address indexed token, bytes revertData);
@@ -230,28 +228,19 @@ contract ArbHook is
             });
     }
 
-    function validateHookAddress(BaseHook) internal pure override {}
-
     constructor(
         IPoolManager _poolManager,
         address initialOwner,
-        address _arbLib,
-        address _dataStorage
+        address _arbLib
     ) BaseHook(_poolManager) Ownable(initialOwner) {
         require(address(_poolManager) != address(0), "poolManager=0");
         require(_arbLib != address(0), "arbLib=0");
-        require(_dataStorage != address(0), "dataStorage=0");
         arbLib = ArbitrageLogic(_arbLib);
-        dataStorage = IDataStorage(_dataStorage);
         hookMaxIterations = 2;
         defaultProfitRecipient = initialOwner;
     }
 
     // ------------------------------- Admin ---------------------------------
-    function setDataStorage(address _dataStorage) external onlyOwner {
-        require(_dataStorage != address(0), "dataStorage=0");
-        dataStorage = IDataStorage(_dataStorage);
-    }
 
     function setMinSpreadBps(uint16 _minSpreadBps) external onlyOwner {
         minSpreadBps = _minSpreadBps;
@@ -265,10 +254,6 @@ contract ArbHook is
 
     function setMaxImpactBps(uint256 _maxImpactBps) external onlyOwner {
         _MAX_IMPACT_BPS = _maxImpactBps;
-    }
-
-    function setMinProfitToEmit(uint256 newMinProfit) external onlyOwner {
-        minProfitToEmit = newMinProfit;
     }
 
     function setHookMaxIterations(uint256 newMaxIterations) external onlyOwner {
@@ -519,39 +504,6 @@ contract ArbHook is
         state.skipBuyPool = address(0);
         state.lastBuyPool = address(0);
 
-        bytes32 pairKey = _getPairKey(tokenA, tokenB);
-        FailedAttempt memory lastFail = lastFailedAttemptForPair[pairKey];
-
-        // Fast-path skip:
-        // if the last failing quote for this pair has not moved, do not spend gas retrying.
-        if (lastFail.buyPool != address(0)) {
-            (
-                ArbUtils.PoolInfo memory buyPoolInfo,
-                bool buyPoolFound
-            ) = _findPoolInBook(tokenA, lastFail.buyPool);
-            (
-                ArbUtils.PoolInfo memory sellPoolInfo,
-                bool sellPoolFound
-            ) = _findPoolInBook(tokenA, lastFail.sellPool);
-
-            if (buyPoolFound && sellPoolFound) {
-                (uint256 currentBuyPrice, , bool buyPriceSuccess) = arbLib
-                    ._getSinglePoolPrices(tokenA, tokenB, buyPoolInfo);
-                (, uint256 currentSellPrice, bool sellPriceSuccess) = arbLib
-                    ._getSinglePoolPrices(tokenA, tokenB, sellPoolInfo);
-
-                if (buyPriceSuccess && sellPriceSuccess) {
-                    uint128 qBuyNow = arbLib.quantise(currentBuyPrice);
-                    uint128 qSellNow = arbLib.quantise(currentSellPrice);
-                    if (
-                        qBuyNow == lastFail.qBuy && qSellNow == lastFail.qSell
-                    ) {
-                        return (0, 0); // Prices unchanged, skip
-                    }
-                }
-            }
-        }
-
         // Up to two discovery/execute attempts:
         // first on best quote, then one fallback excluding previously failing side(s).
         while (state.attempts < 2) {
@@ -596,25 +548,6 @@ contract ArbHook is
                     ++state.attempts;
                 }
                 state.skipSellPool = sellPool;
-                continue;
-            }
-
-            FailedQuote memory fq = lastFailedQuote[quoteKey];
-            if (fq.qBuy == qBuy && fq.qSell == qSell) {
-                // Quote-level cache says this exact price pair already failed recently.
-                // Skip quickly and rotate away from repeated buy-pool failures.
-                ++state.attempts;
-                state.skipSellPool = sellPool;
-                if (buyPool == state.lastBuyPool) {
-                    if (++state.sellFailsForBuy >= 2) {
-                        state.skipBuyPool = buyPool;
-                        state.sellFailsForBuy = 0;
-                        state.lastBuyPool = address(0);
-                    }
-                } else {
-                    state.lastBuyPool = buyPool;
-                    state.sellFailsForBuy = 1;
-                }
                 continue;
             }
 
@@ -666,18 +599,8 @@ contract ArbHook is
             iterations += iters;
 
             if (tradeSuccess && profit > 0) {
-                delete lastFailedQuote[quoteKey];
                 return (cumulativeProfit, iterations);
             }
-
-            lastFailedQuote[quoteKey] = FailedQuote(qBuy, qSell);
-            // Pair-level cache helps skip stale failing route combos on subsequent callbacks.
-            lastFailedAttemptForPair[pairKey] = FailedAttempt(
-                buyPool,
-                sellPool,
-                qBuy,
-                qSell
-            );
 
             if (state.triedCount < 5) {
                 state.tried[state.triedCount] = quoteKey;
@@ -711,6 +634,7 @@ contract ArbHook is
         address skipSellPool
     )
         internal
+        view
         returns (
             address bestBuyPool,
             address bestSellPool,
@@ -790,11 +714,6 @@ contract ArbHook is
                 ArbUtils.PoolType.V3
             );
         }
-
-        // Cache winners for the pair to bias subsequent discovery
-        bytes32 pKeyStore = _getPairKey(tokenA, tokenB);
-        lastBestBuyPoolForPair[pKeyStore] = bestBuyPool;
-        lastBestSellPoolForPair[pKeyStore] = bestSellPool;
         return (
             bestBuyPool,
             bestSellPool,
@@ -830,6 +749,17 @@ contract ArbHook is
 
         uint256 principalCap = _resolvePrincipalCap(startToken, lender);
         uint256 principal = _activePrincipalHint;
+        bool isPoolAV3 = poolAType == ArbUtils.PoolType.V3 || poolAType == ArbUtils.PoolType.PANCAKESWAP_V3;
+        bool isPoolBV3 = poolBType == ArbUtils.PoolType.V3 || poolBType == ArbUtils.PoolType.PANCAKESWAP_V3;
+        uint256 refinedV3Principal;
+        if (maxIterations > 0 && isPoolAV3 && isPoolBV3) {
+            // Reuse the executor's existing V3 sizing model for the first loan.
+            // This reads current pool state but does not add tick traversal.
+            (principal, refinedV3Principal) = _deriveV3Principal(
+                poolA_addr, poolB_addr, startToken, intermediateToken, poolAType, poolBType, principalCap
+            );
+            if (principal == 0) return (false, 0, 0);
+        }
         if (principal == 0 || principal > principalCap) {
             principal = principalCap;
         }
@@ -876,12 +806,58 @@ contract ArbHook is
         });
         bytes memory loanData = abi.encode(params);
 
+        (bool loanRequested, bool loanReverted) = _requestFlashLoan(lender, startToken, principal, loanData);
+        if (loanRequested || !loanReverted) {
+            return (_flashLastTradeSuccess, _flashLastProfit, _flashLastIterations);
+        }
+
+        // A reverted coarse V3 loan leaves pool state unchanged. Retry once with
+        // the existing refined chunk so financing cost cannot suppress a smaller,
+        // otherwise viable opportunity. Successful loans are never retried.
+        if (!isPoolAV3 || !isPoolBV3 || refinedV3Principal == 0 || refinedV3Principal >= principal) {
+            return (false, 0, 0);
+        }
+        uint256 retryPrincipal = refinedV3Principal;
+        uint256 minPrincipal = _minChunk(startToken);
+        // Match the existing two-attempt route bound: try the refined chunk and,
+        // only after another reverted loan, one smaller half-size candidate.
+        for (uint8 retry; retry < 2;) {
+            try IERC3156FlashLender(lender).flashFee(startToken, retryPrincipal) returns (uint256 quotedRefinedFee) {
+                fee = quotedRefinedFee;
+            } catch {
+                return (false, 0, 0);
+            }
+            if (maxFeeBps > 0) {
+                uint256 maxRefinedFee = (retryPrincipal * maxFeeBps) / FEE_BPS_DIVISOR;
+                if (fee > maxRefinedFee) return (false, 0, 0);
+            }
+
+            (loanRequested, loanReverted) = _requestFlashLoan(lender, startToken, retryPrincipal, loanData);
+            if (loanRequested) {
+                return (_flashLastTradeSuccess, _flashLastProfit, _flashLastIterations);
+            }
+            if (!loanReverted) break;
+
+            retryPrincipal >>= 1;
+            if (retryPrincipal < minPrincipal) break;
+            unchecked {
+                ++retry;
+            }
+        }
+        return (false, 0, 0);
+    }
+
+    function _requestFlashLoan(address lender, address token, uint256 principal, bytes memory loanData)
+        private
+        returns (bool loanRequested, bool loanReverted)
+    {
+
         _activeLender = lender;
-        _activeLoanToken = startToken;
+        _activeLoanToken = token;
         _activeLoanAmount = principal;
         _activeFlashContextHash = _flashContextHash(
             lender,
-            startToken,
+            token,
             principal,
             loanData
         );
@@ -890,27 +866,22 @@ contract ArbHook is
         _flashLastProfit = 0;
         _flashLastIterations = 0;
 
-        emit FlashLoanRequested(lender, startToken, principal, beneficiary);
-
-        bool loanRequested;
+        emit FlashLoanRequested(lender, token, principal, _currentProfitRecipient());
         try
             IERC3156FlashLender(lender).flashLoan(
                 address(this),
-                startToken,
+                token,
                 principal,
                 loanData
             )
         returns (bool ok) {
             loanRequested = ok;
         } catch (bytes memory reason) {
-            emit FlashLoanFailed(lender, startToken, reason);
-            _clearActiveFlashContext();
-            return (false, 0, 0);
+            loanReverted = true;
+            emit FlashLoanFailed(lender, token, reason);
         }
 
         _clearActiveFlashContext();
-        if (!loanRequested) return (false, 0, 0);
-        return (_flashLastTradeSuccess, _flashLastProfit, _flashLastIterations);
     }
 
     function onFlashLoan(
@@ -957,9 +928,9 @@ contract ArbHook is
         );
         if (!successCall) revert("flash arb execution failed");
 
-        (bool tradeSuccess, , uint256 iters) = abi.decode(
+        (bool tradeSuccess, , uint256 iters, uint256 totalAmountSwapped) = abi.decode(
             returndata,
-            (bool, int256, uint256)
+            (bool, int256, uint256, uint256)
         );
 
         uint256 balanceAfter = IERC20(token).balanceOf(address(this));
@@ -986,45 +957,16 @@ contract ArbHook is
         emit FlashLoanSettled(
             msg.sender,
             token,
+            params.tokenB,
+            params.buyPool,
+            params.sellPool,
             amount,
+            totalAmountSwapped,
             fee,
             netProfit,
+            iters,
             params.beneficiary
         );
-
-        if (
-            _flashLastTradeSuccess &&
-            address(dataStorage) != address(0) &&
-            uint256(netProfit) >= minProfitToEmit
-        ) {
-            IDataStorage.TradeData memory persisted = lastTradeData;
-
-            // Fallback for test harnesses or edge paths that did not populate
-            // lastTradeData inside executeIterativeArb.
-            if (persisted.tokenA == address(0)) {
-                persisted.tokenA = params.tokenA;
-                persisted.tokenB = params.tokenB;
-                persisted.buyPool = params.buyPool;
-                persisted.sellPool = params.sellPool;
-                persisted.buyPoolIndex = _getPoolIndex(
-                    params.tokenA,
-                    params.buyPool
-                );
-                persisted.sellPoolIndex = _getPoolIndex(
-                    params.tokenA,
-                    params.sellPool
-                );
-                persisted.timestamp = block.timestamp;
-            }
-
-            // Persist net profit for flash-loan executions.
-            persisted.profit = uint256(netProfit);
-            if (persisted.iterations == 0) {
-                persisted.iterations = iters;
-            }
-            lastTradeData = persisted;
-            dataStorage.storeTradeData(persisted);
-        }
 
         return ERC3156_CALLBACK_SUCCESS;
     }
@@ -1046,11 +988,11 @@ contract ArbHook is
     )
         public
         virtual
-        returns (bool success, int256 cumulativeProfit, uint256 iterations)
+        returns (bool success, int256 cumulativeProfit, uint256 iterations, uint256 totalAmountSwapped)
     {
         if (msg.sender != address(this)) revert ArbErrors.WrapperOnlySelf();
-        if (maxIterations == 0) return (false, 0, 0);
-        if (poolA_addr == poolB_addr) return (false, 0, 0);
+        if (maxIterations == 0) return (false, 0, 0, 0);
+        if (poolA_addr == poolB_addr) return (false, 0, 0, 0);
 
         IERC20 startTokenContract = IERC20(startToken);
         IERC20 intermediateTokenContract = IERC20(intermediateToken);
@@ -1085,7 +1027,7 @@ contract ArbHook is
                 ) {
                     initialTickA_check = tA;
                 } catch {
-                    return (false, 0, 0);
+                    return (false, 0, 0, 0);
                 }
             } else {
                 try IPancakeV3Pool(poolA_addr).slot0() returns (
@@ -1099,7 +1041,7 @@ contract ArbHook is
                 ) {
                     initialTickA_check = tA;
                 } catch {
-                    return (false, 0, 0);
+                    return (false, 0, 0, 0);
                 }
             }
 
@@ -1115,7 +1057,7 @@ contract ArbHook is
                 ) {
                     initialTickB_check = tB;
                 } catch {
-                    return (false, 0, 0);
+                    return (false, 0, 0, 0);
                 }
             } else {
                 try IPancakeV3Pool(poolB_addr).slot0() returns (
@@ -1129,14 +1071,14 @@ contract ArbHook is
                 ) {
                     initialTickB_check = tB;
                 } catch {
-                    return (false, 0, 0);
+                    return (false, 0, 0, 0);
                 }
             }
 
             try pA_v3_check.token0() returns (address t0A) {
                 initialTokenA0_check = t0A;
             } catch {
-                return (false, 0, 0);
+                return (false, 0, 0, 0);
             }
             int24 initialSignedSpread_check = (initialTokenA0_check ==
                 startToken)
@@ -1152,11 +1094,9 @@ contract ArbHook is
                 int24(uint24(minSpreadBps))
             ) {
                 // Spread already too tight; treat as clean no-op success.
-                return (true, 0, 0);
+                return (true, 0, 0, 0);
             }
         }
-
-        uint256 totalAmountSwapped = 0;
         // Outer execution loop: each pass recomputes a fresh chunk from live state.
         for (uint256 i = 0; i < maxIterations; ) {
             uint256 balanceBeforeIteration = startTokenContract.balanceOf(
@@ -1551,24 +1491,8 @@ contract ArbHook is
 
         if (
             iterations > 0 &&
-            cumulativeProfit > 0 &&
-            uint256(cumulativeProfit) >= minProfitToEmit
+            cumulativeProfit > 0
         ) {
-            uint256 buyPoolIndex = _getPoolIndex(startToken, poolB_addr);
-            uint256 sellPoolIndex = _getPoolIndex(startToken, poolA_addr);
-
-            lastTradeData = IDataStorage.TradeData({
-                tokenA: startToken,
-                tokenB: intermediateToken,
-                buyPool: poolB_addr,
-                sellPool: poolA_addr,
-                buyPoolIndex: buyPoolIndex,
-                sellPoolIndex: sellPoolIndex,
-                totalAmountSwapped: totalAmountSwapped,
-                profit: uint256(cumulativeProfit),
-                iterations: iterations,
-                timestamp: block.timestamp
-            });
 
             // In flash-loan execution, net accounting is finalized in onFlashLoan.
             // Emit legacy gross event only when not in active flash context.
@@ -1584,7 +1508,7 @@ contract ArbHook is
                 );
             }
         }
-        return (true, cumulativeProfit, iterations);
+        return (true, cumulativeProfit, iterations, totalAmountSwapped);
     }
 
     // Inlined version of executeIterativeArb to avoid external call overhead
@@ -1598,9 +1522,9 @@ contract ArbHook is
         ArbUtils.PoolType poolBType
     )
         internal
-        returns (bool success, int256 cumulativeProfit, uint256 iterations)
+        returns (bool success, int256 cumulativeProfit, uint256 iterations, uint256 totalAmountSwapped)
     {
-        (success, cumulativeProfit, iterations) = executeIterativeArb(
+        (success, cumulativeProfit, iterations, totalAmountSwapped) = executeIterativeArb(
             poolA_addr,
             poolB_addr,
             startToken,
@@ -1937,6 +1861,66 @@ contract ArbHook is
         return principal;
     }
 
+    /// @dev Determines the V3/V3 flash principal with the same bounded liquidity,
+    ///      spread, and impact calculation used by execution. The coarse upper bound
+    ///      is borrowed so executeIterativeArb retains its original binary-search range.
+    function _deriveV3Principal(
+        address poolA,
+        address poolB,
+        address startToken,
+        address intermediateToken,
+        ArbUtils.PoolType poolAType,
+        ArbUtils.PoolType poolBType,
+        uint256 principalCap
+    ) internal view returns (uint256 principal, uint256 refinedPrincipal) {
+        if (principalCap == 0) return (0, 0);
+
+        (bool tickAOk, int24 tickA) = _tryReadV3Tick(poolA, poolAType);
+        (bool tickBOk, int24 tickB) = _tryReadV3Tick(poolB, poolBType);
+        if (!tickAOk || !tickBOk) return (0, 0);
+
+        address poolAToken0 = poolMetaByAddr[poolA].token0;
+        if (poolAToken0 == address(0)) return (0, 0);
+
+        int24 signedSpread = poolAToken0 == startToken ? tickA - tickB : tickB - tickA;
+        int24 initialAbsSpread = signedSpread >= 0 ? signedSpread : -signedSpread;
+        if (initialAbsSpread < int24(uint24(minSpreadBps))) return (0, 0);
+
+        ArbitrageLogic.IterationConfig memory config;
+        config.minSpreadBps = minSpreadBps;
+        config.chunkSpreadConsumptionBps = CHUNK_SPREAD_CONSUMPTION_BPS;
+        config.bpsDivisor = BPS_DIVISOR;
+        config.maxImpactBps = _MAX_IMPACT_BPS;
+        config.minChunkForStartToken = _minChunk(startToken);
+        config.currentStartTokenBalance = principalCap;
+        config.initialAbsSpread = initialAbsSpread;
+
+        ArbitrageLogic.V3SwapParams memory params =
+            arbLib.getV3SwapParameters(poolA, poolB, startToken, intermediateToken, config, poolAType, poolBType);
+        if (!params.shouldContinue) return (0, 0);
+
+        refinedPrincipal = arbLib.findBestV3Chunk(params, config.minChunkForStartToken);
+        if (refinedPrincipal == 0) return (0, 0);
+
+        return (params.chunkToSwap, refinedPrincipal);
+    }
+
+    function _tryReadV3Tick(address pool, ArbUtils.PoolType poolType) private view returns (bool ok, int24 tick) {
+        if (poolType == ArbUtils.PoolType.V3) {
+            try IUniswapV3Pool(pool).slot0() returns (uint160, int24 poolTick, uint16, uint16, uint16, uint8, bool) {
+                return (true, poolTick);
+            } catch {
+                return (false, 0);
+            }
+        }
+
+        try IPancakeV3Pool(pool).slot0() returns (uint160, int24 poolTick, uint16, uint16, uint16, uint32, bool) {
+            return (true, poolTick);
+        } catch {
+            return (false, 0);
+        }
+    }
+
     function _resolvePrincipalCap(address token) private view returns (uint256) {
         return _resolvePrincipalCap(token, lenderByToken[token]);
     }
@@ -1959,34 +1943,6 @@ contract ArbHook is
         if (configuredCap == 0) return lenderCap;
         if (lenderCap == 0) return configuredCap;
         return configuredCap < lenderCap ? configuredCap : lenderCap;
-    }
-
-    function _findPoolInBook(
-        address token,
-        address poolAddr
-    ) internal view returns (ArbUtils.PoolInfo memory poolInfo, bool found) {
-        ArbUtils.PoolInfo[] storage pools = tokenPools[token];
-        uint256 numPools = pools.length;
-        for (uint256 i = 0; i < numPools; i++) {
-            if (pools[i].poolAddress == poolAddr) {
-                return (pools[i], true);
-            }
-        }
-        return (poolInfo, false);
-    }
-
-    function _getPoolIndex(
-        address token,
-        address poolAddr
-    ) internal view returns (uint256) {
-        ArbUtils.PoolInfo[] storage pools = tokenPools[token];
-        uint256 numPools = pools.length;
-        for (uint256 i = 0; i < numPools; i++) {
-            if (pools[i].poolAddress == poolAddr) {
-                return i;
-            }
-        }
-        return type(uint256).max;
     }
 
     function _v2FeeForPoolType(
