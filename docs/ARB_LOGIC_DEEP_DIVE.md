@@ -67,6 +67,11 @@ Single pass over `tokenPools[tokenA]`:
 
 This is deliberately simple and fast; it is rerun frequently inside callback-driven execution.
 
+The initial canary registers only USDC-base routes. The legacy V2/V3 price
+normalization preserves the historical USDC-base ordering, but V3 prices can
+round to zero when WETH is the base. General base-token orientation is therefore
+not claimed by the canary and should be corrected only with parity coverage.
+
 ## 4) Iterative Arbitrage Engine
 
 ### `executeIterativeArb(...)`
@@ -103,6 +108,11 @@ So the implementation uses bounded heuristics:
 
 - `getV3SwapParameters`: derive a rough upper bound from spread and liquidity window.
 - `findBestV3Chunk`: bounded binary search on profit proxy.
+- The capacity calculation walks nearby tick-spacing intervals and reads
+  liquidity only when those sampled ticks are initialized. It is a bounded
+  sizing approximation, not a complete initialized-tick bitmap simulation.
+- Pool-enforced price limits and realized post-loan profit checks remain the
+  authoritative execution safeguards when the estimate is imperfect.
 
 ### V2-V2 path
 
