@@ -9,6 +9,108 @@ The initial deployment is owner-operated with a small set of manually verified, 
 
 ## Open For Canary
 
+51. Pre-loan profit estimate is not a usable economic quantity
+- Status: `BLOCKS DEPLOYMENT`
+- Priority: `CRITICAL`
+- Summary: `executeIterativeArbViaFlash` gates borrowing with
+  `expectedRouteProfit - fee < minNetProfit`, treating `expectedRouteProfit` as a
+  raw token amount. It is not one. Measured against the ten-round gate, the
+  estimate misses realized profit by up to five orders of magnitude and in both
+  directions:
+
+  | Round | Realized net (raw) | Estimate (raw) | Ratio |
+  |-------|--------------------|----------------|-------|
+  | 1 | 427 | 168 | 0.4x |
+  | 2 | 239 | 65 | 0.3x |
+  | 3 | 7,000 | 5,030,965 | 719x |
+  | 4 | 59,265 | 46,024,647 | 777x |
+  | 7 | 1,161 | 3,004,834 | 2,588x |
+  | 8 | 5,646 | 21,258,118 | 3,765x |
+  | 9 | 58 | 2,909,521 | 50,164x |
+
+- Cause: `_binarySearchBestChunk` scales both legs linearly
+  (`intermOut_full * mid / fullChunk`, `poolB_maxStartOut * intermInB / poolB_maxIn`),
+  which is false for concentrated liquidity, and `ArbMath._simulatedPL` deducts
+  only pool B's fee because `_deltaAmounts` is a fee-less price-move calculation.
+  The quantity was sound as a *relative* ranking for chunk selection, which is all
+  the pre-flash design used it for. The flash migration repurposed the same number
+  as an absolute currency comparison.
+- Status detail: `ADDRESSED`. The V3/V3 path now screens only for the presence of
+  edge (`edgeScore != 0`) and never compares the score against currency. The V2/V2
+  and mixed paths keep their currency screen because both genuinely simulate each
+  leg against real reserves or swap math with both pool fees deducted. Naming was
+  corrected throughout: `ArbMath._simulatedPL` is now `_edgeScore`, `findBestV3Chunk`
+  returns `edgeScore`, and the hook's currency variable is `expectedNetProfit`.
+  `minNetProfit` remains enforced exactly against realized balances in `onFlashLoan`
+  for every route type.
+- CORRECTION: this defect does **not** explain the `minNetProfit` cliff described in
+  item 53. Re-running the sweep after the fix produced identical results. The
+  estimate divergence is real and screening on it was wrong, but it was not the
+  cause of the cliff. See item 53 for the actual mechanism.
+
+53. The ten-round fixture cannot calibrate minNetProfit
+- Status: `DOCUMENTED`
+- Priority: `HIGH`
+- Summary: Sweeping the floor across the fixture shows 4 rounds executing at
+  2,000-6,162 raw and **zero** at 8,000 raw (0.008 USDC). Two hypotheses were
+  tested and both are wrong: it is not the pre-loan estimate (item 51, fixed, no
+  change to the sweep) and it is not a cascade (seeding round 1 without a floor
+  does not unlock later rounds at the higher floor; `testRoundSequenceIsACascade`
+  executes 0).
+- Actual mechanism: the fixture seeds one fixed displacement and the hook is the
+  only actor in it. When no route clears the floor, nothing trades, so the pool
+  state never moves and every later round re-evaluates identical state and fails
+  identically. The best single-shot opportunity in the seeded state is worth about
+  7,369 raw USDC, so any floor above that reports zero forever. The floor also
+  changes which route round 1 selects, so each floor traces a different trajectory
+  rather than filtering a fixed one.
+- Consequence: the number this fixture reports is a property of its seeded
+  displacement, not of production. In production each swap is an independent
+  trigger and other traders move the pools between them, so a floor above the
+  fixture's ceiling is not a deadlock, only "no trade right now".
+- Decision: calibrate `minNetProfit` from the runbook's current-head differential
+  gas replay, never from this fixture. Keep the fixture's floor at 1 raw unit so it
+  continues to exercise all ten routes as a route-selection regression.
+
+52. minSpreadBps is not an economic control
+- Status: `RESOLVED (keep at 10)`
+- Priority: `MEDIUM`
+- Summary: Calibration sweep across the ten-round gate:
+
+  | minSpreadBps | Rounds | Gross net (raw) | After gas (raw) |
+  |--------------|--------|-----------------|-----------------|
+  | 1 / 5 / 10 | 10 | 8,365,681 | +8,242,441 |
+  | 20 | 3 | 7,609 | **-29,363** |
+  | >=40 | 0 | 0 | 0 |
+
+- The threshold compares a V3 **tick delta**, but profit is spread times depth.
+  The widest tick spreads here belong to the seeded cbBTC/USDC gap, which is the
+  least profitable in absolute terms, while rounds 5 and 6 (2.32 and 5.95 USDC)
+  come from narrow spreads on deep WETH/USDC liquidity. Raising the threshold
+  therefore deletes the profitable trades first and turns the sequence into a net
+  loss at 20.
+- It also gates V3/V3 routes only (`ArbitrageLogic` spread check, the V3/V3 branch
+  of `executeIterativeArb`, and `_deriveV3Principal`). V2/V2 and mixed routes
+  ignore it entirely, which `README.md` did not previously say.
+- Decision: keep `minSpreadBps = 10` and treat it as a cheap gas pre-filter, not a
+  profitability control. Economic filtering belongs in `minNetProfit`, which is
+  blocked on item 51.
+
+40. Flash-fee choice dominates canary economics
+- Status: `BLOCKS DEPLOYMENT`
+- Priority: `CRITICAL`
+- Summary: Replaying the ten-round fixed-block gate with real Aave fees nets
+  8.365681 USDC against the 18.679602 USDC legacy gross. The 5 bps premium takes
+  55% of the edge. Against the runbook's measured 0.012324 USDC L2 execution
+  cost, rounds 1, 2, 3, 7, 8 and 9 are net-negative and round 10 is marginal;
+  only rounds 4, 5 and 6 clear. At the provisional 0.10 USDC floor only rounds 5
+  and 6 would execute, so the gate cannot run at production economic settings.
+- Decision: bind `MorphoERC3156Adapter` (zero fee, ~197.6M USDC on Base,
+  verified against live state by `MorphoERC3156Adapter.t.sol`) instead of the
+  Aave adapter, then recalculate the minimum net-profit floor from a current-head
+  differential gas replay. Re-run the fixed-block gate against the chosen lender
+  and record the resulting per-round net profits with the release artifacts.
+
 20. Independent review of release commit
 - Status: `BLOCKS DEPLOYMENT`
 - Priority: `CRITICAL`
@@ -27,6 +129,17 @@ The initial deployment is owner-operated with a small set of manually verified, 
 - Priority: `MEDIUM`
 - Summary: Permanent per-trade storage made telemetry expensive and able to cancel an otherwise profitable trade.
 - Decision: removed `DataStorage`; `FlashLoanSettled` is now the canonical event-only execution record.
+
+## Accepted By Design
+
+41. Net profit is paid to a swapper-controlled beneficiary
+- Status: `ACCEPTED`
+- Summary: `hookData` names the beneficiary and receives 100% of net profit.
+  Anyone may swap a hooked pool, or initialize their own pool with this hook,
+  and direct the full proceeds to themselves. The contract has no owner fee.
+- Decision: intended. The hook returns its edge to the trader who triggered it
+  rather than collecting rent for the operator. Recorded in `README.md` so the
+  absence of operator revenue is not mistaken for a defect.
 
 ## Deferred Outside Canary Threat Model
 
@@ -51,6 +164,85 @@ The initial deployment is owner-operated with a small set of manually verified, 
 - Decision: do not add expensive tick traversal for the canary. Pool price limits, atomic repayment, intermediate-balance restoration, and realized minimum-profit enforcement remain authoritative; revisit sizing precision after canary results.
 
 ## Addressed
+
+42. Unbounded hook gas could revert the triggering swap
+- Status: `ADDRESSED`
+- Notes: The `attemptAllInternal` self-call forwarded all remaining gas. The
+  63/64 rule leaves only 1/64 behind, which does not cover v4 settlement when the
+  swap was submitted with a modest gas limit, so an expensive discovery pass
+  could revert the user's swap. The attempt now runs on an explicit budget from
+  `setHookGasBounds` (200,000 reserve, 3,000,000 ceiling by default), covered by
+  `testTightGasBudgetSkipsArbAndLeavesCallerGas` and
+  `testGasCeilingBoundsASuccessfulAttempt`.
+
+43. Unwind skipped for USDC and WETH intermediates
+- Status: `ADDRESSED`
+- Notes: `executeIterativeArb` skipped residue unwinding when the intermediate
+  was USDC or WETH and when running profit was non-positive, but `onFlashLoan`
+  requires exact intermediate restoration. For the USDC-base canary the
+  intermediate *is* WETH, so any partially filled leg aborted the loan. Unwinding
+  now runs for every intermediate token and covers V2 pools as well as V3.
+  Residue is measured as a delta against the balance held at route entry, so a
+  pre-existing intermediate balance is never spent or counted.
+
+44. Zero-output leg reverted instead of stopping
+- Status: `ADDRESSED`
+- Notes: A price-limited V3 leg can legitimately fill for nothing. The V2 helper
+  reverted `InvalidV2FlashSwapParams` on a zero quote, discarding profit already
+  realized in earlier iterations of the same loan. The executor now breaks
+  cleanly, matching how the V3 path already behaved.
+
+45. Per-transaction state held in cold storage
+- Status: `ADDRESSED`
+- Notes: The swap context, profit recipient, active loan fields and last-result
+  fields are single-transaction values and now use EIP-1153 transient storage.
+  Revert semantics are unchanged. Measured saving is roughly 75,000-90,000 gas
+  per attempt (`testProfitableLoanPaysBeneficiaryAndEmitsSettlement` 794,418 to
+  717,666).
+
+46. Swap-callback context was reusable within one swap
+- Status: `ADDRESSED`
+- Notes: `activeSwapContextHash` was checked but never cleared, so the pool being
+  swapped could invoke the repayment callback repeatedly and be paid each time.
+  Not reachable with canonical pools, but the context is now single-use.
+
+47. V3 price normalization overflowed for extreme prices
+- Status: `ADDRESSED`
+- Notes: `_calculatePrice1e18_corrected` materialized `sqrtP^2`, which needs up to
+  320 bits and reverted inside `FullMath` for any pool priced above roughly
+  1.8e19 in raw units. It is now two `mulDiv` steps with every intermediate below
+  2^256 across the full uint160 sqrt-price range. The legacy inventory oracle
+  still reproduces 18,679,602 raw USDC exactly and the fixed-block flash gate
+  still matches every round's route, so the rewrite is behavior-preserving.
+
+48. Single-step ownership transfer
+- Status: `ADDRESSED`
+- Notes: `Ownable2Step` replaces `Ownable`. A mistyped `transferOwnership`
+  previously bricked all configuration including the `setHookMaxIterations(0)`
+  kill switch.
+
+49. Default suite did not exercise real route execution
+- Status: `ADDRESSED`
+- Notes: `ArbHookFlashLoanE2E.t.sol` replaces `executeIterativeArb` with a
+  profit-minting stub, so all eleven of its tests validated flash plumbing
+  against synthetic profit while real route math sat behind skipped fork tests.
+  `ArbHookRealExecution.t.sol` adds six local tests that run the real executor
+  against constant-product pools enforcing their own K invariant, covering both
+  swap legs, the V2 repayment callbacks, residue handling, unprofitable-route
+  containment and the gas budget.
+
+50. Flash principal sized above what is traded
+- Status: `WONTFIX`
+- Notes: V3/V3 borrows the coarse upper bound rather than the refined chunk, so
+  the lender fee is paid on principal that never moves (measured worst case:
+  round 8 wasted 24% of its net profit). Funding only the refined chunk was
+  implemented and measured against the fixed-block gate: it breaks the route
+  sequence and collapses rounds 5 and 6 from 2.32/5.95 USDC to 0.0004/0.0002,
+  because the executor re-derives its binary-search range from its own balance.
+  The coarse bound is the search range, not waste. Removing the double
+  derivation would require threading the planned chunk into the executor, which
+  changes route selection. A zero-fee lender makes the cost exactly zero without
+  touching route selection; see item 40.
 
 1. ArbHook EIP-170 deployability
 - Status: `ADDRESSED`

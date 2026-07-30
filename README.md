@@ -30,7 +30,28 @@ register WETH as a base for the canary; V3 WETH-base discovery can round its
 price to zero and requires a parity-sensitive normalization fix after the
 canary.
 
-There is still required operator setup off-chain: pool registration, lender configuration, and runtime-parameter configuration (`hookMaxIterations`, `minSpreadBps`, `chunkSpreadConsumptionBps`, `maxImpactBps`). Hook execution is disabled by default (`hookMaxIterations = 0`). The Aave V3 integration uses the production adapter in `contracts/AaveV3ERC3156Adapter.sol`, with one configured reserve per adapter deployment.
+There is still required operator setup off-chain: pool registration, lender configuration, and runtime-parameter configuration (`hookMaxIterations`, `minSpreadBps`, `chunkSpreadConsumptionBps`, `maxImpactBps`, `hookGasReserve`/`hookGasLimit`). Hook execution is disabled by default (`hookMaxIterations = 0`).
+
+Two ERC-3156 lender adapters ship, each bound to one reserve per deployment:
+
+| Adapter | Source | Flash fee | Base USDC liquidity |
+|---------|--------|-----------|---------------------|
+| `contracts/MorphoERC3156Adapter.sol` | Morpho Blue | **0 bps** | ~197.6M USDC |
+| `contracts/AaveV3ERC3156Adapter.sol` | Aave V3 | 5 bps | Aave reserve |
+
+The fee is the dominant cost at canary size. Replaying the ten-round fixed-block
+sequence, Aave's 5 bps premium consumed 55% of gross edge: 18.679602 USDC gross
+became 8.365681 USDC net. `setLenderForToken` chooses which adapter is live, so
+this is a configuration decision, not a redeployment.
+
+## Who Receives The Profit
+
+Net profit is paid in full to the beneficiary packed into `hookData` by whoever
+submits the swap. This is deliberate: the hook returns its edge to the trader who
+triggered it rather than collecting rent for the operator. There is no owner fee
+and no allowlist, so any swapper on a hooked pool — including one who initializes
+their own pool with this hook — receives 100% of what their swap's arbitrage
+earns. Do not deploy this expecting the owner address to accumulate profit.
 
 ## Canary Threat Model
 
@@ -138,8 +159,13 @@ The main runtime knobs are owner-settable on `ArbHook`:
   Lower values are safer/cheaper but may leave profit on the table.
 
 - `setMinSpreadBps(uint16)`  
-  Minimum spread threshold required before execution continues.
-  This acts as a noise filter so tiny spreads (often eaten by fees/rounding/impact) are skipped.
+  Minimum V3 tick spread required before a V3/V3 route continues. **This gates
+  V3/V3 routes only** — V2/V2 and mixed routes never consult it. It is a cheap
+  gas pre-filter, not a profitability control: it compares a tick delta, while
+  profit is spread times depth, so the widest spreads are frequently the least
+  profitable trades. Calibrated against the ten-round gate, `10` keeps all ten
+  rounds; `20` keeps only the three least profitable and turns the sequence into
+  a net loss after gas; `40` and above execute nothing. Leave it at `10`.
 
 - `setChunkSpreadConsumptionBps(uint16)`  
   Controls chunk aggressiveness: how much spread each iteration tries to consume.
@@ -150,6 +176,16 @@ The main runtime knobs are owner-settable on `ArbHook`:
   Caps each V3/V3 leg's adaptive tick movement before the pool-enforced
   `sqrtPriceLimit` is derived. Mixed routes use the same value as a local
   liquidity-based estimate of the V3 leg's price movement.
+
+- `setHookGasBounds(uint32 gasReserve, uint32 gasLimit)`  
+  `gasReserve` (default 200,000) is withheld from every arbitrage attempt so the
+  triggering swap can always finish settling. `gasLimit` (default 3,000,000)
+  caps what one attempt may consume; zero removes the ceiling. The 63/64 call
+  rule alone is not sufficient here: on a swap submitted with a modest gas
+  limit, the 1/64 left behind does not cover v4 settlement, so an expensive
+  discovery pass would revert the user's swap. Raise the reserve if a rehearsal
+  shows settlement costing more; raise the ceiling only if profitable routes are
+  being cut short.
 
 The per-token flash controls are:
 

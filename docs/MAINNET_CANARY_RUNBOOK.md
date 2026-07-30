@@ -130,21 +130,42 @@ Keep `hookMaxIterations` at zero until every other step is complete.
    before traffic if any entry is wrong.
 3. Set the reviewed execution profile. The historical profile is `10` spread
    bps, `1500` chunk-consumption bps, and `500` max-impact bps.
-4. Read Aave's live premium:
+4. Choose the lender. The deployment script deploys both adapters; only the one
+   bound with `setLenderForToken` is live.
+
+   **Bind the Morpho adapter unless a rehearsal gives a reason not to.** Morpho
+   Blue charges no flash premium, Aave charges 5 bps, and at canary size that fee
+   is the dominant cost. Replaying the ten-round fixed-block sequence through
+   each lender, identical pool book and routes:
+
+   | Lender | Fees paid | Net profit | vs legacy gross |
+   |--------|-----------|------------|-----------------|
+   | Morpho Blue | 0 | **18.543625 USDC** | 99.3% |
+   | Aave V3 | 8.945556 USDC | 8.365681 USDC | 44.8% |
+
+   Verify the chosen lender before binding:
 
 ```bash
-cast call "$AAVE_POOL" \
-  "FLASHLOAN_PREMIUM_TOTAL()(uint128)" \
-  --rpc-url "$BASE_RPC_URL"
+# Morpho: confirm code, USDC liquidity, and that the adapter quotes zero
+cast codesize 0xBBBBBbbBBb9cC5e90e3b3Af64bdAF62C37EEFFCb --rpc-url "$BASE_RPC_URL"
+cast call "$MORPHO_ADAPTER" "flashFee(address,uint256)(uint256)" "$USDC" 1000000000 --rpc-url "$BASE_RPC_URL"
+cast call "$MORPHO_ADAPTER" "maxFlashLoan(address)(uint256)" "$USDC" --rpc-url "$BASE_RPC_URL"
+
+# Aave, only if binding Aave instead
+cast call "$AAVE_POOL" "FLASHLOAN_PREMIUM_TOTAL()(uint128)" --rpc-url "$BASE_RPC_URL"
 ```
 
-5. Assign the deployed adapter to USDC, then set the principal cap, maximum fee,
+   Set the fee cap from the bound lender's live quote. A zero-fee lender still
+   needs a nonzero cap, because zero disables borrowing entirely; the cap is an
+   upper bound, so it also catches a lender that starts charging later.
+
+5. Assign the chosen adapter to USDC, then set the principal cap, maximum fee,
    and minimum net profit. All three economic values must be
    nonzero or borrowing remains disabled. Simulate the owner-only configuration
    script with explicit raw-unit values, then add `--broadcast`:
 
 ```bash
-PRIVATE_KEY="$OWNER_KEY" HOOK="$HOOK" AAVE_ADAPTER="$ADAPTER" \
+PRIVATE_KEY="$OWNER_KEY" HOOK="$HOOK" LENDER_ADAPTER="$MORPHO_ADAPTER" \
 USDC_FLASH_PRINCIPAL_CAP_RAW="$USDC_FLASH_PRINCIPAL_CAP_RAW" \
 USDC_MAX_FLASH_FEE_BPS="$USDC_MAX_FLASH_FEE_BPS" \
 USDC_MIN_NET_PROFIT_RAW="$USDC_MIN_NET_PROFIT_RAW" \
@@ -165,12 +186,25 @@ cast call "$HOOK" \
   --rpc-url "$BASE_RPC_URL"
 ```
 
-Set the fee cap from the live Aave premium, not from a stale test constant. Set
-the principal as an operator risk ceiling; adaptive route math chooses the
+Set the principal as an operator risk ceiling; adaptive route math chooses the
 actual loan below it. The historical flash sequence reached a maximum principal
 of 10,695.735171 USDC, so an 11,000 USDC cap is the smallest simple cap that
 covers that fixed-block gate. The test suite's 100,000 USDC cap is not a
 production recommendation.
+
+**Do not calibrate `minNetProfit` against the fixed-block fixture.** That fixture
+seeds one displacement and the hook is the only actor in it, so once the floor
+exceeds the best single-shot opportunity in the seeded state (about 7,369 raw
+USDC) it reports zero trades forever. That ceiling is a property of the fixture,
+not of production, where each swap is an independent trigger and other traders
+move the pools in between. Sweeps and the reasoning behind this are in
+OPEN_ISSUES items 51 and 53; the harnesses are `testCalibrateMinNetProfit` and
+`testRoundSequenceIsACascade`, gated behind `RUN_SPREAD_CALIBRATION=true`.
+Calibrate from the current-head differential gas replay below instead, and leave
+the fixture's own floor at 1 raw unit so it keeps exercising all ten routes.
+
+`minSpreadBps` is not an economic control and should stay at `10`; see
+OPEN_ISSUES item 52.
 
 `minNetProfit` is denominated in raw borrowed-token units. It excludes ETH gas
 even though it includes the flash fee. For USDC, calculate:
