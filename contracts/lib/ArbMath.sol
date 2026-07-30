@@ -63,7 +63,16 @@ library ArbMath {
         }
     }
 
-    function _simulatedPL(
+    /// @notice Relative ranking score for one candidate V3/V3 chunk size.
+    /// @dev NOT a token amount and NOT comparable to currency. Both legs are scaled
+    ///      linearly from a single price-move quote, which is false under
+    ///      concentrated liquidity, and only pool B's fee is deducted because
+    ///      `_deltaAmounts` is a fee-less calculation. Measured against the
+    ///      ten-round fork gate the magnitude differs from realized profit by up to
+    ///      five orders of magnitude in both directions. It is sound for what the
+    ///      chunk search uses it for -- ordering candidates -- and nothing else.
+    ///      Enforce minimum profit against realized balances, never against this.
+    function _edgeScore(
         uint256 startInA, // token-A sent to pool A   (raw units)
         uint256 intermOutA, // token-B received from A  (raw units)
         uint256 intermCapB, // clamp you applied

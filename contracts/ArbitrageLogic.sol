@@ -109,37 +109,37 @@ contract ArbitrageLogic {
     ) private pure returns (uint256 price1e18) {
 
         uint256 sqrtP = uint256(sqrtP_uint160);
-        uint256 dec0 = uint256(dec0_uint8); // Cast to uint256 for 10**dec0
-        uint256 dec1 = uint256(dec1_uint8); // Cast to uint256 for 10**dec1
+        if (sqrtP == 0) return 0;
 
-        uint256 num;
-        uint256 den;
+        uint256 tenPowDec0 = 10 ** uint256(dec0_uint8);
+        uint256 tenPowDec1 = 10 ** uint256(dec1_uint8);
+        uint256 Q96 = uint256(1) << 96;
 
-        uint256 Q192 = uint256(1) << 192;
-        uint256 tenPowDec0 = 10 ** dec0;
-        uint256 tenPowDec1 = 10 ** dec1;
-
-        uint256 sqrtPSquared = FullMath.mulDiv(sqrtP, sqrtP, 1);
-
-
+        // Both branches compute the same ratio the naive form does, but never
+        // materialize sqrtP^2. That product needs up to 320 bits, so the direct
+        // form reverts inside FullMath for any pool priced above ~1.8e19 in raw
+        // units. Splitting into two mulDiv steps keeps every intermediate below
+        // 2^256 across the full uint160 sqrt-price range.
         if (aIsT0) {
-            // Price of tokenA (token0) in terms of tokenB (token1)
-            // Formula: (sqrtP^2 / Q192) * (10^dec1 / 10^dec0) effectively, then scaled by 1e18
-            // Numerator term: sqrtP^2 * 10^dec1
-            // Denominator term: Q192 * 10^dec0
-            num = FullMath.mulDiv(sqrtPSquared, tenPowDec1, 1); // sqrtP^2 * 10^dec1
-            den = FullMath.mulDiv(Q192, tenPowDec0, 1); // Q192 * 10^dec0
+            // price = sqrtP^2 * 10^dec1 * 1e18 / (2^192 * 10^dec0)
+            //       = (sqrtP^2 / 2^96) * 10^dec1 * 1e18 / (2^96 * 10^dec0)
+            uint256 priceX96 = FullMath.mulDiv(sqrtP, sqrtP, Q96); // <= 2^224
+            price1e18 = FullMath.mulDiv(
+                priceX96,
+                tenPowDec1 * 1e18,
+                Q96 * tenPowDec0
+            );
         } else {
-            // Price of tokenA (token1) in terms of tokenB (token0)
-            // Formula: (Q192 / sqrtP^2) * (10^dec0 / 10^dec1) effectively, then scaled by 1e18
-            // Numerator term: Q192 * 10^dec0
-            // Denominator term: sqrtP^2 * 10^dec1
-            num = FullMath.mulDiv(Q192, tenPowDec0, 1); // Q192 * 10^dec0
-            den = FullMath.mulDiv(sqrtPSquared, tenPowDec1, 1); // sqrtP^2 * 10^dec1
+            // price = 2^192 * 10^dec0 * 1e18 / (sqrtP^2 * 10^dec1)
+            //       = (2^192 / sqrtP) * 10^dec0 * 1e18 / (sqrtP * 10^dec1)
+            uint256 inverseX96 = FullMath.mulDiv(Q96, Q96, sqrtP); // <= 2^160
+            price1e18 = FullMath.mulDiv(
+                inverseX96,
+                tenPowDec0 * 1e18,
+                sqrtP * tenPowDec1
+            );
         }
 
-        if (den == 0) return 0; // Should not happen with Uniswap V3 properties
-        price1e18 = FullMath.mulDiv(num, 1e18, den);
         return price1e18;
     }
 
@@ -354,11 +354,11 @@ contract ArbitrageLogic {
         uint256 poolB_maxIn, // ΔB.in to reach sqrtPriceLimitB
         uint256 poolB_maxStartOut, // ΔA.out obtainable at sqrtPriceLimitB
         uint24 feeB // pool B fee
-    ) private pure returns (uint256 bestChunk, int256 bestPL) {
+    ) private pure returns (uint256 bestChunk, int256 bestScore) {
         if (hi < lo) return (0, 0);
 
         uint256 fullChunk = hi;
-        bestPL = -type(int256).max;
+        bestScore = -type(int256).max;
         bestChunk = 0;
 
         for (uint8 iter; iter < 16 && lo <= hi; ++iter) {
@@ -390,7 +390,7 @@ contract ArbitrageLogic {
                 intermInB_mid,
                 poolB_maxIn
             );
-            int256 plMid = ArbMath._simulatedPL(
+            int256 scoreMid = ArbMath._edgeScore(
                 mid,
                 intermOut_mid,
                 intermCapB,
@@ -399,14 +399,14 @@ contract ArbitrageLogic {
                 startOut_mid
             );
 
-            if (plMid > bestPL) {
-                // strictly better profit?
-                bestPL = plMid;
+            if (scoreMid > bestScore) {
+                // strictly better ranking?
+                bestScore = scoreMid;
                 bestChunk = mid;
             }
 
             // classic binary-search – keep searching toward the profitable side
-            if (plMid > 0) {
+            if (scoreMid > 0) {
                 lo = mid + 1;
             } else {
                 if (mid == 0) break;
@@ -414,7 +414,7 @@ contract ArbitrageLogic {
             }
         }
 
-        if (bestPL <= 0) bestChunk = 0; // nothing profitable after search
+        if (bestScore <= 0) bestChunk = 0; // no edge detected after search
     }
 
     // Part 1 of V3 sizing:
@@ -650,10 +650,13 @@ contract ArbitrageLogic {
 
     // Part 2 of V3 sizing:
     // use coarse parameters from getV3SwapParameters and select the best executable chunk.
+    /// @return bestChunk Chunk size to execute, or zero when no edge was detected.
+    /// @return edgeScore Relative ranking score for `bestChunk`. See `ArbMath._edgeScore`:
+    ///         this is not a token amount and must not be compared against currency.
     function findBestV3Chunk(
         V3SwapParams memory params,
         uint256 minChunkForStartToken
-    ) public pure returns (uint256 bestChunk, int256 expectedProfit) {
+    ) public pure returns (uint256 bestChunk, int256 edgeScore) {
         (uint256 poolB_maxIn, uint256 poolB_maxStartOut) = ArbMath
             ._deltaAmounts(
                 params.zeroForOneB,
@@ -662,7 +665,7 @@ contract ArbitrageLogic {
                 params.poolBState.liquidity
             );
 
-        (bestChunk, expectedProfit) = _binarySearchBestChunk(
+        (bestChunk, edgeScore) = _binarySearchBestChunk(
             params.chunkToSwap, // This is the roughChunk (upper bound)
             minChunkForStartToken,
             params.intermediateAmountPotentiallyFromA,
@@ -673,7 +676,7 @@ contract ArbitrageLogic {
         );
 
         if (bestChunk == 0) {
-            expectedProfit = 0;
+            edgeScore = 0;
         }
     }
 
