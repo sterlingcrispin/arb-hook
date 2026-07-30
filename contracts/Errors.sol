@@ -40,4 +40,5 @@ library ArbErrors {
     error ERC20TransferFailed();
     error UnsupportedPoolType();
     error InvalidV2FlashSwapParams();
+    error InvalidGasReserve();
 }

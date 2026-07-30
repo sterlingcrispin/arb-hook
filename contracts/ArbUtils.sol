@@ -52,8 +52,52 @@ abstract contract ArbUtils {
 
     // Stateless pricing/sizing engine shared by the hook execution paths.
     ArbitrageLogic internal arbLib;
-    // Nonzero only while a registered pool swap is synchronously awaiting repayment.
-    bytes32 internal activeSwapContextHash;
+
+    /* ---------------- Transient execution context ---------------- */
+    /// @dev Every value below lives for exactly one transaction, so it is held in
+    ///      EIP-1153 transient storage rather than cold account storage. Reverts
+    ///      roll transient writes back with the same semantics as SSTORE, so the
+    ///      try/catch containment around flash loans and swaps is unchanged.
+    ///      Slots are private to this contract and assigned explicitly.
+    uint256 internal constant _T_SWAP_CONTEXT = 0;
+    uint256 internal constant _T_PROFIT_RECIPIENT = 1;
+    uint256 internal constant _T_LENDER = 2;
+    uint256 internal constant _T_LOAN_TOKEN = 3;
+    uint256 internal constant _T_LOAN_AMOUNT = 4;
+    uint256 internal constant _T_FLASH_CONTEXT = 5;
+    uint256 internal constant _T_LAST_SUCCESS = 6;
+    uint256 internal constant _T_LAST_PROFIT = 7;
+    uint256 internal constant _T_LAST_ITERATIONS = 8;
+
+    function _tload(uint256 slot) internal view returns (uint256 value) {
+        assembly ("memory-safe") {
+            value := tload(slot)
+        }
+    }
+
+    function _tstore(uint256 slot, uint256 value) internal {
+        assembly ("memory-safe") {
+            tstore(slot, value)
+        }
+    }
+
+    /// @notice Nonzero only while a registered pool swap is synchronously awaiting repayment.
+    function _activeSwapContextHash() internal view returns (bytes32) {
+        return bytes32(_tload(_T_SWAP_CONTEXT));
+    }
+
+    function _setActiveSwapContextHash(bytes32 contextHash) internal {
+        _tstore(_T_SWAP_CONTEXT, uint256(contextHash));
+    }
+
+    /// @notice Beneficiary of the net profit for the in-flight arbitrage attempt.
+    function _activeProfitRecipient() internal view returns (address) {
+        return address(uint160(_tload(_T_PROFIT_RECIPIENT)));
+    }
+
+    function _setActiveProfitRecipient(address recipient) internal {
+        _tstore(_T_PROFIT_RECIPIENT, uint256(uint160(recipient)));
+    }
 
     /* ---------------- Pool registration ---------------- */
     function _addPools(
@@ -150,12 +194,13 @@ abstract contract ArbUtils {
         } else {
             amount1Out = amountToReceive;
         }
-        activeSwapContextHash = keccak256(abi.encode(address(pair), data));
+        _setActiveSwapContextHash(keccak256(abi.encode(address(pair), data)));
         try pair.swap(amount0Out, amount1Out, address(this), data) {
             success = true;
         } catch {
             success = false;
         }
-        activeSwapContextHash = bytes32(0);
+        // The callback consumes the context; this clears it when no callback ran.
+        _setActiveSwapContextHash(bytes32(0));
     }
 }

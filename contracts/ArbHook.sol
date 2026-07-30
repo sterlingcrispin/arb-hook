@@ -14,6 +14,7 @@ import {BalanceDelta} from "@uniswap/v4-core/src/types/BalanceDelta.sol";
 import {SwapParams} from "@uniswap/v4-core/src/types/PoolOperation.sol";
 
 import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
+import {Ownable2Step} from "@openzeppelin/contracts/access/Ownable2Step.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {
     IERC20Metadata
@@ -39,7 +40,7 @@ import {IERC3156FlashLender} from "./interfaces/IERC3156FlashLender.sol";
 ///         checks in one contract.
 contract ArbHook is
     ArbUtils,
-    Ownable,
+    Ownable2Step,
     IERC3156FlashBorrower
 {
     using SafeERC20 for IERC20;
@@ -63,9 +64,14 @@ contract ArbHook is
     // Default max iterations when attempting arb via hook callbacks (0 disables hook execution)
     uint256 internal hookMaxIterations;
 
-    // Well-known tokens used by unwind heuristics
-    address private constant USDC = 0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913;
-    address private constant WETH = 0x4200000000000000000000000000000000000006;
+    /// @notice Gas withheld from the arbitrage attempt so the triggering swap can
+    ///         always finish settling after the hook returns.
+    /// @dev The 63/64 call rule alone does not guarantee enough remains on a
+    ///      low-gas-limit swap, so the attempt is given an explicit budget.
+    uint32 internal hookGasReserve = 200_000;
+    /// @notice Hard ceiling on gas one arbitrage attempt may consume (0 = no ceiling).
+    uint32 internal hookGasLimit = 3_000_000;
+
     uint256 private constant FEE_BPS_DIVISOR = 10_000;
     bytes32 private constant ERC3156_CALLBACK_SUCCESS =
         keccak256("ERC3156FlashBorrower.onFlashLoan");
@@ -96,15 +102,35 @@ contract ArbHook is
     mapping(address => uint256) internal maxFlashFeeBpsByToken;
     mapping(address => uint256) internal minNetProfitByToken;
 
-    address internal activeAttemptProfitRecipient;
-    address private _activeLender;
-    address private _activeLoanToken;
-    uint256 private _activeLoanAmount;
-    bytes32 private _activeFlashContextHash;
+    // Flash-loan runtime context. All of it is single-transaction state and lives
+    // in transient storage; see ArbUtils for the slot assignments.
+    function _activeLender() private view returns (address) {
+        return address(uint160(_tload(_T_LENDER)));
+    }
 
-    bool private _flashLastTradeSuccess;
-    int256 private _flashLastProfit;
-    uint256 private _flashLastIterations;
+    function _activeLoanToken() private view returns (address) {
+        return address(uint160(_tload(_T_LOAN_TOKEN)));
+    }
+
+    function _activeLoanAmount() private view returns (uint256) {
+        return _tload(_T_LOAN_AMOUNT);
+    }
+
+    function _activeFlashContextHash() private view returns (bytes32) {
+        return bytes32(_tload(_T_FLASH_CONTEXT));
+    }
+
+    function _flashLastTradeSuccess() private view returns (bool) {
+        return _tload(_T_LAST_SUCCESS) != 0;
+    }
+
+    function _flashLastProfit() private view returns (int256) {
+        return int256(_tload(_T_LAST_PROFIT));
+    }
+
+    function _flashLastIterations() private view returns (uint256) {
+        return _tload(_T_LAST_ITERATIONS);
+    }
 
     struct FlashLoanExecutionParams {
         address sellPool;
@@ -143,23 +169,45 @@ contract ArbHook is
         if (iterations > 0) {
             address beneficiary = _resolveProfitRecipient(hookData);
             if (beneficiary != address(0)) {
-                activeAttemptProfitRecipient = beneficiary;
+                _setActiveProfitRecipient(beneficiary);
                 _attemptAllViaSelfCall(iterations);
-                activeAttemptProfitRecipient = address(0);
+                _setActiveProfitRecipient(address(0));
             }
         }
 
         return (IHooks.afterSwap.selector, 0);
     }
 
+    /// @dev Gas available to an arbitrage attempt, or zero when the triggering swap
+    ///      cannot spare any. Reserving before the call is what keeps a costly
+    ///      discovery pass from consuming the user's whole gas limit: the 63/64
+    ///      rule leaves only 1/64 behind, which is not enough to settle a swap
+    ///      when the caller set a modest limit.
+    function _attemptGasBudget() private view returns (uint256) {
+        uint256 available = gasleft();
+        uint256 reserve = hookGasReserve;
+        if (available <= reserve) return 0;
+
+        unchecked {
+            available -= reserve;
+        }
+        uint256 ceiling = hookGasLimit;
+        if (ceiling != 0 && available > ceiling) available = ceiling;
+        return available;
+    }
+
     function _attemptAllViaSelfCall(
         uint256 iterations
     ) internal returns (bool) {
+        uint256 gasBudget = _attemptGasBudget();
+        if (gasBudget == 0) return false;
+
         // Self-call gives us a hard failure boundary:
-        // any revert in deep execution is captured as bytes and does not bubble.
-        (bool successCall, bytes memory returndata) = address(this).call(
-            abi.encodeWithSelector(this.attemptAllInternal.selector, iterations)
-        );
+        // any revert in deep execution is captured as bytes and does not bubble,
+        // and the explicit budget bounds what a failure can cost the user.
+        (bool successCall, bytes memory returndata) = address(this).call{
+            gas: gasBudget
+        }(abi.encodeWithSelector(this.attemptAllInternal.selector, iterations));
 
         bool tradeSuccess = successCall && abi.decode(returndata, (bool));
         return successCall && tradeSuccess;
@@ -267,6 +315,26 @@ contract ArbHook is
 
     function setHookMaxIterations(uint256 newMaxIterations) external onlyOwner {
         hookMaxIterations = newMaxIterations;
+    }
+
+    /// @notice Set the gas withheld for swap settlement and the ceiling on one attempt.
+    /// @param gasReserve Gas guaranteed to remain for the caller after the attempt.
+    /// @param gasLimit Maximum gas one attempt may consume; zero removes the ceiling.
+    function setHookGasBounds(
+        uint32 gasReserve,
+        uint32 gasLimit
+    ) external onlyOwner {
+        if (gasReserve == 0) revert ArbErrors.InvalidGasReserve();
+        hookGasReserve = gasReserve;
+        hookGasLimit = gasLimit;
+    }
+
+    function getGasBounds()
+        external
+        view
+        returns (uint32 gasReserve, uint32 gasLimit)
+    {
+        return (hookGasReserve, hookGasLimit);
     }
 
     function setLenderForToken(
@@ -612,21 +680,33 @@ contract ArbHook is
         bool isPoolAV3 = poolAType == ArbUtils.PoolType.V3 || poolAType == ArbUtils.PoolType.PANCAKESWAP_V3;
         bool isPoolBV3 = poolBType == ArbUtils.PoolType.V3 || poolBType == ArbUtils.PoolType.PANCAKESWAP_V3;
         uint256 refinedV3Principal;
-        uint256 expectedRouteProfit;
+        // Raw-token profit estimate for the pre-loan economic screen. Only the
+        // V2/V2 and mixed sizing paths produce a figure that is comparable to
+        // currency: both simulate each leg with real reserves or swap math and
+        // deduct both pool fees. The V3/V3 path deliberately leaves this zero.
+        uint256 expectedNetProfit;
         if (isPoolAV3 && isPoolBV3) {
             // Reuse the executor's existing V3 sizing model for the first loan.
             // This reads current pool state but does not add tick traversal.
-            (principal, refinedV3Principal, expectedRouteProfit) = _deriveV3Principal(
+            uint256 edgeScore;
+            (principal, refinedV3Principal, edgeScore) = _deriveV3Principal(
                 poolA_addr, poolB_addr, startToken, intermediateToken, poolAType, poolBType, principalCap
             );
-            if (principal == 0) return (false, 0, 0);
+            // `edgeScore` only answers "does some edge exist here". The V3/V3
+            // search ranks candidate chunks with a linearly scaled model that
+            // omits pool A's fee, so its magnitude can differ from realized
+            // profit by orders of magnitude in either direction. Screening it
+            // against minNetProfit rejects genuinely profitable routes at random;
+            // minNetProfit is enforced exactly against realized balances in
+            // onFlashLoan, which is authoritative for every route type.
+            if (principal == 0 || edgeScore == 0) return (false, 0, 0);
         } else if (!isPoolAV3 && !isPoolBV3) {
-            (principal, expectedRouteProfit) = _deriveV2Principal(
+            (principal, expectedNetProfit) = _deriveV2Principal(
                 poolA_addr, poolB_addr, startToken, intermediateToken, poolAType, poolBType, principalCap
             );
             if (principal == 0) return (false, 0, 0);
         } else {
-            (principal, expectedRouteProfit) = _deriveMixedPrincipal(
+            (principal, expectedNetProfit) = _deriveMixedPrincipal(
                 poolA_addr, poolB_addr, startToken, intermediateToken, poolAType, poolBType, principalCap
             );
             if (principal == 0) return (false, 0, 0);
@@ -643,12 +723,12 @@ contract ArbHook is
         if (_feeExceedsCap(principal, fee, maxFeeBps))
             return (false, 0, 0);
         if (
-            expectedRouteProfit > 0 &&
-            (expectedRouteProfit <= fee ||
-                expectedRouteProfit - fee < minNetProfit)
+            expectedNetProfit > 0 &&
+            (expectedNetProfit <= fee ||
+                expectedNetProfit - fee < minNetProfit)
         ) return (false, 0, 0);
 
-        address beneficiary = activeAttemptProfitRecipient;
+        address beneficiary = _activeProfitRecipient();
         if (beneficiary == address(0)) return (false, 0, 0);
 
         FlashLoanExecutionParams memory params = FlashLoanExecutionParams({
@@ -665,7 +745,7 @@ contract ArbHook is
 
         (bool loanRequested, bool loanReverted) = _requestFlashLoan(lender, startToken, principal, loanData);
         if (loanRequested || !loanReverted) {
-            return (_flashLastTradeSuccess, _flashLastProfit, _flashLastIterations);
+            return (_flashLastTradeSuccess(), _flashLastProfit(), _flashLastIterations());
         }
 
         // A reverted coarse V3 loan leaves pool state unchanged. Retry once with
@@ -689,7 +769,7 @@ contract ArbHook is
 
             (loanRequested, loanReverted) = _requestFlashLoan(lender, startToken, retryPrincipal, loanData);
             if (loanRequested) {
-                return (_flashLastTradeSuccess, _flashLastProfit, _flashLastIterations);
+                return (_flashLastTradeSuccess(), _flashLastProfit(), _flashLastIterations());
             }
             if (!loanReverted) break;
 
@@ -707,19 +787,17 @@ contract ArbHook is
         returns (bool loanRequested, bool loanReverted)
     {
 
-        _activeLender = lender;
-        _activeLoanToken = token;
-        _activeLoanAmount = principal;
-        _activeFlashContextHash = _flashContextHash(
-            lender,
-            token,
-            principal,
-            loanData
+        _tstore(_T_LENDER, uint256(uint160(lender)));
+        _tstore(_T_LOAN_TOKEN, uint256(uint160(token)));
+        _tstore(_T_LOAN_AMOUNT, principal);
+        _tstore(
+            _T_FLASH_CONTEXT,
+            uint256(_flashContextHash(lender, token, principal, loanData))
         );
 
-        _flashLastTradeSuccess = false;
-        _flashLastProfit = 0;
-        _flashLastIterations = 0;
+        _tstore(_T_LAST_SUCCESS, 0);
+        _tstore(_T_LAST_PROFIT, 0);
+        _tstore(_T_LAST_ITERATIONS, 0);
 
         try
             IERC3156FlashLender(lender).flashLoan(
@@ -744,16 +822,16 @@ contract ArbHook is
         uint256 fee,
         bytes calldata data
     ) external override returns (bytes32) {
-        if (msg.sender != _activeLender) {
+        if (msg.sender != _activeLender()) {
             revert ArbErrors.InvalidFlashLender();
         }
         if (initiator != address(this))
             revert ArbErrors.InvalidFlashInitiator();
-        if (token != _activeLoanToken || amount != _activeLoanAmount) {
+        if (token != _activeLoanToken() || amount != _activeLoanAmount()) {
             revert ArbErrors.FlashLoanMismatch();
         }
         if (
-            _activeFlashContextHash !=
+            _activeFlashContextHash() !=
             _flashContextHash(msg.sender, token, amount, data)
         ) {
             revert ArbErrors.FlashContextMismatch();
@@ -810,9 +888,9 @@ contract ArbHook is
             uint256(netProfit) < minNetProfit
         ) revert ArbErrors.FlashProfitBelowMinimum();
 
-        _flashLastTradeSuccess = true;
-        _flashLastProfit = netProfit;
-        _flashLastIterations = iters;
+        _tstore(_T_LAST_SUCCESS, 1);
+        _tstore(_T_LAST_PROFIT, uint256(netProfit));
+        _tstore(_T_LAST_ITERATIONS, iters);
 
         IERC20(token).safeTransfer(params.beneficiary, uint256(netProfit));
 
@@ -866,6 +944,12 @@ contract ArbHook is
 
         IERC20 startTokenContract = IERC20(startToken);
         IERC20 intermediateTokenContract = IERC20(intermediateToken);
+        // Any intermediate balance held before this route runs belongs to the hook,
+        // not to this attempt. Unwinding is measured against it so a pre-existing
+        // balance is never spent and never counted as residue.
+        uint256 intermediateAtEntry = intermediateTokenContract.balanceOf(
+            address(this)
+        );
         // Minimum practical trade size for this token precision (e.g. 1e14 for 18-dec tokens).
         uint256 minChunkStartToken = _minChunk(startToken);
         // Guardrail to avoid "winning tiny amount after prior losses" situations.
@@ -1173,6 +1257,9 @@ contract ArbHook is
                     rA_interm,
                     _v2FeeForPoolType(poolAType)
                 );
+                // Stop cleanly rather than reverting the whole loan: an empty quote
+                // here would otherwise discard profit already realized this call.
+                if (amountToReceive == 0) break;
                 if (
                     poolBType == ArbUtils.PoolType.V3 ||
                     poolBType == ArbUtils.PoolType.PANCAKESWAP_V3
@@ -1205,6 +1292,10 @@ contract ArbHook is
             } else {
                 intermediateReceived = 0;
             }
+
+            // A price-limited leg 1 can legitimately fill for nothing. Leg 2 has no
+            // input in that case, so stop here instead of quoting or swapping zero.
+            if (intermediateReceived == 0) break;
 
             bool swap2Success = false;
             // Leg 2: intermediateToken -> startToken on pool B.
@@ -1284,71 +1375,45 @@ contract ArbHook is
             address(this)
         );
 
-        uint256 remainingInterm = IERC20(intermediateToken).balanceOf(
-            address(this)
+        uint256 remainingInterm = _intermediateResidue(
+            intermediateTokenContract,
+            intermediateAtEntry
         );
-        if (
-            remainingInterm > 0 &&
-            intermediateToken != USDC &&
-            intermediateToken != WETH &&
-            cumulativeProfit > 0
-        ) {
-            // Best-effort unwind:
-            // if we ended with residual intermediate token and are still net profitable,
-            // try converting leftovers back to start token before final accounting.
-            uint160 unwindLimitB = 0;
-            if (
-                poolBType == ArbUtils.PoolType.V3 ||
-                poolBType == ArbUtils.PoolType.PANCAKESWAP_V3
-            ) {
-                address cachedT0B = poolMetaByAddr[poolB_addr].token0;
-                bool zeroForOneUnwind = cachedT0B == intermediateToken;
-                unwindLimitB = zeroForOneUnwind
-                    ? uint160(4295128739) + 1
-                    : uint160(
-                        1461446703485210103287273052203988822378723970342
-                    ) - 1;
-            }
-            _executeSwapInternal_noBalanceCheck(
+        if (remainingInterm > 0) {
+            // Residue must be cleared for the flash callback's exact-restoration
+            // check to pass, so this runs for every intermediate token and
+            // regardless of running profit. A partially filled leg 2 is the common
+            // cause; leaving it unwound would abort an otherwise viable route.
+            // Pool B is where leg 2 already sells the intermediate, so try it
+            // first and fall back to pool A.
+            _unwindResidue(
                 poolB_addr,
                 poolBType,
                 intermediateToken,
                 startToken,
-                remainingInterm,
-                unwindLimitB
+                remainingInterm
             );
 
-            remainingInterm = IERC20(intermediateToken).balanceOf(
-                address(this)
+            remainingInterm = _intermediateResidue(
+                intermediateTokenContract,
+                intermediateAtEntry
             );
             if (remainingInterm > 0) {
-                uint160 unwindLimitA = 0;
-                if (
-                    poolAType == ArbUtils.PoolType.V3 ||
-                    poolAType == ArbUtils.PoolType.PANCAKESWAP_V3
-                ) {
-                    address cachedT0A2 = poolMetaByAddr[poolA_addr].token0;
-                    bool zeroForOneUnwindA = cachedT0A2 == intermediateToken;
-                    unwindLimitA = zeroForOneUnwindA
-                        ? uint160(4295128739) + 1
-                        : uint160(
-                            1461446703485210103287273052203988822378723970342
-                        ) - 1;
-                }
-                _executeSwapInternal_noBalanceCheck(
+                _unwindResidue(
                     poolA_addr,
                     poolAType,
                     intermediateToken,
                     startToken,
-                    remainingInterm,
-                    unwindLimitA
+                    remainingInterm
                 );
             }
 
-            remainingInterm = IERC20(intermediateToken).balanceOf(
-                address(this)
-            );
-            if (remainingInterm > 0) {
+            if (
+                _intermediateResidue(
+                    intermediateTokenContract,
+                    intermediateAtEntry
+                ) > 0
+            ) {
                 revert ArbErrors.UnwindFailed();
             }
         }
@@ -1363,6 +1428,72 @@ contract ArbHook is
         }
 
         return (true, cumulativeProfit, iterations, totalAmountSwapped);
+    }
+
+    /// @dev Intermediate tokens acquired by the in-flight route, excluding any
+    ///      balance the hook already held when the route started.
+    function _intermediateResidue(
+        IERC20 intermediateTokenContract,
+        uint256 intermediateAtEntry
+    ) private view returns (uint256) {
+        uint256 balance = intermediateTokenContract.balanceOf(address(this));
+        unchecked {
+            return balance > intermediateAtEntry
+                ? balance - intermediateAtEntry
+                : 0;
+        }
+    }
+
+    /// @dev Best-effort conversion of leftover intermediate tokens back to the start
+    ///      token. Handles V2 pools as well as V3 so a V2/V2 route can also unwind.
+    function _unwindResidue(
+        address poolAddress,
+        ArbUtils.PoolType poolType,
+        address intermediateToken,
+        address startToken,
+        uint256 amount
+    ) private {
+        if (
+            poolType == ArbUtils.PoolType.V3 ||
+            poolType == ArbUtils.PoolType.PANCAKESWAP_V3
+        ) {
+            bool zeroForOne = poolMetaByAddr[poolAddress].token0 ==
+                intermediateToken;
+            _executeSwapInternal_noBalanceCheck(
+                poolAddress,
+                poolType,
+                intermediateToken,
+                startToken,
+                amount,
+                zeroForOne
+                    ? uint160(4295128739) + 1
+                    : uint160(
+                        1461446703485210103287273052203988822378723970342
+                    ) - 1
+            );
+            return;
+        }
+
+        (uint112 reserveInterm, uint112 reserveStart, ) = arbLib
+            ._getV2ReservesForTokens(
+                IUniswapV2Pair(poolAddress),
+                intermediateToken,
+                startToken
+            );
+        uint256 amountOut = arbLib.getAmountOut(
+            amount,
+            reserveInterm,
+            reserveStart,
+            _v2FeeForPoolType(poolType)
+        );
+        if (amountOut == 0) return;
+        _executeV2FlashSwap(
+            IUniswapV2Pair(poolAddress),
+            startToken,
+            amountOut,
+            intermediateToken,
+            amount
+        );
     }
 
     // ----------------------- Swap helpers (V3/V2) --------------------------
@@ -1410,7 +1541,7 @@ contract ArbHook is
             poolAddress
         );
 
-        activeSwapContextHash = keccak256(abi.encode(poolAddress, data));
+        _setActiveSwapContextHash(keccak256(abi.encode(poolAddress, data)));
         if (poolType == ArbUtils.PoolType.V3) {
             try
                 IUniswapV3Pool(poolAddress).swap(
@@ -1440,7 +1571,8 @@ contract ArbHook is
                 success = false;
             }
         }
-        activeSwapContextHash = bytes32(0);
+        // The callback consumes the context; this clears it when no callback ran.
+        _setActiveSwapContextHash(bytes32(0));
     }
 
     // ----------------------------- Callbacks -------------------------------
@@ -1465,7 +1597,7 @@ contract ArbHook is
         int256 amount1Delta,
         bytes calldata data
     ) internal {
-        _requireActiveSwapCallback(data);
+        _consumeActiveSwapCallback(data);
         (
             address decodedTokenIn,
             address decodedCaller,
@@ -1538,7 +1670,7 @@ contract ArbHook is
     }
 
     function _v2SwapCallback(bytes calldata data) private {
-        _requireActiveSwapCallback(data);
+        _consumeActiveSwapCallback(data);
         (address tokenToPay, uint256 amountToPay) = abi.decode(
             data,
             (address, uint256)
@@ -1563,12 +1695,17 @@ contract ArbHook is
         }
     }
 
-    function _requireActiveSwapCallback(bytes calldata data) private view {
-        bytes32 context = activeSwapContextHash;
+    /// @dev Validates and immediately consumes the installed swap context. Each
+    ///      pool swap this hook initiates expects exactly one repayment callback,
+    ///      so a single-use context stops a pool from being paid more than once
+    ///      inside its own swap.
+    function _consumeActiveSwapCallback(bytes calldata data) private {
+        bytes32 context = _activeSwapContextHash();
         if (
             context == bytes32(0) ||
             context != keccak256(abi.encode(msg.sender, data))
         ) revert ArbErrors.CallbackUnexpectedPool();
+        _setActiveSwapContextHash(bytes32(0));
     }
 
     // ----------------------- Internal helpers ------------------------------
@@ -1591,10 +1728,10 @@ contract ArbHook is
     }
 
     function _clearActiveFlashContext() private {
-        _activeLender = address(0);
-        _activeLoanToken = address(0);
-        _activeLoanAmount = 0;
-        _activeFlashContextHash = bytes32(0);
+        _tstore(_T_LENDER, 0);
+        _tstore(_T_LOAN_TOKEN, 0);
+        _tstore(_T_LOAN_AMOUNT, 0);
+        _tstore(_T_FLASH_CONTEXT, 0);
     }
 
     function _deriveV2Principal(
@@ -1655,6 +1792,11 @@ contract ArbHook is
     /// @dev Determines the V3/V3 flash principal with the same bounded liquidity,
     ///      spread, and impact calculation used by execution. The coarse upper bound
     ///      is borrowed so executeIterativeArb retains its original binary-search range.
+    ///      Funding only the refined chunk was measured against the fixed-block gate
+    ///      and is wrong: the executor re-derives its range from its own balance, so a
+    ///      tighter loan collapses the search window and the selected chunk with it.
+    ///      Any fee paid on unused principal is the cost of that two-phase sizing; a
+    ///      zero-fee lender makes it free without touching route selection.
     function _deriveV3Principal(
         address poolA,
         address poolB,
@@ -1663,7 +1805,7 @@ contract ArbHook is
         ArbUtils.PoolType poolAType,
         ArbUtils.PoolType poolBType,
         uint256 principalCap
-    ) internal view returns (uint256 principal, uint256 refinedPrincipal, uint256 expectedProfit) {
+    ) internal view returns (uint256 principal, uint256 refinedPrincipal, uint256 edgeScore) {
         if (principalCap == 0) return (0, 0, 0);
 
         (bool tickAOk, int24 tickA) = _tryReadV3Tick(poolA, poolAType);
@@ -1690,11 +1832,11 @@ contract ArbHook is
             arbLib.getV3SwapParameters(poolA, poolB, startToken, intermediateToken, config, poolAType, poolBType);
         if (!params.shouldContinue) return (0, 0, 0);
 
-        int256 estimatedProfit;
-        (refinedPrincipal, estimatedProfit) = arbLib.findBestV3Chunk(params, config.minChunkForStartToken);
+        int256 score;
+        (refinedPrincipal, score) = arbLib.findBestV3Chunk(params, config.minChunkForStartToken);
         if (refinedPrincipal == 0) return (0, 0, 0);
 
-        return (params.chunkToSwap, refinedPrincipal, uint256(estimatedProfit));
+        return (params.chunkToSwap, refinedPrincipal, uint256(score));
     }
 
     function _tryReadV3Tick(address pool, ArbUtils.PoolType poolType) private view returns (bool ok, int24 tick) {

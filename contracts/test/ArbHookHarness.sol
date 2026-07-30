@@ -38,9 +38,9 @@ contract ArbHookHarness is ArbHook {
     function validateHookAddress(ArbHook) internal pure override {}
 
     function attemptAllForTest(uint256 iterations) external onlyOwner returns (bool) {
-        activeAttemptProfitRecipient = owner();
+        _setActiveProfitRecipient(owner());
         bool success = _attemptAllViaSelfCall(iterations);
-        activeAttemptProfitRecipient = address(0);
+        _setActiveProfitRecipient(address(0));
         return success;
     }
 
@@ -75,9 +75,9 @@ contract ArbHookHarness is ArbHook {
         address tokenB,
         uint256 maxIter
     ) external onlyOwner returns (int256 profit, uint256 iterations) {
-        activeAttemptProfitRecipient = owner();
+        _setActiveProfitRecipient(owner());
         (profit, iterations) = _runPair(tokenA, tokenB, maxIter);
-        activeAttemptProfitRecipient = address(0);
+        _setActiveProfitRecipient(address(0));
     }
 
     function runFlashArbForTest(
@@ -89,7 +89,7 @@ contract ArbHookHarness is ArbHook {
         ArbUtils.PoolType poolAType,
         ArbUtils.PoolType poolBType
     ) external onlyOwner returns (bool success, int256 profit, uint256 iterations) {
-        activeAttemptProfitRecipient = owner();
+        _setActiveProfitRecipient(owner());
         (bool callOk, bytes memory returndata) = address(this).call(
             abi.encodeWithSelector(
                 this.executeIterativeArbViaFlash.selector,
@@ -102,9 +102,27 @@ contract ArbHookHarness is ArbHook {
                 poolBType
             )
         );
-        activeAttemptProfitRecipient = address(0);
+        _setActiveProfitRecipient(address(0));
         if (!callOk) return (false, 0, 0);
         return abi.decode(returndata, (bool, int256, uint256));
+    }
+
+    /// @notice Exposes the V3/V3 sizing outputs, including the edge score.
+    /// @dev Used to document how far the score diverges from realized profit, which
+    ///      is why it screens for the presence of edge only and never for a minimum
+    ///      profit amount. See `ArbMath._edgeScore`.
+    function previewV3RouteEstimate(
+        address poolA,
+        address poolB,
+        address startToken,
+        address intermediateToken,
+        ArbUtils.PoolType poolAType,
+        ArbUtils.PoolType poolBType,
+        uint256 principalCap
+    ) external view returns (uint256 principal, uint256 refined, uint256 edgeScore) {
+        return _deriveV3Principal(
+            poolA, poolB, startToken, intermediateToken, poolAType, poolBType, principalCap
+        );
     }
 
     function setTestProfitBps(uint256 bps) external onlyOwner {
