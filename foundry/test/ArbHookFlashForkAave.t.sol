@@ -8,6 +8,7 @@ import {PoolManagerHarness} from "../../contracts/test/PoolManagerHarness.sol";
 import {PoolModifyLiquidityTestWrapper} from "../../contracts/test/PoolModifyLiquidityTestWrapper.sol";
 import {TestToken} from "../../contracts/test/TestToken.sol";
 import {AaveV3ERC3156Adapter} from "../../contracts/AaveV3ERC3156Adapter.sol";
+import {MorphoERC3156Adapter} from "../../contracts/MorphoERC3156Adapter.sol";
 import {ArbitrageLogic} from "../../contracts/ArbitrageLogic.sol";
 import {ArbUtils} from "../../contracts/ArbUtils.sol";
 import {IUniswapV2Pair} from "../../contracts/interfaces/IUniswapV2Pair.sol";
@@ -40,6 +41,7 @@ contract ArbHookFlashForkAaveTest is Test {
     address internal constant UNISWAP_V2_WETH_USDC = 0x88A43bbDF9D098eEC7bCEda4e2494615dfD9bB9C;
     address internal constant PANCAKE_V2_WETH_USDC = 0x79474223AEdD0339780baCcE75aBDa0BE84dcBF9;
     address internal constant UNISWAP_V3_WETH_USDC = 0xd0b53D9277642d899DF5C87A3966A349A798F224;
+    address internal constant MORPHO_BLUE = 0xBBBBBbbBBb9cC5e90e3b3Af64bdAF62C37EEFFCb;
     uint256 internal constant FORK_BLOCK = 33_942_262;
     uint256 internal constant TEST_FLASH_PRINCIPAL_USDC = 5_000e6;
     uint256 internal constant PARITY_MAX_ITER = 2;
@@ -458,6 +460,304 @@ contract ArbHookFlashForkAaveTest is Test {
         assertEq(profitableRounds, roundsToRun, "all tested rounds should remain profitable");
         if (requirePrincipalVariance && roundsToRun > 1) {
             assertTrue(sawPrincipalVariance, "flash principal should adapt across rounds");
+        }
+    }
+
+    /// @notice Replays the ten-round sequence funded by zero-fee Morpho Blue.
+    /// @dev The Aave-funded gate is the historical baseline; this is the intended
+    ///      canary configuration. Morpho Blue is deployed and USDC-funded at the
+    ///      pinned block, so the two are directly comparable: same pool book, same
+    ///      funding, same routes, with the 5 bps premium removed.
+    function testForkMorphoAttemptAllBeatsAaveFundedSequence() public {
+        if (!forkEnabled) {
+            vm.skip(true, "set RUN_FLASH_FORK_INTEGRATION=true and BASE_RPC_URL");
+            return;
+        }
+
+        MorphoERC3156Adapter morpho = new MorphoERC3156Adapter(MORPHO_BLUE, USDC);
+        hook.setLenderForToken(USDC, address(morpho));
+
+        _configureParityPoolBook();
+        _replicateParityFundingState();
+        _seedCbBtcUsdcGap();
+        hook.setFlashPrincipalForToken(USDC, PARITY_FLASH_CAP_USDC);
+
+        RoundExpectation[PARITY_ROUNDS] memory expected = _legacyRoundExpectations();
+        uint256 totalNet;
+        uint256 totalFees;
+
+        emit log("===== Morpho-funded round sequence =====");
+        for (uint256 round = 0; round < PARITY_ROUNDS; ++round) {
+            vm.recordLogs();
+            bool success = hook.attemptAllForTest(PARITY_MAX_ITER);
+            assertTrue(success, "round should remain profitable with a zero-fee lender");
+            Settlement memory settled = _extractProfitableSettlement(vm.getRecordedLogs());
+
+            assertEq(settled.buyPool, expected[round].buyPool, "buy route drifted from legacy");
+            assertEq(settled.sellPool, expected[round].sellPool, "sell route drifted from legacy");
+            assertEq(settled.fee, 0, "morpho must charge no premium");
+            assertGt(settled.netProfit, 0, "round should have positive net profit");
+            assertEq(IERC20(WETH).balanceOf(address(hook)), 0, "hook retained intermediate WETH");
+
+            totalNet += uint256(settled.netProfit);
+            totalFees += settled.fee;
+
+            emit log_named_uint("round", round + 1);
+            emit log_named_uint("  net profit (raw usdc)", uint256(settled.netProfit));
+        }
+
+        emit log("");
+        emit log_named_uint("total net profit (raw usdc)", totalNet);
+        emit log_named_uint("total fees paid (raw usdc)", totalFees);
+        emit log("========================================");
+
+        assertEq(totalFees, 0, "zero-fee lender should pay no premium at all");
+        // The Aave-funded sequence nets 8,365,681 raw USDC across the same rounds.
+        assertGt(totalNet, 8_365_681, "morpho funding should beat the aave baseline");
+    }
+
+    /// @notice Sweeps `minSpreadBps` across the ten-round sequence and reports what
+    ///         each threshold earns net of execution gas.
+    /// @dev Opt-in via RUN_SPREAD_CALIBRATION=true because it replays the whole
+    ///      sequence once per candidate. `minSpreadBps` is compared against a V3 tick
+    ///      delta, so it gates V3/V3 routes only; V2/V2 and mixed routes are
+    ///      unaffected by anything this measures.
+    function testCalibrateMinSpreadBps() public {
+        if (!forkEnabled) {
+            vm.skip(true, "set RUN_FLASH_FORK_INTEGRATION=true and BASE_RPC_URL");
+            return;
+        }
+        if (!vm.envOr("RUN_SPREAD_CALIBRATION", false)) {
+            vm.skip(true, "set RUN_SPREAD_CALIBRATION=true");
+            return;
+        }
+
+        // Raw USDC cost of one successful hook execution. Override GAS_COST_RAW_USDC
+        // to re-run the sweep against current-head gas and ETH/USDC conditions.
+        uint256 gasCostRawUsdc = vm.envOr("GAS_COST_RAW_USDC", uint256(12324));
+
+        uint16[9] memory candidates =
+            [uint16(1), 5, 10, 20, 40, 60, 80, 120, 200];
+
+        emit log("===== minSpreadBps calibration =====");
+        emit log_named_uint("assumed gas cost per execution (raw usdc)", gasCostRawUsdc);
+
+        for (uint256 c = 0; c < candidates.length; ++c) {
+            uint256 snapshot = vm.snapshotState();
+
+            _configureParityPoolBook();
+            hook.setMinSpreadBps(candidates[c]);
+            _replicateParityFundingState();
+            _seedCbBtcUsdcGap();
+            hook.setFlashPrincipalForToken(USDC, PARITY_FLASH_CAP_USDC);
+
+            uint256 executed;
+            uint256 grossNet;
+            for (uint256 round = 0; round < PARITY_ROUNDS; ++round) {
+                vm.recordLogs();
+                bool success = hook.attemptAllForTest(PARITY_MAX_ITER);
+                if (!success) continue;
+
+                Vm.Log[] memory logs = vm.getRecordedLogs();
+                int256 profit = _findAnyProfit(logs);
+                if (profit <= 0) continue;
+
+                ++executed;
+                grossNet += uint256(profit);
+            }
+
+            uint256 gasSpend = executed * gasCostRawUsdc;
+            emit log("");
+            emit log_named_uint("minSpreadBps", candidates[c]);
+            emit log_named_uint("rounds executed", executed);
+            emit log_named_uint("gross net profit (raw usdc)", grossNet);
+            emit log_named_uint("gas spend (raw usdc)", gasSpend);
+            if (grossNet >= gasSpend) {
+                emit log_named_uint("PROFIT after gas (raw usdc)", grossNet - gasSpend);
+            } else {
+                emit log_named_uint("LOSS after gas (raw usdc)", gasSpend - grossNet);
+            }
+
+            vm.revertToState(snapshot);
+        }
+        emit log("====================================");
+    }
+
+    /// @notice Sweeps the absolute minimum-net-profit floor across the same sequence.
+    /// @dev This is the economically meaningful filter: unlike `minSpreadBps` it is
+    ///      denominated in the borrowed token, so it compares directly against the
+    ///      gas cost of executing. Opt-in via RUN_SPREAD_CALIBRATION=true.
+    function testCalibrateMinNetProfit() public {
+        if (!forkEnabled) {
+            vm.skip(true, "set RUN_FLASH_FORK_INTEGRATION=true and BASE_RPC_URL");
+            return;
+        }
+        if (!vm.envOr("RUN_SPREAD_CALIBRATION", false)) {
+            vm.skip(true, "set RUN_SPREAD_CALIBRATION=true");
+            return;
+        }
+
+        uint256 gasCostRawUsdc = vm.envOr("GAS_COST_RAW_USDC", uint256(12324));
+        uint256[8] memory floors =
+            [uint256(1), 2_000, 4_000, 6_162, 8_000, 10_000, 12_324, 24_648];
+
+        emit log("===== minNetProfit calibration =====");
+        emit log_named_uint("assumed gas cost per execution (raw usdc)", gasCostRawUsdc);
+
+        for (uint256 c = 0; c < floors.length; ++c) {
+            uint256 snapshot = vm.snapshotState();
+
+            _configureParityPoolBook();
+            _replicateParityFundingState();
+            _seedCbBtcUsdcGap();
+            hook.setFlashPrincipalForToken(USDC, PARITY_FLASH_CAP_USDC);
+            hook.setMinNetProfitForToken(USDC, floors[c]);
+
+            uint256 executed;
+            uint256 grossNet;
+            for (uint256 round = 0; round < PARITY_ROUNDS; ++round) {
+                vm.recordLogs();
+                bool success = hook.attemptAllForTest(PARITY_MAX_ITER);
+                if (!success) continue;
+
+                int256 profit = _findAnyProfit(vm.getRecordedLogs());
+                if (profit <= 0) continue;
+
+                ++executed;
+                grossNet += uint256(profit);
+                emit log_named_uint("  executed round", round + 1);
+                emit log_named_uint("    net profit (raw usdc)", uint256(profit));
+            }
+
+            uint256 gasSpend = executed * gasCostRawUsdc;
+            emit log("");
+            emit log_named_uint("minNetProfit floor (raw usdc)", floors[c]);
+            emit log_named_uint("rounds executed", executed);
+            emit log_named_uint("gross net profit (raw usdc)", grossNet);
+            emit log_named_uint("gas spend (raw usdc)", gasSpend);
+            if (grossNet >= gasSpend) {
+                emit log_named_uint("PROFIT after gas (raw usdc)", grossNet - gasSpend);
+            } else {
+                emit log_named_uint("LOSS after gas (raw usdc)", gasSpend - grossNet);
+            }
+
+            vm.revertToState(snapshot);
+        }
+        emit log("====================================");
+    }
+
+    /// @notice Compares the pre-loan profit estimate against what each round realizes.
+    /// @dev The estimate is what `minNetProfit` is checked against before borrowing.
+    ///      If it is systematically low, the floor cannot be set near true breakeven.
+    function testPreLoanEstimateVersusRealized() public {
+        if (!forkEnabled) {
+            vm.skip(true, "set RUN_FLASH_FORK_INTEGRATION=true and BASE_RPC_URL");
+            return;
+        }
+        if (!vm.envOr("RUN_SPREAD_CALIBRATION", false)) {
+            vm.skip(true, "set RUN_SPREAD_CALIBRATION=true");
+            return;
+        }
+
+        _configureParityPoolBook();
+        _replicateParityFundingState();
+        _seedCbBtcUsdcGap();
+        hook.setFlashPrincipalForToken(USDC, PARITY_FLASH_CAP_USDC);
+
+        emit log("===== pre-loan estimate vs realized =====");
+        for (uint256 round = 0; round < PARITY_ROUNDS; ++round) {
+            vm.recordLogs();
+            bool success = hook.attemptAllForTest(PARITY_MAX_ITER);
+            if (!success) continue;
+            Settlement memory settled = _extractProfitableSettlement(vm.getRecordedLogs());
+
+            // Re-derive the estimate for the route that just executed. Pool state has
+            // moved, so this is indicative of magnitude rather than the exact value
+            // the gate saw, which is enough to show the scale of the gap.
+            emit log("");
+            emit log_named_uint("round", round + 1);
+            emit log_named_uint("realized net (raw usdc)", uint256(settled.netProfit));
+            try hook.previewV3RouteEstimate(
+                settled.sellPool,
+                settled.buyPool,
+                USDC,
+                WETH,
+                ArbUtils.PoolType.V3,
+                ArbUtils.PoolType.V3,
+                PARITY_FLASH_CAP_USDC
+            ) returns (uint256, uint256, uint256 estimate) {
+                emit log_named_uint("post-trade estimate (raw usdc)", estimate);
+            } catch {
+                // Pancake V3 pools reject the Uniswap-typed slot0 read.
+                emit log("post-trade estimate: n/a (pancake-typed pool)");
+            }
+        }
+        emit log("=========================================");
+    }
+
+    /// @notice Tests whether the ten-round fixture is a cascade: does round N's
+    ///         opportunity only exist because round N-1 executed?
+    /// @dev If seeding round 1 at a floor of 1 lets later rounds clear a floor that
+    ///      otherwise halts the sequence, the fixture cannot be used to calibrate
+    ///      `minNetProfit`, because its rounds are not independent triggers the way
+    ///      production swaps are.
+    function testRoundSequenceIsACascade() public {
+        if (!forkEnabled) {
+            vm.skip(true, "set RUN_FLASH_FORK_INTEGRATION=true and BASE_RPC_URL");
+            return;
+        }
+        if (!vm.envOr("RUN_SPREAD_CALIBRATION", false)) {
+            vm.skip(true, "set RUN_SPREAD_CALIBRATION=true");
+            return;
+        }
+
+        uint256 highFloor = 8_000;
+
+        _configureParityPoolBook();
+        _replicateParityFundingState();
+        _seedCbBtcUsdcGap();
+        hook.setFlashPrincipalForToken(USDC, PARITY_FLASH_CAP_USDC);
+
+        // Round 1 runs with no meaningful floor, every later round with the floor
+        // that halts the sequence outright when applied from the start.
+        hook.setMinNetProfitForToken(USDC, 1);
+        vm.recordLogs();
+        bool seeded = hook.attemptAllForTest(PARITY_MAX_ITER);
+        emit log_named_string("round 1 (floor=1) executed", seeded ? "yes" : "no");
+
+        hook.setMinNetProfitForToken(USDC, highFloor);
+        uint256 executed;
+        uint256 grossNet;
+        for (uint256 round = 1; round < PARITY_ROUNDS; ++round) {
+            vm.recordLogs();
+            if (!hook.attemptAllForTest(PARITY_MAX_ITER)) continue;
+            int256 profit = _findAnyProfit(vm.getRecordedLogs());
+            if (profit <= 0) continue;
+            ++executed;
+            grossNet += uint256(profit);
+            emit log_named_uint("  executed round", round + 1);
+            emit log_named_uint("    net profit (raw usdc)", uint256(profit));
+        }
+
+        emit log("");
+        emit log_named_uint("floor applied from round 2 (raw usdc)", highFloor);
+        emit log_named_uint("rounds executed after seeding", executed);
+        emit log_named_uint("gross net after seeding (raw usdc)", grossNet);
+        emit log("Compare: the same floor applied from round 1 executes 0 rounds.");
+    }
+
+    function _findAnyProfit(Vm.Log[] memory entries) private view returns (int256 best) {
+        for (uint256 i = 0; i < entries.length; ++i) {
+            if (
+                entries[i].emitter == address(hook) && entries[i].topics.length > 0
+                    && entries[i].topics[0] == FLASH_SETTLED_TOPIC0
+            ) {
+                (,,,,, int256 netProfit,,) = abi.decode(
+                    entries[i].data,
+                    (address, address, uint256, uint256, uint256, int256, uint256, address)
+                );
+                if (netProfit > best) best = netProfit;
+            }
         }
     }
 
