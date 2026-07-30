@@ -10,6 +10,10 @@ const contracts = [
     "AaveV3ERC3156Adapter",
     "../foundry/out/AaveV3ERC3156Adapter.sol/AaveV3ERC3156Adapter.json",
   ],
+  [
+    "MorphoERC3156Adapter",
+    "../foundry/out/MorphoERC3156Adapter.sol/MorphoERC3156Adapter.json",
+  ],
 ];
 
 let failed = false;
