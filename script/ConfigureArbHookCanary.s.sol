@@ -18,7 +18,10 @@ contract ConfigureArbHookCanary is Script {
 
         uint256 privateKey = vm.envUint("PRIVATE_KEY");
         ArbHook hook = ArbHook(payable(vm.envAddress("HOOK")));
-        address adapter = vm.envAddress("AAVE_ADAPTER");
+        // LENDER_ADAPTER selects which deployed ERC-3156 adapter goes live.
+        // AAVE_ADAPTER remains accepted so existing runbook invocations still work.
+        address adapter = vm.envOr("LENDER_ADAPTER", address(0));
+        if (adapter == address(0)) adapter = vm.envAddress("AAVE_ADAPTER");
         uint256 principalCap = vm.envUint("USDC_FLASH_PRINCIPAL_CAP_RAW");
         uint256 maxFeeBps = vm.envUint("USDC_MAX_FLASH_FEE_BPS");
         uint256 minNetProfit = vm.envUint("USDC_MIN_NET_PROFIT_RAW");
