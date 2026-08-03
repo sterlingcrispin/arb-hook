@@ -743,14 +743,15 @@ contract ArbHook is
         });
         bytes memory loanData = abi.encode(params);
 
-        (bool loanRequested, bool loanReverted) = _requestFlashLoan(lender, startToken, principal, loanData);
+        (bool loanRequested, bool loanReverted, bool belowMinimum) =
+            _requestFlashLoan(lender, startToken, principal, loanData);
         if (loanRequested || !loanReverted) {
             return (_flashLastTradeSuccess(), _flashLastProfit(), _flashLastIterations());
         }
+        if (belowMinimum) return (false, 0, 0);
 
-        // A reverted coarse V3 loan leaves pool state unchanged. Retry once with
-        // the existing refined chunk so financing cost cannot suppress a smaller,
-        // otherwise viable opportunity. Successful loans are never retried.
+        // A retryable coarse V3 failure leaves pool state unchanged. Economic
+        // rejection is final; other failures may retry with a smaller chunk.
         if (!isPoolAV3 || !isPoolBV3 || refinedV3Principal == 0 || refinedV3Principal >= principal) {
             return (false, 0, 0);
         }
@@ -767,10 +768,12 @@ contract ArbHook is
             if (_feeExceedsCap(retryPrincipal, fee, maxFeeBps))
                 return (false, 0, 0);
 
-            (loanRequested, loanReverted) = _requestFlashLoan(lender, startToken, retryPrincipal, loanData);
+            (loanRequested, loanReverted, belowMinimum) =
+                _requestFlashLoan(lender, startToken, retryPrincipal, loanData);
             if (loanRequested) {
                 return (_flashLastTradeSuccess(), _flashLastProfit(), _flashLastIterations());
             }
+            if (belowMinimum) break;
             if (!loanReverted) break;
 
             retryPrincipal >>= 1;
@@ -784,7 +787,7 @@ contract ArbHook is
 
     function _requestFlashLoan(address lender, address token, uint256 principal, bytes memory loanData)
         private
-        returns (bool loanRequested, bool loanReverted)
+        returns (bool loanRequested, bool loanReverted, bool belowMinimum)
     {
 
         _tstore(_T_LENDER, uint256(uint160(lender)));
@@ -808,8 +811,15 @@ contract ArbHook is
             )
         returns (bool ok) {
             loanRequested = ok;
-        } catch {
+        } catch (bytes memory reason) {
             loanReverted = true;
+            if (reason.length >= 4) {
+                bytes4 selector;
+                assembly ("memory-safe") {
+                    selector := mload(add(reason, 0x20))
+                }
+                belowMinimum = selector == ArbErrors.FlashProfitBelowMinimum.selector;
+            }
         }
 
         _clearActiveFlashContext();
