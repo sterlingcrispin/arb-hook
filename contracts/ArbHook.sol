@@ -1348,6 +1348,7 @@ contract ArbHook is
                     rB_start,
                     _v2FeeForPoolType(poolBType)
                 );
+                if (amountToReceive2 == 0) break;
                 swap2Success = _executeV2FlashSwap(
                     IUniswapV2Pair(poolB_addr),
                     startToken,
