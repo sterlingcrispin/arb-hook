@@ -486,7 +486,7 @@ contract ArbHookFlashForkAaveTest is Test {
     ///      canary configuration. Morpho Blue is deployed and USDC-funded at the
     ///      pinned block, so the two are directly comparable: same pool book, same
     ///      funding, same routes, with the 5 bps premium removed.
-    function testForkMorphoAttemptAllBeatsAaveFundedSequence() public {
+    function testForkMorphoAttemptAllTracksLegacyRoundSequenceFull() public {
         if (!forkEnabled) {
             vm.skip(true, "set RUN_FLASH_FORK_INTEGRATION=true and BASE_RPC_URL");
             return;

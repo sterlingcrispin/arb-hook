@@ -44,14 +44,14 @@ This is the pair-level controller with bounded retries.
 
 - Up to 2 attempts:
   - find best pools
-  - skip a duplicate quantized quote within this invocation
-  - execute via low-level self-call to isolate reverts
+  - execute via a gas-bounded low-level self-call to isolate reverts
 - Excludes the failed pool combination before its fallback discovery pass.
 
 Why this is done:
 
-- Prevents repeated retries on the same quote during one scan.
 - Avoids revert cascades from one bad route.
+- Gives each route at most half the remaining scanner gas, so one expensive V3
+  path cannot starve the fallback or later base/counter pairs.
 - Keeps no failed-quote state across later user swaps, so a temporary lender or
   route failure cannot poison a future opportunity.
 
@@ -67,10 +67,10 @@ Single pass over `tokenPools[tokenA]`:
 
 This is deliberately simple and fast; it is rerun frequently inside callback-driven execution.
 
-The initial canary registers only USDC-base routes. The legacy V2/V3 price
-normalization preserves the historical USDC-base ordering, but V3 prices can
-round to zero when WETH is the base. General base-token orientation is therefore
-not claimed by the canary and should be corrected only with parity coverage.
+The price normalizer handles both token orientations with exact quotient and
+remainder arithmetic over the full V3 sqrt-price range. The initial canary still
+registers only USDC-base routes because that is the reviewed, regression-tested
+manifest; adding a WETH-base route requires separate route and economic coverage.
 
 ## 4) Iterative Arbitrage Engine
 
@@ -85,7 +85,8 @@ Per iteration:
 
 After the loop:
 
-- Best-effort unwind of residual intermediate tokens (except USDC/WETH skip case).
+- Best-effort unwind of any residual intermediate-token delta, first through the
+  second-leg pool and then through the first-leg pool if residue remains.
 - Return the realized profit, iteration count, and total input swapped to the flash callback.
 - Emit the final route and net accounting in `FlashLoanSettled`.
 
@@ -108,6 +109,10 @@ So the implementation uses bounded heuristics:
 
 - `getV3SwapParameters`: derive a rough upper bound from spread and liquidity window.
 - `findBestV3Chunk`: bounded binary search on profit proxy.
+- The coarse upper bound is borrowed first because the unchanged executor uses
+  its balance as the search range. If execution is unprofitable, the route may
+  retry with the refined principal and one half-sized candidate. A positive
+  result below `minNetProfit` is final so retries cannot consume the whole scan.
 - The capacity calculation walks nearby tick-spacing intervals and reads
   liquidity only when those sampled ticks are initialized. It is a bounded
   sizing approximation, not a complete initialized-tick bitmap simulation.
