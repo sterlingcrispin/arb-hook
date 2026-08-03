@@ -309,6 +309,23 @@ contract ArbHookFlashForkAaveTest is Test {
             vm.skip(true, "set RUN_FLASH_FORK_INTEGRATION=true and BASE_RPC_URL"); return;
         }
 
+        _runCanonicalV4RouterLifecycle(address(adapter), false);
+    }
+
+    function testCanonicalV4RouterUsesMorphoAndPaysPackedBeneficiary() public {
+        if (!forkEnabled) {
+            vm.skip(true, "set RUN_FLASH_FORK_INTEGRATION=true and BASE_RPC_URL"); return;
+        }
+
+        MorphoERC3156Adapter morpho = new MorphoERC3156Adapter(MORPHO_BLUE, USDC);
+        _runCanonicalV4RouterLifecycle(address(morpho), true);
+    }
+
+    function _runCanonicalV4RouterLifecycle(
+        address lender,
+        bool requireZeroFee
+    ) private {
+
         IPoolManager manager = IPoolManager(V4_POOL_MANAGER);
         ArbitrageLogic logic = new ArbitrageLogic();
         bytes memory constructorArgs = abi.encode(
@@ -329,7 +346,7 @@ contract ArbHookFlashForkAaveTest is Test {
         );
         assertEq(address(hook), expected, "mined hook address mismatch");
 
-        hook.setLenderForToken(USDC, address(adapter));
+        hook.setLenderForToken(USDC, lender);
         hook.setFlashPrincipalForToken(USDC, PARITY_FLASH_CAP_USDC);
         hook.setMaxFlashFeeBpsForToken(USDC, 100);
         hook.setMinNetProfitForToken(USDC, 1);
@@ -392,6 +409,7 @@ contract ArbHookFlashForkAaveTest is Test {
         );
         assertEq(settled.beneficiary, beneficiary);
         assertEq(IERC20(USDC).balanceOf(beneficiary), uint256(settled.netProfit));
+        if (requireZeroFee) assertEq(settled.fee, 0, "Morpho charged a flash fee");
     }
 
     function _runLegacyRoundSequence(
