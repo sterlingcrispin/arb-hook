@@ -532,15 +532,18 @@ contract ArbHookFlashForkAaveTest is Test {
             return;
         }
 
-        // Raw USDC cost of one successful hook execution. Override GAS_COST_RAW_USDC
-        // to re-run the sweep against current-head gas and ETH/USDC conditions.
-        uint256 gasCostRawUsdc = vm.envOr("GAS_COST_RAW_USDC", uint256(12324));
+        // Convert measured gas for every trigger through the current-head reference
+        // replay. This sweep compares fixture settings; production calibration still
+        // requires the runbook's full swap-on/swap-off differential measurement.
+        uint256 referenceGasCostRawUsdc = vm.envOr("GAS_COST_RAW_USDC", uint256(12324));
+        uint256 referenceGasUnits = vm.envOr("GAS_COST_GAS_UNITS", uint256(1_076_889));
 
         uint16[9] memory candidates =
             [uint16(1), 5, 10, 20, 40, 60, 80, 120, 200];
 
         emit log("===== minSpreadBps calibration =====");
-        emit log_named_uint("assumed gas cost per execution (raw usdc)", gasCostRawUsdc);
+        emit log_named_uint("reference gas units", referenceGasUnits);
+        emit log_named_uint("reference gas cost (raw usdc)", referenceGasCostRawUsdc);
 
         for (uint256 c = 0; c < candidates.length; ++c) {
             uint256 snapshot = vm.snapshotState();
@@ -553,9 +556,12 @@ contract ArbHookFlashForkAaveTest is Test {
 
             uint256 executed;
             uint256 grossNet;
+            uint256 attemptGas;
             for (uint256 round = 0; round < PARITY_ROUNDS; ++round) {
                 vm.recordLogs();
+                uint256 gasBefore = gasleft();
                 bool success = hook.attemptAllForTest(PARITY_MAX_ITER);
+                attemptGas += gasBefore - gasleft();
                 if (!success) continue;
 
                 Vm.Log[] memory logs = vm.getRecordedLogs();
@@ -566,10 +572,15 @@ contract ArbHookFlashForkAaveTest is Test {
                 grossNet += uint256(profit);
             }
 
-            uint256 gasSpend = executed * gasCostRawUsdc;
+            uint256 gasSpend = _scaleGasCost(
+                attemptGas,
+                referenceGasUnits,
+                referenceGasCostRawUsdc
+            );
             emit log("");
             emit log_named_uint("minSpreadBps", candidates[c]);
             emit log_named_uint("rounds executed", executed);
+            emit log_named_uint("attempt gas across all triggers", attemptGas);
             emit log_named_uint("gross net profit (raw usdc)", grossNet);
             emit log_named_uint("gas spend (raw usdc)", gasSpend);
             if (grossNet >= gasSpend) {
@@ -597,12 +608,14 @@ contract ArbHookFlashForkAaveTest is Test {
             return;
         }
 
-        uint256 gasCostRawUsdc = vm.envOr("GAS_COST_RAW_USDC", uint256(12324));
+        uint256 referenceGasCostRawUsdc = vm.envOr("GAS_COST_RAW_USDC", uint256(12324));
+        uint256 referenceGasUnits = vm.envOr("GAS_COST_GAS_UNITS", uint256(1_076_889));
         uint256[8] memory floors =
             [uint256(1), 2_000, 4_000, 6_162, 8_000, 10_000, 12_324, 24_648];
 
         emit log("===== minNetProfit calibration =====");
-        emit log_named_uint("assumed gas cost per execution (raw usdc)", gasCostRawUsdc);
+        emit log_named_uint("reference gas units", referenceGasUnits);
+        emit log_named_uint("reference gas cost (raw usdc)", referenceGasCostRawUsdc);
 
         for (uint256 c = 0; c < floors.length; ++c) {
             uint256 snapshot = vm.snapshotState();
@@ -615,9 +628,12 @@ contract ArbHookFlashForkAaveTest is Test {
 
             uint256 executed;
             uint256 grossNet;
+            uint256 attemptGas;
             for (uint256 round = 0; round < PARITY_ROUNDS; ++round) {
                 vm.recordLogs();
+                uint256 gasBefore = gasleft();
                 bool success = hook.attemptAllForTest(PARITY_MAX_ITER);
+                attemptGas += gasBefore - gasleft();
                 if (!success) continue;
 
                 int256 profit = _findAnyProfit(vm.getRecordedLogs());
@@ -629,10 +645,15 @@ contract ArbHookFlashForkAaveTest is Test {
                 emit log_named_uint("    net profit (raw usdc)", uint256(profit));
             }
 
-            uint256 gasSpend = executed * gasCostRawUsdc;
+            uint256 gasSpend = _scaleGasCost(
+                attemptGas,
+                referenceGasUnits,
+                referenceGasCostRawUsdc
+            );
             emit log("");
             emit log_named_uint("minNetProfit floor (raw usdc)", floors[c]);
             emit log_named_uint("rounds executed", executed);
+            emit log_named_uint("attempt gas across all triggers", attemptGas);
             emit log_named_uint("gross net profit (raw usdc)", grossNet);
             emit log_named_uint("gas spend (raw usdc)", gasSpend);
             if (grossNet >= gasSpend) {
@@ -646,9 +667,9 @@ contract ArbHookFlashForkAaveTest is Test {
         emit log("====================================");
     }
 
-    /// @notice Compares the pre-loan profit estimate against what each round realizes.
-    /// @dev The estimate is what `minNetProfit` is checked against before borrowing.
-    ///      If it is systematically low, the floor cannot be set near true breakeven.
+    /// @notice Compares the V3 route-ranking score against what each round realizes.
+    /// @dev The score is not currency and is never checked against `minNetProfit`;
+    ///      this diagnostic guards against repurposing it as currency again.
     function testPreLoanEstimateVersusRealized() public {
         if (!forkEnabled) {
             vm.skip(true, "set RUN_FLASH_FORK_INTEGRATION=true and BASE_RPC_URL");
@@ -686,7 +707,7 @@ contract ArbHookFlashForkAaveTest is Test {
                 ArbUtils.PoolType.V3,
                 PARITY_FLASH_CAP_USDC
             ) returns (uint256, uint256, uint256 estimate) {
-                emit log_named_uint("post-trade estimate (raw usdc)", estimate);
+                emit log_named_uint("post-trade edge score (not currency)", estimate);
             } catch {
                 // Pancake V3 pools reject the Uniswap-typed slot0 read.
                 emit log("post-trade estimate: n/a (pancake-typed pool)");
@@ -759,6 +780,16 @@ contract ArbHookFlashForkAaveTest is Test {
                 if (netProfit > best) best = netProfit;
             }
         }
+    }
+
+    function _scaleGasCost(
+        uint256 measuredGas,
+        uint256 referenceGas,
+        uint256 referenceCost
+    ) private pure returns (uint256) {
+        require(referenceGas > 0, "reference gas=0");
+        uint256 product = measuredGas * referenceCost;
+        return product / referenceGas + (product % referenceGas == 0 ? 0 : 1);
     }
 
     function _configureParityPoolBook() private {
