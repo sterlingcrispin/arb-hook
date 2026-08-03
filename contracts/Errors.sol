@@ -33,6 +33,7 @@ library ArbErrors {
     error FlashTokenMismatch();
     error InvalidFlashBeneficiary();
     error FlashFeeExceedsCap();
+    error FlashArbitrageUnprofitable();
     error FlashProfitBelowMinimum();
     error FlashArbitrageExecutionFailed();
     error InsufficientFlashRepaymentBalance();

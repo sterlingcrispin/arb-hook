@@ -507,7 +507,11 @@ contract ArbHook is
             }
 
             // Isolate pair execution failure from the outer scanner.
-            (bool successCall, bytes memory returndata) = address(this).call(
+            // A route receives at most half the remaining scanner gas. Its self-call
+            // can fail independently without starving the fallback or later pairs.
+            (bool successCall, bytes memory returndata) = address(this).call{
+                gas: gasleft() >> 1
+            }(
                 abi.encodeWithSelector(
                     this.executeIterativeArbViaFlash.selector,
                     sellPool,
@@ -813,13 +817,7 @@ contract ArbHook is
             loanRequested = ok;
         } catch (bytes memory reason) {
             loanReverted = true;
-            if (reason.length >= 4) {
-                bytes4 selector;
-                assembly ("memory-safe") {
-                    selector := mload(add(reason, 0x20))
-                }
-                belowMinimum = selector == ArbErrors.FlashProfitBelowMinimum.selector;
-            }
+            belowMinimum = _revertSelector(reason) == ArbErrors.FlashProfitBelowMinimum.selector;
         }
 
         _clearActiveFlashContext();
@@ -892,11 +890,12 @@ contract ArbHook is
             int256(fee);
 
         uint256 minNetProfit = minNetProfitByToken[token];
-        if (
-            !tradeSuccess ||
-            netProfit <= 0 ||
-            uint256(netProfit) < minNetProfit
-        ) revert ArbErrors.FlashProfitBelowMinimum();
+        if (!tradeSuccess || netProfit <= 0) {
+            revert ArbErrors.FlashArbitrageUnprofitable();
+        }
+        if (uint256(netProfit) < minNetProfit) {
+            revert ArbErrors.FlashProfitBelowMinimum();
+        }
 
         _tstore(_T_LAST_SUCCESS, 1);
         _tstore(_T_LAST_PROFIT, uint256(netProfit));
@@ -1719,6 +1718,13 @@ contract ArbHook is
     }
 
     // ----------------------- Internal helpers ------------------------------
+    function _revertSelector(bytes memory reason) private pure returns (bytes4 selector) {
+        if (reason.length < 4) return bytes4(0);
+        assembly ("memory-safe") {
+            selector := mload(add(reason, 0x20))
+        }
+    }
+
     function _resolveProfitRecipient(
         bytes calldata hookData
     ) internal pure returns (address recipient) {
