@@ -10,7 +10,8 @@ Do not route mainnet swaps through the hook until all of these are true:
 1. An independent Solidity reviewer has signed off on the deployed commit.
 2. The full release gate below passes from a clean checkout.
 3. A current-head Base fork rehearsal passes with the intended pool manifest,
-   owner, Aave reserve, v4 PoolManager, Universal Router, and beneficiary encoding.
+   owner, Morpho reserve and adapter, v4 PoolManager, Universal Router, and
+   beneficiary encoding.
 4. Every production address has been checked against its current official source
    and its runtime code has been inspected on the deployment RPC.
 5. The owner is the intended canary wallet and holds only the deliberately
@@ -21,10 +22,11 @@ Do not route mainnet swaps through the hook until all of these are true:
    canary risk limits.
 
 V3/V3, V2/V2, V2-to-V3, and V3-to-V2 routes have route-specific pre-loan
-sizing and fixed-block Aave fork coverage. Register only the canonical route
-types and pools listed in the reviewed canary manifest. The initial manifest
-must use USDC as the registered base and flash-loan token; WETH-base V3 price
-discovery is not part of this canary.
+sizing and real fixed-block fork coverage. The ten-round intended-lender gate
+uses Morpho; Aave remains a fee-bearing comparison. Register only the canonical
+route types and pools listed in the reviewed canary manifest. The initial
+manifest must use USDC as the registered base and flash-loan token; WETH-base V3
+discovery is not part of this release gate.
 
 ## Reproduce The Release
 
@@ -46,8 +48,7 @@ artifacts produced by different Foundry versions.
 Run the fixed-block flash gate against Base block 33942262:
 
 ```bash
-BASE_RPC_URL="$BASE_RPC_URL" scripts/test_flash_fork_cached.sh \
-  --match-contract ArbHookFlashForkAaveTest -v
+BASE_RPC_URL="$BASE_RPC_URL" scripts/test_flash_fork_cached.sh
 ```
 
 Run the historical inventory baseline separately:
@@ -74,7 +75,7 @@ RUN_FLASH_FORK_INTEGRATION=true FORK_ALREADY_PINNED=true \
 BASE_RPC_URL="http://127.0.0.1:8547" \
 forge test \
   --match-contract ArbHookFlashForkAaveTest \
-  --match-test testCanonicalV4RouterPassesPackedBeneficiary -vv
+  --match-test testCanonicalV4RouterUsesMorphoAndPaysPackedBeneficiary -vv
 ```
 
 `npm audit` currently reports the OpenZeppelin `Bytes.lastIndexOf` advisory
@@ -85,9 +86,9 @@ if imports or the OpenZeppelin version change.
 ## Simulate And Deploy
 
 The deployment is intentionally limited to the linked `ArbMath` library,
-`ArbitrageLogic`, the USDC Aave adapter, and a CREATE2-mined after-swap hook.
-Foundry deploys `ArbMath` automatically because `ArbitrageLogic` contains
-external library links:
+`ArbitrageLogic`, the USDC Aave and Morpho adapters, and a CREATE2-mined
+after-swap hook. Foundry deploys `ArbMath` automatically because
+`ArbitrageLogic` contains external library links:
 
 ```bash
 OWNER="$OWNER" PRIVATE_KEY="$PRIVATE_KEY" forge script \
@@ -108,16 +109,25 @@ cast call "$HOOK" "poolManager()(address)" --rpc-url "$BASE_RPC_URL"
 cast call "$HOOK" \
   "getExecutionConfig()(uint256,uint16,uint16,uint256)" \
   --rpc-url "$BASE_RPC_URL"
-cast call "$ADAPTER" "pool()(address)" --rpc-url "$BASE_RPC_URL"
-cast call "$ADAPTER" "supportedToken()(address)" --rpc-url "$BASE_RPC_URL"
-cast call "$ADAPTER" "liquidityToken()(address)" --rpc-url "$BASE_RPC_URL"
+cast call "$MORPHO_ADAPTER" "morpho()(address)" --rpc-url "$BASE_RPC_URL"
+cast call "$MORPHO_ADAPTER" "supportedToken()(address)" --rpc-url "$BASE_RPC_URL"
+cast call "$MORPHO_ADAPTER" \
+  "flashFee(address,uint256)(uint256)" "$USDC" 1000000000 \
+  --rpc-url "$BASE_RPC_URL"
+cast call "$MORPHO_ADAPTER" "maxFlashLoan(address)(uint256)" "$USDC" \
+  --rpc-url "$BASE_RPC_URL"
 cast codesize "$HOOK" --rpc-url "$BASE_RPC_URL"
+cast codesize "$MORPHO_ADAPTER" --rpc-url "$BASE_RPC_URL"
+cast codesize "$AAVE_ADAPTER" --rpc-url "$BASE_RPC_URL"
 ```
 
 The hook address's low 14 bits must equal `0x40`, the after-swap-only flag. The
 constructor enforces this, but record the mined salt and address from the script.
 Record the linked `ArbMath` address from the simulation/broadcast artifact and
-verify all four contracts from the exact release commit on the block explorer.
+verify all five artifacts from the exact release commit on the block explorer:
+`ArbMath`, `ArbitrageLogic`, both adapters, and `ArbHook`. If Aave is selected
+instead, verify its provider-specific `pool()` and `liquidityToken()` getters;
+those getters do not exist on the Morpho adapter.
 
 ## Configure While Disabled
 
@@ -156,8 +166,9 @@ cast call "$AAVE_POOL" "FLASHLOAN_PREMIUM_TOTAL()(uint128)" --rpc-url "$BASE_RPC
 ```
 
    Set the fee cap from the bound lender's live quote. A zero-fee lender still
-   needs a nonzero cap, because zero disables borrowing entirely; the cap is an
-   upper bound, so it also catches a lender that starts charging later.
+   needs a nonzero cap because zero disables borrowing entirely. For Morpho use
+   the smallest enabled cap, currently 1 bps; it rejects a later fee only when
+   that fee exceeds the configured cap.
 
 5. Assign the chosen adapter to USDC, then set the principal cap, maximum fee,
    and minimum net profit. All three economic values must be
@@ -192,16 +203,17 @@ of 10,695.735171 USDC, so an 11,000 USDC cap is the smallest simple cap that
 covers that fixed-block gate. The test suite's 100,000 USDC cap is not a
 production recommendation.
 
-**Do not calibrate `minNetProfit` against the fixed-block fixture.** That fixture
-seeds one displacement and the hook is the only actor in it, so once the floor
-exceeds the best single-shot opportunity in the seeded state (about 7,369 raw
-USDC) it reports zero trades forever. That ceiling is a property of the fixture,
-not of production, where each swap is an independent trigger and other traders
-move the pools in between. Sweeps and the reasoning behind this are in
-OPEN_ISSUES items 51 and 53; the harnesses are `testCalibrateMinNetProfit` and
-`testRoundSequenceIsACascade`, gated behind `RUN_SPREAD_CALIBRATION=true`.
-Calibrate from the current-head differential gas replay below instead, and leave
-the fixture's own floor at 1 raw unit so it keeps exercising all ten routes.
+**Do not calibrate `minNetProfit` against the fixed-block fixture.** It seeds one
+displacement, and each candidate floor creates a different pool-state trajectory
+and amount of scanner work. At an 8,000-raw floor the sweep settles no trades but
+still spends about 26.0 million attempt gas across ten triggers. That result is
+useful for regression and gas-cost sensitivity; it does not establish a
+production opportunity ceiling. Production triggers arrive after unrelated
+traders have changed pool state. The sweep is documented in OPEN_ISSUES item 53
+and implemented by `testCalibrateMinNetProfit`, gated behind
+`RUN_SPREAD_CALIBRATION=true`. Calibrate from the current-head differential gas
+replay below instead, and leave the fixture's floor at 1 raw unit so it keeps
+exercising all ten routes.
 
 `minSpreadBps` is not an economic control and should stay at `10`; see
 OPEN_ISSUES item 52.
@@ -222,9 +234,12 @@ fork snapshot with iterations first at `0` and then at the intended value. The
 swap calldata is unchanged, so normal user traffic does not incur incremental
 L1 calldata cost from the arb itself. If the canary swap exists only to trigger
 the hook, include the full transaction gas and L1 fee in `extraEthFeeWei`.
-Every route type reuses its sizing estimate to reject opportunities that cannot
-cover the quoted flash fee plus this floor before borrowing. The realized
-post-loan check remains authoritative because the estimate is not exact.
+V2/V2 and mixed routes reuse fee-aware raw-token simulations to reject estimates
+that cannot cover the quoted flash fee plus this floor before borrowing. The
+V3/V3 score is only a relative chunk-ranking signal, not a currency estimate, so
+that route checks for an edge before borrowing and enforces the floor against
+realized balances in the callback. The realized post-loan check is authoritative
+for every route.
 
 The 2026-07-26 rehearsal at Base block 49149499 measured 1,076,889 gas inside
 the successful hook path. At that block's 0.006 gwei gas price and observed
@@ -232,6 +247,12 @@ WETH/USDC price, L2 execution alone was about 0.012324 USDC. A provisional
 rehearsal value of `100000` raw USDC (`0.10 USDC`) is roughly eight times that
 measured L2 cost, but it is not a release value. Recalculate from the final
 current-head differential replay and the desired user margin.
+
+On 2026-08-02, a fresh current-head fork also passed the canonical v4 router
+lifecycle through the intended Morpho adapter, including the real route book,
+packed beneficiary, zero flash fee, and beneficiary payout. This validates the
+lender integration path but does not replace the final-manifest differential gas
+calibration above.
 
 ## Route Canary Traffic
 

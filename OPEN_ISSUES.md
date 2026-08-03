@@ -9,108 +9,6 @@ The initial deployment is owner-operated with a small set of manually verified, 
 
 ## Open For Canary
 
-51. Pre-loan profit estimate is not a usable economic quantity
-- Status: `BLOCKS DEPLOYMENT`
-- Priority: `CRITICAL`
-- Summary: `executeIterativeArbViaFlash` gates borrowing with
-  `expectedRouteProfit - fee < minNetProfit`, treating `expectedRouteProfit` as a
-  raw token amount. It is not one. Measured against the ten-round gate, the
-  estimate misses realized profit by up to five orders of magnitude and in both
-  directions:
-
-  | Round | Realized net (raw) | Estimate (raw) | Ratio |
-  |-------|--------------------|----------------|-------|
-  | 1 | 427 | 168 | 0.4x |
-  | 2 | 239 | 65 | 0.3x |
-  | 3 | 7,000 | 5,030,965 | 719x |
-  | 4 | 59,265 | 46,024,647 | 777x |
-  | 7 | 1,161 | 3,004,834 | 2,588x |
-  | 8 | 5,646 | 21,258,118 | 3,765x |
-  | 9 | 58 | 2,909,521 | 50,164x |
-
-- Cause: `_binarySearchBestChunk` scales both legs linearly
-  (`intermOut_full * mid / fullChunk`, `poolB_maxStartOut * intermInB / poolB_maxIn`),
-  which is false for concentrated liquidity, and `ArbMath._simulatedPL` deducts
-  only pool B's fee because `_deltaAmounts` is a fee-less price-move calculation.
-  The quantity was sound as a *relative* ranking for chunk selection, which is all
-  the pre-flash design used it for. The flash migration repurposed the same number
-  as an absolute currency comparison.
-- Status detail: `ADDRESSED`. The V3/V3 path now screens only for the presence of
-  edge (`edgeScore != 0`) and never compares the score against currency. The V2/V2
-  and mixed paths keep their currency screen because both genuinely simulate each
-  leg against real reserves or swap math with both pool fees deducted. Naming was
-  corrected throughout: `ArbMath._simulatedPL` is now `_edgeScore`, `findBestV3Chunk`
-  returns `edgeScore`, and the hook's currency variable is `expectedNetProfit`.
-  `minNetProfit` remains enforced exactly against realized balances in `onFlashLoan`
-  for every route type.
-- CORRECTION: this defect does **not** explain the `minNetProfit` cliff described in
-  item 53. Re-running the sweep after the fix produced identical results. The
-  estimate divergence is real and screening on it was wrong, but it was not the
-  cause of the cliff. See item 53 for the actual mechanism.
-
-53. The ten-round fixture cannot calibrate minNetProfit
-- Status: `DOCUMENTED`
-- Priority: `HIGH`
-- Summary: Sweeping the floor across the fixture shows 4 rounds executing at
-  2,000-6,162 raw and **zero** at 8,000 raw (0.008 USDC). Two hypotheses were
-  tested and both are wrong: it is not the pre-loan estimate (item 51, fixed, no
-  change to the sweep) and it is not a cascade (seeding round 1 without a floor
-  does not unlock later rounds at the higher floor; `testRoundSequenceIsACascade`
-  executes 0).
-- Actual mechanism: the fixture seeds one fixed displacement and the hook is the
-  only actor in it. When no route clears the floor, nothing trades, so the pool
-  state never moves and every later round re-evaluates identical state and fails
-  identically. The best single-shot opportunity in the seeded state is worth about
-  7,369 raw USDC, so any floor above that reports zero forever. The floor also
-  changes which route round 1 selects, so each floor traces a different trajectory
-  rather than filtering a fixed one.
-- Consequence: the number this fixture reports is a property of its seeded
-  displacement, not of production. In production each swap is an independent
-  trigger and other traders move the pools between them, so a floor above the
-  fixture's ceiling is not a deadlock, only "no trade right now".
-- Decision: calibrate `minNetProfit` from the runbook's current-head differential
-  gas replay, never from this fixture. Keep the fixture's floor at 1 raw unit so it
-  continues to exercise all ten routes as a route-selection regression.
-
-52. minSpreadBps is not an economic control
-- Status: `RESOLVED (keep at 10)`
-- Priority: `MEDIUM`
-- Summary: Calibration sweep across the ten-round gate:
-
-  | minSpreadBps | Rounds | Gross net (raw) | After gas (raw) |
-  |--------------|--------|-----------------|-----------------|
-  | 1 / 5 / 10 | 10 | 8,365,681 | +8,242,441 |
-  | 20 | 3 | 7,609 | **-29,363** |
-  | >=40 | 0 | 0 | 0 |
-
-- The threshold compares a V3 **tick delta**, but profit is spread times depth.
-  The widest tick spreads here belong to the seeded cbBTC/USDC gap, which is the
-  least profitable in absolute terms, while rounds 5 and 6 (2.32 and 5.95 USDC)
-  come from narrow spreads on deep WETH/USDC liquidity. Raising the threshold
-  therefore deletes the profitable trades first and turns the sequence into a net
-  loss at 20.
-- It also gates V3/V3 routes only (`ArbitrageLogic` spread check, the V3/V3 branch
-  of `executeIterativeArb`, and `_deriveV3Principal`). V2/V2 and mixed routes
-  ignore it entirely, which `README.md` did not previously say.
-- Decision: keep `minSpreadBps = 10` and treat it as a cheap gas pre-filter, not a
-  profitability control. Economic filtering belongs in `minNetProfit`, which is
-  blocked on item 51.
-
-40. Flash-fee choice dominates canary economics
-- Status: `BLOCKS DEPLOYMENT`
-- Priority: `CRITICAL`
-- Summary: Replaying the ten-round fixed-block gate with real Aave fees nets
-  8.365681 USDC against the 18.679602 USDC legacy gross. The 5 bps premium takes
-  55% of the edge. Against the runbook's measured 0.012324 USDC L2 execution
-  cost, rounds 1, 2, 3, 7, 8 and 9 are net-negative and round 10 is marginal;
-  only rounds 4, 5 and 6 clear. At the provisional 0.10 USDC floor only rounds 5
-  and 6 would execute, so the gate cannot run at production economic settings.
-- Decision: bind `MorphoERC3156Adapter` (zero fee, ~197.6M USDC on Base,
-  verified against live state by `MorphoERC3156Adapter.t.sol`) instead of the
-  Aave adapter, then recalculate the minimum net-profit floor from a current-head
-  differential gas replay. Re-run the fixed-block gate against the chosen lender
-  and record the resulting per-round net profits with the release artifacts.
-
 20. Independent review of release commit
 - Status: `BLOCKS DEPLOYMENT`
 - Priority: `CRITICAL`
@@ -121,14 +19,13 @@ The initial deployment is owner-operated with a small set of manually verified, 
 - Status: `BLOCKS DEPLOYMENT`
 - Priority: `CRITICAL`
 - Summary: The deterministic fork gates use Base block 33942262. They cannot prove current lender premiums, liquidity, canonical contract state, route economics, or transaction cost.
-- Evidence: The canonical router lifecycle passed on Base block 49149499 with the live Aave premium at 5 bps. The successful hook path used 1,076,889 gas and settled through the expected beneficiary path.
-- Decision: run the intended manifest through a fresh current-head fork, verify canonical addresses and code, and set the minimum net-profit floor from a differential gas replay before deployment.
-
-6. Mandatory on-chain trade-history persistence
-- Status: `RESOLVED`
-- Priority: `MEDIUM`
-- Summary: Permanent per-trade storage made telemetry expensive and able to cancel an otherwise profitable trade.
-- Decision: removed `DataStorage`; `FlashLoanSettled` is now the canonical event-only execution record.
+- Evidence: The canonical router lifecycle passed on Base block 49149499 with
+  Aave and again on a fresh current-head fork on 2026-08-02 with the intended
+  Morpho adapter. Both rehearsals settled through the packed beneficiary path;
+  the Morpho run used the real route book and paid zero lender fee.
+- Decision: repeat the intended final manifest on a fresh current-head fork,
+  verify canonical addresses and code, and set the minimum net-profit floor from
+  a same-snapshot differential gas replay immediately before deployment.
 
 ## Accepted By Design
 
@@ -153,17 +50,112 @@ The initial deployment is owner-operated with a small set of manually verified, 
 - Summary: Discovery cost scales with configured bases, counters, and pools.
 - Decision: the canary uses a small bounded pool book; add explicit limits before supporting a broad registry.
 
-28. Non-USDC base-token price normalization
-- Status: `DEFERRED`
-- Summary: Legacy V2/V3 price normalization preserves relative ordering for the regression-tested USDC-base pool book, but V3 WETH-base prices can round to zero.
-- Decision: the canary registers and borrows USDC only. Correct both token orientations later behind dedicated parity coverage rather than changing legacy discovery immediately before the canary.
-
 29. Approximate V3 initialized-tick capacity
 - Status: `DEFERRED`
 - Summary: `_exactCapacity` advances by tick-spacing intervals rather than scanning the initialized-tick bitmap, so it can miss liquidity changes when the current tick is not aligned to an initialized boundary.
 - Decision: do not add expensive tick traversal for the canary. Pool price limits, atomic repayment, intermediate-balance restoration, and realized minimum-profit enforcement remain authoritative; revisit sizing precision after canary results.
 
 ## Addressed
+
+51. V3 edge score was treated as a raw-token profit estimate
+- Status: `ADDRESSED`
+- Priority: `CRITICAL`
+- Notes: The flash migration compared the V3/V3 chunk-ranking score directly
+  against lender fee and `minNetProfit`, even though its linearized concentrated-
+  liquidity arithmetic was designed only to rank candidate chunks. Against the
+  ten-round gate it differed from realized profit by up to five orders of
+  magnitude in both directions. V3/V3 now uses `edgeScore` only to establish and
+  rank an edge. V2/V2 and mixed paths retain their raw-token screens because they
+  simulate both fee-bearing legs. Every route enforces `minNetProfit` exactly
+  against realized balances in `onFlashLoan`.
+
+53. The ten-round fixture was being used to calibrate minNetProfit
+- Status: `DOCUMENTED`
+- Priority: `HIGH`
+- Notes: The floor sweep is path-dependent: each floor changes which trades
+  settle, subsequent pool state, and scanner work. Gas is now measured around
+  every trigger rather than only successful settlements:
+
+  | minNetProfit (raw) | Rounds | Gross net (raw) | Attempt gas | After assumed gas (raw) |
+  |--------------------|--------|-----------------|-------------|-------------------------|
+  | 1 | 10 | 8,365,681 | 8,422,932 | +8,269,288 |
+  | 2,000 / 4,000 / 6,162 | 4 | 8,341,588 | ~21,011,000 | +8,101,137 |
+  | >=8,000 | 0 | 0 | ~26,004,900 | -297,603 |
+
+- Decision: these are regression and gas-sensitivity results, not a production
+  opportunity ceiling. Production pools move between independent swap triggers.
+  Keep the fixture floor at 1 raw unit and calibrate the release floor from the
+  runbook's same-snapshot, current-head differential replay.
+
+52. minSpreadBps was treated as an economic control
+- Status: `RESOLVED (keep at 10)`
+- Priority: `MEDIUM`
+- Notes: The threshold is a V3 tick delta, while profit is spread times depth.
+  It gates V3/V3 only; V2/V2 and mixed routes do not consult it. The revised
+  sweep includes scanner gas for every trigger:
+
+  | minSpreadBps | Rounds | Gross net (raw) | After assumed gas (raw) |
+  |--------------|--------|-----------------|-------------------------|
+  | 1 / 5 / 10 | 10 | 8,365,681 | +8,269,288 |
+  | 20 | 3 | 7,609 | -200,879 |
+  | >=40 | 0 | 0 | -264,543 |
+
+- Decision: keep `minSpreadBps = 10` as the regression-proven cheap discovery
+  filter. Economic filtering belongs in the route-specific pre-loan checks and
+  authoritative realized `minNetProfit` check.
+
+40. Flash-fee choice dominated canary economics
+- Status: `ADDRESSED (bind Morpho)`
+- Priority: `CRITICAL`
+- Notes: The fixed-block ten-round sequence nets 8.365681 USDC through Aave
+  after 8.945556 USDC of fees, versus 18.543625 USDC through zero-fee Morpho.
+  The intended-lender gate now uses Morpho by default, preserves all ten legacy
+  buy/sell routes, and pays zero lender fee. A fresh current-head canonical v4
+  router lifecycle also passed through Morpho on 2026-08-02. Aave remains an
+  explicit fee-bearing comparison, not the default release path. Final economic
+  calibration remains item 21.
+
+54. One V3 route could exhaust the scanner gas budget
+- Status: `ADDRESSED`
+- Priority: `HIGH`
+- Notes: A positive result rejected by the authoritative `minNetProfit` check
+  still retried alternate principals, allowing an early route to consume the
+  3,000,000-gas scanner budget and starve later pairs without any guarantee that
+  a retry would clear the floor. The callback now distinguishes positive-but-
+  below-floor from unprofitable execution: only the latter keeps adaptive
+  principal retries. Each
+  isolated route execution receives half of the scanner's remaining gas so one
+  route cannot consume the whole scan. A two-pair local regression proves that a
+  later profitable pair still executes after an earlier below-floor pair. The
+  high-floor fixed-block scan now completes in about 2.60 million gas instead of
+  exhausting the ceiling, while all ten reference routes remain unchanged.
+
+55. Calibration omitted gas from unsuccessful triggers
+- Status: `ADDRESSED`
+- Priority: `MEDIUM`
+- Notes: The calibration harness previously added gas only when a settlement
+  event existed, reporting zero execution cost for scans that consumed gas but
+  settled nothing. Both sweeps now measure `gasleft()` around every
+  `attemptAllForTest` trigger and convert the total with the same current-head
+  reference cost. The revised tables in items 52 and 53 include failed,
+  below-floor, and contained out-of-gas route work.
+
+6. Mandatory on-chain trade-history persistence
+- Status: `RESOLVED`
+- Priority: `MEDIUM`
+- Notes: Permanent per-trade storage made telemetry expensive and able to cancel
+  an otherwise profitable trade. `DataStorage` was removed;
+  `FlashLoanSettled` is the canonical event-only execution record.
+
+28. Non-USDC base-token price normalization
+- Status: `ADDRESSED`
+- Notes: `_calculatePrice1e18_corrected` now uses exact quotient/remainder
+  arithmetic in both token orientations without materializing a 320-bit square.
+  Boundary tests cover the former WETH-base floor-to-zero case, the reciprocal
+  near the minimum sqrt price, and `type(uint160).max`. Exact inventory parity
+  and both fixed-block lender sequences remain unchanged. The canary still uses
+  USDC only because that is the reviewed manifest, not because normalization is
+  known to fail for WETH.
 
 42. Unbounded hook gas could revert the triggering swap
 - Status: `ADDRESSED`
@@ -189,8 +181,9 @@ The initial deployment is owner-operated with a small set of manually verified, 
 - Status: `ADDRESSED`
 - Notes: A price-limited V3 leg can legitimately fill for nothing. The V2 helper
   reverted `InvalidV2FlashSwapParams` on a zero quote, discarding profit already
-  realized in earlier iterations of the same loan. The executor now breaks
-  cleanly, matching how the V3 path already behaved.
+  realized in earlier iterations of the same loan. Both the first and second V2
+  legs now stop cleanly when their quoted output is zero, matching how the V3
+  path already behaved.
 
 45. Per-transaction state held in cold storage
 - Status: `ADDRESSED`
@@ -210,10 +203,12 @@ The initial deployment is owner-operated with a small set of manually verified, 
 - Status: `ADDRESSED`
 - Notes: `_calculatePrice1e18_corrected` materialized `sqrtP^2`, which needs up to
   320 bits and reverted inside `FullMath` for any pool priced above roughly
-  1.8e19 in raw units. It is now two `mulDiv` steps with every intermediate below
-  2^256 across the full uint160 sqrt-price range. The legacy inventory oracle
-  still reproduces 18,679,602 raw USDC exactly and the fixed-block flash gate
-  still matches every round's route, so the rewrite is behavior-preserving.
+  1.8e19 in raw units. Exact quotient/remainder arithmetic now preserves the
+  remainder before decimal scaling in the direct orientation and decomposes the
+  reciprocal without materializing an oversized product. Boundary tests cover
+  both ends of the uint160 sqrt-price range and the former floor-to-zero case.
+  The legacy inventory oracle still reproduces 18,679,602 raw USDC exactly and
+  both fixed-block flash sequences still match every round's route.
 
 48. Single-step ownership transfer
 - Status: `ADDRESSED`
@@ -246,7 +241,10 @@ The initial deployment is owner-operated with a small set of manually verified, 
 
 1. ArbHook EIP-170 deployability
 - Status: `ADDRESSED`
-- Notes: Cold registration validation moved into the existing `ArbitrageLogic` dependency and unused runtime surfaces were removed. `ArbHook` is 21,945 runtime bytes: 2,055 bytes below the repository's 24,000-byte budget and 2,631 bytes below the 24,576-byte EIP-170 limit.
+- Notes: Cold registration validation moved into the existing `ArbitrageLogic`
+  dependency and unused runtime surfaces were removed. `ArbHook` is 22,392
+  runtime bytes: 1,608 bytes below the repository's 24,000-byte budget and 2,184
+  bytes below the 24,576-byte EIP-170 limit.
 
 7. Shared pool metadata removal
 - Status: `ADDRESSED`
@@ -275,7 +273,10 @@ The initial deployment is owner-operated with a small set of manually verified, 
 
 15. Production Aave adapter missing
 - Status: `ADDRESSED`
-- Notes: `contracts/AaveV3ERC3156Adapter.sol` is now the production artifact used by both local adapter tests and the fixed-block Aave fork suite.
+- Notes: `contracts/AaveV3ERC3156Adapter.sol` and
+  `contracts/MorphoERC3156Adapter.sol` are production artifacts with local
+  adapter tests and real fixed-block fork coverage. Morpho is the intended
+  canary binding; Aave remains the fee-bearing comparison.
 
 16. V4 hook-address validation disabled
 - Status: `ADDRESSED`
@@ -299,7 +300,11 @@ The initial deployment is owner-operated with a small set of manually verified, 
 
 4. Production router recipient integration
 - Status: `ADDRESSED`
-- Notes: The fixed-block fork test now sends a real v4 swap through Base's canonical Universal Router and PoolManager, then verifies that the real Aave-backed arb pays the beneficiary encoded as exactly 20 packed bytes.
+- Notes: Fork tests send a real v4 swap through Base's canonical Universal Router
+  and PoolManager, then verify that the arb pays the beneficiary encoded as
+  exactly 20 packed bytes. The Aave lifecycle remains covered, and a fresh
+  current-head rehearsal passed through the intended Morpho adapter on
+  2026-08-02 with zero lender fee.
 
 5. CREATE2 deployment workflow
 - Status: `ADDRESSED`
@@ -323,7 +328,10 @@ The initial deployment is owner-operated with a small set of manually verified, 
 
 25. Linked library omitted from release inventory
 - Status: `ADDRESSED`
-- Notes: `ArbitrageLogic` has an external link to `ArbMath`, which Foundry deploys automatically through the CREATE2 factory. The runbook now requires recording and verifying that library alongside `ArbitrageLogic`, the Aave adapter, and `ArbHook`.
+- Notes: `ArbitrageLogic` has an external link to `ArbMath`, which Foundry deploys
+  automatically through the CREATE2 factory. The runbook requires recording and
+  verifying all five artifacts: `ArbMath`, `ArbitrageLogic`, the Aave and Morpho
+  adapters, and `ArbHook`.
 
 26. Triggering v4 pool is not an arbitrage venue
 - Status: `DOCUMENTED`

@@ -25,10 +25,10 @@ The production execution path is flash-loan-funded for principal, so the hook do
 
 The initial canary is intentionally narrower than the long-term token-agnostic
 architecture: it registers routes under USDC as the base and borrows USDC.
-Legacy price normalization is regression-proven in that orientation. Do not
-register WETH as a base for the canary; V3 WETH-base discovery can round its
-price to zero and requires a parity-sensitive normalization fix after the
-canary.
+That matches the reviewed fixed-block manifest and keeps its route ordering
+stable. Price normalization supports both token orientations, but WETH-base
+routes are outside the current release gate and require their own route and
+economic rehearsal before registration.
 
 There is still required operator setup off-chain: pool registration, lender configuration, and runtime-parameter configuration (`hookMaxIterations`, `minSpreadBps`, `chunkSpreadConsumptionBps`, `maxImpactBps`, `hookGasReserve`/`hookGasLimit`). Hook execution is disabled by default (`hookMaxIterations = 0`).
 
@@ -89,9 +89,9 @@ BASE_RPC_URL="$BASE_RPC_URL" scripts/test_flash_fork_cached.sh
 npm run size
 ```
 
-The cached fork gate replays the ten rounds from `ParityTest/attemptAllOutput.txt` with a real Aave-backed ERC-3156 adapter. It requires the same buy/sell route in every round and positive net profit after the loan fee. It does not require legacy gross-profit equality because the flash fee and a bounded capacity refinement can change trade size and net result.
+The cached fork gate replays the ten rounds from `ParityTest/attemptAllOutput.txt` with the intended zero-fee Morpho-backed ERC-3156 adapter. It requires the same buy/sell route in every round and positive net profit. It does not require legacy gross-profit equality because bounded capacity refinement can change trade size. The Aave-backed sequence remains available as a fee-bearing comparison.
 
-The size gate caps each production runtime at 24,000 bytes, leaving at least 576 bytes below EIP-170's 24,576-byte limit. It currently covers `ArbHook`, `ArbitrageLogic`, and `AaveV3ERC3156Adapter`.
+The size gate caps each production runtime at 24,000 bytes, leaving at least 576 bytes below EIP-170's 24,576-byte limit. It covers `ArbHook`, `ArbitrageLogic`, `AaveV3ERC3156Adapter`, and `MorphoERC3156Adapter`. At this commit, `ArbHook` is 22,392 runtime bytes, leaving 1,608 bytes below the project budget and 2,184 bytes below EIP-170.
 
 `FlashLoanSettled` is the canonical execution record. It reports the lender, tokens, selected pools, borrowed principal, total input swapped, fee, net profit, iterations, and beneficiary without adding permanent per-trade storage writes to the hook.
 
@@ -102,8 +102,9 @@ The swap router must pass the beneficiary as exactly 20 packed address bytes (`a
 ## Base Deployment
 
 `script/DeployArbHook.s.sol` deploys the linked `ArbMath` library,
-`ArbitrageLogic`, the USDC Aave adapter, and an after-swap-only hook mined
-against Base's canonical CREATE2 deployer.
+`ArbitrageLogic`, the USDC Aave and Morpho adapters, and an after-swap-only
+hook mined against Base's canonical CREATE2 deployer. Only the adapter later
+bound with `setLenderForToken` can fund an arbitrage.
 The complete release, configuration, canary, and shutdown procedure is in
 [`docs/MAINNET_CANARY_RUNBOOK.md`](docs/MAINNET_CANARY_RUNBOOK.md).
 Simulate first:
@@ -139,7 +140,7 @@ BASE_RPC_URL="$BASE_RPC_URL" npm run test:flash:fork:cached
 
 `test:flash:fork:cached` defaults to:
 - `ArbHookFlashForkAaveTest`
-- `testForkAaveAttemptAllTracksLegacyRoundSequenceFull`
+- `testForkMorphoAttemptAllTracksLegacyRoundSequenceFull`
 
 You can pass any other forge test args:
 
@@ -196,7 +197,7 @@ The per-token flash controls are:
   Sets the maximum lender fee relative to principal. Zero disables borrowing. Both the quote and actual callback fee are checked with ceiling rounding.
 
 - `setMinNetProfitForToken(address,uint256)`
-  Sets the minimum profit after the flash fee, in raw units of the borrowed token. Zero disables borrowing. Every supported route combination rejects an obviously insufficient opportunity before borrowing by reusing its existing sizing estimate, and the realized result is checked again during repayment.
+  Sets the minimum profit after the flash fee, in raw units of the borrowed token. Zero disables borrowing. V2/V2 and mixed routes use fee-aware raw-token simulations to reject an insufficient estimate before borrowing. The V3/V3 sizing score is only a relative ranking, not a token amount, so that route borrows when an edge exists and enforces the floor against realized balances in `onFlashLoan`. The realized check is authoritative for every route.
 
 ### Reference Sequence Profile
 
@@ -213,19 +214,19 @@ In the legacy parity harness (`foundry/test/ArbHookParity.t.sol`), the runtime p
 Why these values are used for parity:
 
 - `2` iterations keeps execution bounded while still allowing a follow-up chunk after the first fill.
-- `10 bps` filters micro-spreads that are usually not robust after execution costs.
+- `10` preserves all ten reference routes and is the legacy traversal threshold. A calibration sweep showed that raising it to `20` removes the high-value deep-liquidity routes first; it is not an economic-profit threshold.
 - `1500` gives a moderate first-step aggressiveness instead of over-consuming spread immediately.
 - `500` caps adaptive V3 price-limit movement at 500 ticks (approximately 5%)
   and rejects mixed routes whose estimated V3 impact exceeds 500 bps.
 - The `100,000 USDC` value is a ceiling, not the amount borrowed. Existing route math derives each round's principal below that ceiling.
-- The `100 bps` fee cap is deliberately above Aave's 5 bps test-block premium and catches unexpected lender changes.
+- The `100 bps` fee cap is a permissive regression value that lets the same profile exercise both the 5 bps Aave baseline and zero-fee Morpho path while rejecting a fee above 1% of principal. It is not a canary recommendation. Because zero disables borrowing, a Morpho canary must use a nonzero cap; use the smallest cap accepted after checking the live quote.
 - The `1` raw-unit profit floor keeps every historically profitable round observable, including very small rounds. It is a regression-test value, not a production recommendation; a canary floor should cover expected transaction cost and desired margin.
 
 `ArbHookParity.t.sol` remains an opt-in inventory-funded baseline that asserts the original gross-profit values exactly. To run it intentionally:
 - Set `RUN_LEGACY_INVENTORY_PARITY=true`
 - Set `BASE_RPC_URL`
 
-`ArbHookFlashForkAave.t.sol` uses the same fixed block, funding setup, pool registration order, and ten-round route sequence with borrowed USDC. It asserts each route and positive net profit after the Aave fee.
+`ArbHookFlashForkAave.t.sol` uses the same fixed block, funding setup, pool registration order, and ten-round route sequence with borrowed USDC. Its default Morpho gate asserts every route, zero lender fees, and positive net profit; the Aave sequence preserves the historical fee-bearing comparison.
 
 
 ## How an Arbitrage Actually Happens (Step by Step)
@@ -257,7 +258,7 @@ Why these values are used for parity:
 
 8. The user’s swap completes regardless.
 
-## Why This Design 
+## Why This Design
 
 - Hook-based instead of off chain bots  
   Because hooks remove latency, gas wars, and mempool uncertainty entirely. And I thought it would be cool to do this all onchain.
@@ -269,7 +270,7 @@ Why these values are used for parity:
   No background scanning, no constant gas spend. The logic only runs when there’s a real trade.
 
 - Chunked sizing over brute force  
-  Large arbs often lose money due to impact. This code searches for a profitable size instead of assuming one. 
+  Large arbs often lose money due to impact. This code searches for a profitable size instead of assuming one.
 
 - Chunked sizing over “solve the optimum”  
   Because this is all on chain you can’t cheaply compute the real optimal trade size for concentrated liquidity because the price curve changes at every tick/liquidity boundary. Exact sizing would require expensive tick-by-tick simulation. So instead this system sizes the arb iteratively in bounded chunks and stops when marginal profit flips negative.

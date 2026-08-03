@@ -106,7 +106,7 @@ fi
 if [[ "$#" -eq 0 ]]; then
   set -- \
     --match-contract ArbHookFlashForkAaveTest \
-    --match-test LegacyRoundSequenceFull \
+    --match-test testForkMorphoAttemptAllTracksLegacyRoundSequenceFull \
     -vv
 fi
 
