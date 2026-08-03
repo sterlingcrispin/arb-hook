@@ -15,6 +15,7 @@ import {IERC3156FlashLender} from "../../contracts/interfaces/IERC3156FlashLende
 import {IUniswapV2Pair} from "../../contracts/interfaces/IUniswapV2Pair.sol";
 import {IHooks} from "@uniswap/v4-core/src/interfaces/IHooks.sol";
 import {IPoolManager} from "@uniswap/v4-core/src/interfaces/IPoolManager.sol";
+import {TickMath} from "@uniswap/v3-core/contracts/libraries/TickMath.sol";
 
 contract MockERC3156Lender is IERC3156FlashLender {
     IERC20 public immutable loanToken;
@@ -168,6 +169,41 @@ contract MockV3MetadataPool {
     constructor(address token0_, address token1_) {
         token0 = token0_;
         token1 = token1_;
+    }
+}
+
+contract MockV3StatePool {
+    address public immutable token0;
+    address public immutable token1;
+    uint24 public constant fee = 500;
+    int24 public constant tickSpacing = 10;
+    int24 private immutable currentTick;
+    uint160 private immutable currentSqrtPriceX96;
+    uint128 public constant liquidity = 1e18;
+
+    constructor(address token0_, address token1_, int24 tick_) {
+        token0 = token0_;
+        token1 = token1_;
+        currentTick = tick_;
+        currentSqrtPriceX96 = TickMath.getSqrtRatioAtTick(tick_);
+    }
+
+    function slot0()
+        external
+        view
+        returns (uint160, int24, uint16, uint16, uint16, uint8, bool)
+    {
+        return (currentSqrtPriceX96, currentTick, 0, 0, 0, 0, true);
+    }
+
+    function ticks(
+        int24
+    )
+        external
+        pure
+        returns (uint128, int128, uint256, uint256, int56, uint160, uint32, bool)
+    {
+        return (0, 0, 0, 0, 0, 0, 0, false);
     }
 }
 
@@ -439,6 +475,64 @@ contract ArbHookFlashLoanE2ETest is Test {
         assertEq(token.balanceOf(address(hook)), hookBefore);
         (bool found, ) = _findLastSettlement(vm.getRecordedLogs());
         assertFalse(found, "reverted loan must not emit settlement");
+    }
+
+    function testBelowMinimumV3RouteDoesNotRetryOrStarveNextPair() public {
+        TestToken profitableCounter = new TestToken(
+            "Profitable Counter",
+            "PCTR",
+            0
+        );
+        MockERC3156Lender lender = new MockERC3156Lender(
+            IERC20(address(token)),
+            0
+        );
+        token.mint(address(lender), 1_000_000e18);
+
+        address[] memory pools = new address[](2);
+        uint24[] memory fees = new uint24[](2);
+        ArbUtils.PoolType[] memory types = new ArbUtils.PoolType[](2);
+        fees[0] = 500;
+        fees[1] = 500;
+        types[0] = ArbUtils.PoolType.V3;
+        types[1] = ArbUtils.PoolType.V3;
+
+        pools[0] = address(
+            new MockV3StatePool(address(token), address(counterToken), 0)
+        );
+        pools[1] = address(
+            new MockV3StatePool(address(token), address(counterToken), 1000)
+        );
+        hook.addPools(address(token), pools, fees, types);
+
+        pools[0] = address(
+            new MockV3StatePool(address(token), address(profitableCounter), 0)
+        );
+        pools[1] = address(
+            new MockV3StatePool(
+                address(token),
+                address(profitableCounter),
+                1000
+            )
+        );
+        hook.addPools(address(token), pools, fees, types);
+
+        _configureLender(lender, 1_000_000e18, 1, 10);
+        hook.setHookMaxIterations(1);
+        hook.setTestInjectProfitAnyIterations(true);
+        hook.setTestProfitForIntermediateToken(address(counterToken), 5);
+        hook.setTestProfitForIntermediateToken(address(profitableCounter), 20);
+
+        vm.expectCall(
+            address(lender),
+            abi.encodeWithSelector(IERC3156FlashLender.flashLoan.selector),
+            2
+        );
+        assertTrue(
+            hook.attemptAllForTest(1),
+            "later profitable pair was not reached"
+        );
+        assertEq(token.balanceOf(address(this)), 20, "wrong route profit paid");
     }
 
     function testProfitableLoanPaysBeneficiaryAndEmitsSettlement() public {

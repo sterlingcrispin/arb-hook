@@ -16,6 +16,7 @@ contract ArbHookHarness is ArbHook {
     bool public testLegacyInventoryParityEnabled;
     address public testProfitPayer;
     uint256 public testFixedProfitAmount;
+    mapping(address => uint256) public testProfitByIntermediateToken;
 
     event ArbitrageAttempted(
         address indexed tokenA,
@@ -144,6 +145,13 @@ contract ArbHookHarness is ArbHook {
         testFixedProfitAmount = amount;
     }
 
+    function setTestProfitForIntermediateToken(
+        address token,
+        uint256 amount
+    ) external onlyOwner {
+        testProfitByIntermediateToken[token] = amount;
+    }
+
     // The production hook is flash-only. This test-only branch keeps the
     // historical prefunded executor available as an exact regression oracle.
     function executeIterativeArbViaFlash(
@@ -196,14 +204,25 @@ contract ArbHookHarness is ArbHook {
         override
         returns (bool success, int256 cumulativeProfit, uint256 iterations, uint256 totalAmountSwapped)
     {
+        uint256 routeProfit = testProfitByIntermediateToken[intermediateToken];
         if (
-            testProfitBps > 0 &&
+            (testProfitBps > 0 || routeProfit > 0) &&
             (maxIterations == 0 || testInjectProfitAnyIterations)
         ) {
             uint256 bal = IERC20(startToken).balanceOf(address(this));
             uint256 realizedProfit;
 
-            if (testFixedProfitAmount > 0) {
+            if (routeProfit > 0) {
+                (bool ok, ) = startToken.call(
+                    abi.encodeWithSignature(
+                        "mint(address,uint256)",
+                        address(this),
+                        routeProfit
+                    )
+                );
+                require(ok, "test mint failed");
+                realizedProfit = routeProfit;
+            } else if (testFixedProfitAmount > 0) {
                 require(testProfitPayer != address(0), "test profit payer=0");
                 IERC20(startToken).safeTransferFrom(
                     testProfitPayer,
