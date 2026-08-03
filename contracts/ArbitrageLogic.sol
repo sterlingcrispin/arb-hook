@@ -111,36 +111,40 @@ contract ArbitrageLogic {
         uint256 sqrtP = uint256(sqrtP_uint160);
         if (sqrtP == 0) return 0;
 
-        uint256 tenPowDec0 = 10 ** uint256(dec0_uint8);
-        uint256 tenPowDec1 = 10 ** uint256(dec1_uint8);
-        uint256 Q96 = uint256(1) << 96;
+        uint256 Q192 = uint256(1) << 192;
 
-        // Both branches compute the same ratio the naive form does, but never
-        // materialize sqrtP^2. That product needs up to 320 bits, so the direct
-        // form reverts inside FullMath for any pool priced above ~1.8e19 in raw
-        // units. Splitting into two mulDiv steps keeps every intermediate below
-        // 2^256 across the full uint160 sqrt-price range.
         if (aIsT0) {
             // price = sqrtP^2 * 10^dec1 * 1e18 / (2^192 * 10^dec0)
-            //       = (sqrtP^2 / 2^96) * 10^dec1 * 1e18 / (2^96 * 10^dec0)
-            uint256 priceX96 = FullMath.mulDiv(sqrtP, sqrtP, Q96); // <= 2^224
-            price1e18 = FullMath.mulDiv(
-                priceX96,
-                tenPowDec1 * 1e18,
-                Q96 * tenPowDec0
-            );
+            uint256 numeratorDecimals = uint256(dec1_uint8) + 18;
+            uint256 quotient = FullMath.mulDiv(sqrtP, sqrtP, Q192);
+            if (numeratorDecimals < dec0_uint8) {
+                return quotient / (10 ** (uint256(dec0_uint8) - numeratorDecimals));
+            }
+
+            uint256 scale = 10 ** (numeratorDecimals - uint256(dec0_uint8));
+            // Preserve the part below Q192 before decimal scaling. Scaling only
+            // `quotient` is what previously rounded valid small prices to zero.
+            uint256 remainder = mulmod(sqrtP, sqrtP, Q192);
+            return quotient * scale + FullMath.mulDiv(remainder, scale, Q192);
         } else {
             // price = 2^192 * 10^dec0 * 1e18 / (sqrtP^2 * 10^dec1)
-            //       = (2^192 / sqrtP) * 10^dec0 * 1e18 / (sqrtP * 10^dec1)
-            uint256 inverseX96 = FullMath.mulDiv(Q96, Q96, sqrtP); // <= 2^160
-            price1e18 = FullMath.mulDiv(
-                inverseX96,
-                tenPowDec0 * 1e18,
-                sqrtP * tenPowDec1
-            );
-        }
+            uint256 numeratorDecimals = uint256(dec0_uint8) + 18;
+            if (numeratorDecimals < dec1_uint8) {
+                uint256 divisor = 10 ** (uint256(dec1_uint8) - numeratorDecimals);
+                return ((Q192 / sqrtP) / sqrtP) / divisor;
+            }
 
-        return price1e18;
+            uint256 scale = 10 ** (numeratorDecimals - uint256(dec1_uint8));
+            uint256 quotient = Q192 / sqrtP;
+            uint256 remainder = Q192 % sqrtP;
+            uint256 result = FullMath.mulDiv(quotient, scale, sqrtP);
+            uint256 scaledRemainder = FullMath.mulDiv(remainder, scale, sqrtP);
+            uint256 carry = scaledRemainder / sqrtP;
+            if (scaledRemainder % sqrtP + mulmod(quotient, scale, sqrtP) >= sqrtP) {
+                ++carry;
+            }
+            return result + carry;
+        }
     }
 
     /**
