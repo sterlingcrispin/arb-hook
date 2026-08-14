@@ -127,7 +127,8 @@ So the implementation uses bounded heuristics:
   cap as its available balance. Borrow twice the selected chunk because the
   unchanged executor limits its first candidate to half of its balance. This
   preserves the executor's selected trade size without adding another sizing
-  model.
+  model. Any start-token balance held before the loan is excluded from the
+  executor's sizing balance.
 
 ### Mixed V2/V3 path
 
@@ -136,7 +137,7 @@ So the implementation uses bounded heuristics:
 - Before a flash loan, run that same bounded simulation from half of the
   configured principal cap. Borrow twice the selected chunk so callback
   execution begins with the same candidate; no separate spread-based sizing
-  model is used.
+  model is used. Pre-existing start-token balances are not part of that candidate.
 
 Large-first probing is intentional: it converges quickly and cheaply with halving when oversized.
 

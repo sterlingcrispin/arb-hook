@@ -57,6 +57,19 @@ The initial deployment is owner-operated with a small set of manually verified, 
 
 ## Addressed
 
+57. Donated balances could expand trades beyond loan-funded sizing
+- Status: `ADDRESSED`
+- Priority: `HIGH`
+- Notes: The flash principal configuration correctly capped borrowing, but the
+  executor sized each iteration from the hook's entire start-token balance. An
+  unsolicited transfer could therefore expand pool exposure without increasing
+  the loan. The executor now subtracts the balance present before the active loan
+  from every sizing pass while retaining it in realized balance accounting. A
+  regression compares the same route with and without a 5,000-token donation and
+  requires identical principal and swap volume. Documentation now calls the
+  setting a borrowing ceiling, not a cumulative-volume ceiling: loan capital and
+  earned profit may be reused across bounded iterations.
+
 56. Ownership renunciation could permanently destroy the kill switch
 - Status: `ADDRESSED`
 - Priority: `CRITICAL`

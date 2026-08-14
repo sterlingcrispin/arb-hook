@@ -203,11 +203,15 @@ cast call "$HOOK" \
   --rpc-url "$BASE_RPC_URL"
 ```
 
-Set the principal as an operator risk ceiling; adaptive route math chooses the
-actual loan below it. The historical flash sequence reached a maximum principal
-of 10,695.735171 USDC, so an 11,000 USDC cap is the smallest simple cap that
-covers that fixed-block gate. The test suite's 100,000 USDC cap is not a
-production recommendation.
+Set the principal as a borrowing ceiling; adaptive route math chooses the actual
+loan below it. Start-token balances already held by the hook are excluded from
+sizing, so donations cannot expand the route. The ceiling is not a bound on
+cumulative swap volume because borrowed principal and earned profit can be reused
+across bounded iterations. `hookMaxIterations`, route sizing, price limits, and
+`maxImpactBps` bound that execution. The historical flash sequence reached a
+maximum principal of 10,695.735171 USDC, so an 11,000 USDC cap is the smallest
+simple cap that covers that fixed-block gate. The test suite's 100,000 USDC cap
+is not a production recommendation.
 
 **Do not calibrate `minNetProfit` against the fixed-block fixture.** It seeds one
 displacement, and each candidate floor creates a different pool-state trajectory

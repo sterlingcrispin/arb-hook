@@ -191,7 +191,7 @@ The main runtime knobs are owner-settable on `ArbHook`:
 The per-token flash controls are:
 
 - `setFlashPrincipalForToken(address,uint256)`
-  Sets the maximum amount that adaptive sizing may borrow. Zero disables borrowing; it never means "use all lender liquidity."
+  Sets the maximum amount that adaptive sizing may borrow. Zero disables borrowing; it never means "use all lender liquidity." Start-token balances already held by the hook are excluded from route sizing, so unsolicited transfers cannot expand a trade. The cap is not a cumulative-volume limit: principal and earned profit can be reused across the configured iterations.
 
 - `setMaxFlashFeeBpsForToken(address,uint256)`
   Sets the maximum lender fee relative to principal. Zero disables borrowing. Both the quote and actual callback fee are checked with ceiling rounding.

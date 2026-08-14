@@ -60,7 +60,7 @@ npm run size                                          # EIP-170 budget
 - Registration order determines traversal order (`supportedTokens` then
   `baseCounterList`). Changing it changes route selection and the fork gate.
 - Repayment is atomic and measured against the hook's own pre-loan balance. A
-  pre-existing balance may be used as trading capital but must never be lost.
+  pre-existing balance is excluded from sizing and must never be lost.
 - The flash callback requires exact lender, initiator, token, amount and context
   hash. Swap callbacks require the single-use `(pool, data)` context.
 - Intermediate-token balance must be exactly restored before a loan settles.
