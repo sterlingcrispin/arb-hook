@@ -260,6 +260,12 @@ contract ArbHook is
 
     // ------------------------------- Admin ---------------------------------
 
+    /// @dev A live v4 hook cannot be detached, so its shutdown controls must
+    ///      always retain an owner. Ownership transfers remain two-step.
+    function renounceOwnership() public pure override {
+        revert ArbErrors.OwnershipRenunciationDisabled();
+    }
+
     function getExecutionConfig()
         external
         view
