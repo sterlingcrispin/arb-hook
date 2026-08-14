@@ -192,7 +192,7 @@ forge script script/ConfigureArbHookCanary.s.sol:ConfigureArbHookCanary \
 
    The script configures the principal cap last and does not enable hook
    iterations.
-6. Read back both configurations:
+6. Read back all runtime configurations:
 
 ```bash
 cast call "$HOOK" \
@@ -201,6 +201,7 @@ cast call "$HOOK" \
 cast call "$HOOK" \
   "getExecutionConfig()(uint256,uint16,uint16,uint256)" \
   --rpc-url "$BASE_RPC_URL"
+cast call "$HOOK" "getGasBounds()(uint32,uint32)" --rpc-url "$BASE_RPC_URL"
 ```
 
 Set the principal as a borrowing ceiling; adaptive route math chooses the actual

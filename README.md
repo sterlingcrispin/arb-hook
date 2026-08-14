@@ -91,7 +91,7 @@ npm run size
 
 The cached fork gate replays the ten rounds from `ParityTest/attemptAllOutput.txt` with the intended zero-fee Morpho-backed ERC-3156 adapter. It requires the same buy/sell route in every round and positive net profit. It does not require legacy gross-profit equality because bounded capacity refinement can change trade size. The Aave-backed sequence remains available as a fee-bearing comparison.
 
-The size gate caps each production runtime at 24,000 bytes, leaving at least 576 bytes below EIP-170's 24,576-byte limit. It covers `ArbHook`, `ArbitrageLogic`, `AaveV3ERC3156Adapter`, and `MorphoERC3156Adapter`. At this commit, `ArbHook` is 22,392 runtime bytes, leaving 1,608 bytes below the project budget and 2,184 bytes below EIP-170.
+The size gate caps each production runtime at 24,000 bytes, leaving at least 576 bytes below EIP-170's 24,576-byte limit. It covers `ArbHook`, `ArbitrageLogic`, `AaveV3ERC3156Adapter`, and `MorphoERC3156Adapter`. At this commit, `ArbHook` is 22,333 runtime bytes, leaving 1,667 bytes below the project budget and 2,243 bytes below EIP-170.
 
 `FlashLoanSettled` is the canonical execution record. It reports the lender, tokens, selected pools, borrowed principal, total input swapped, fee, net profit, iterations, and beneficiary without adding permanent per-trade storage writes to the hook.
 
@@ -187,6 +187,16 @@ The main runtime knobs are owner-settable on `ArbHook`:
   discovery pass would revert the user's swap. Raise the reserve if a rehearsal
   shows settlement costing more; raise the ceiling only if profitable routes are
   being cut short.
+
+  Pair-level failure isolation gives each route at most half the scanner's
+  remaining gas. In the local real-route harness, a path that consumes about
+  505,000 gas first succeeds with a 1,200,000-gas caller limit, roughly 2.4x
+  headroom. Applying that measured ratio to the 1,076,889-gas Base rehearsal is a
+  planning estimate of roughly 2.5 million caller gas before an arb can land, not
+  a release measurement. A tighter swap still settles but may skip arbitrage.
+  Gas also decays approximately `G/2`, `G/4`, then `G/8` across consecutive
+  failed routes; this is acceptable for the small canary pool book and must be
+  revisited before broad registry growth.
 
 The per-token flash controls are:
 

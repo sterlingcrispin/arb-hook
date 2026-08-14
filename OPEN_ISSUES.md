@@ -48,7 +48,10 @@ The initial deployment is owner-operated with a small set of manually verified, 
 9. Arbitrary registry-scale gas limits
 - Status: `DEFERRED`
 - Summary: Discovery cost scales with configured bases, counters, and pools.
-- Decision: the canary uses a small bounded pool book; add explicit limits before supporting a broad registry.
+- Decision: the canary uses a small bounded pool book. Because each isolated
+  route receives half the remaining scanner gas, failed-route budgets decay
+  approximately `G/2`, `G/4`, then `G/8` across pairs. Revisit traversal and add
+  explicit scale limits before supporting a broad registry.
 
 29. Approximate V3 initialized-tick capacity
 - Status: `DEFERRED`
@@ -56,6 +59,17 @@ The initial deployment is owner-operated with a small set of manually verified, 
 - Decision: do not add expensive tick traversal for the canary. Pool price limits, atomic repayment, intermediate-balance restoration, and realized minimum-profit enforcement remain authoritative; revisit sizing precision after canary results.
 
 ## Addressed
+
+58. Retry suppression depends on lender revert-data propagation
+- Status: `DOCUMENTED`
+- Priority: `LOW`
+- Notes: `_requestFlashLoan` recognizes `FlashProfitBelowMinimum` from the
+  lender's bubbled revert selector so it can suppress smaller-principal retries.
+  Both bundled adapters propagate callback reverts unchanged. A future
+  owner-configured lender that wraps or fabricates revert data could change retry
+  selection, but cannot bypass callback authentication, realized minimum profit,
+  or atomic repayment. The dependency is now explicit at the catch site and
+  must be checked when adding another adapter.
 
 57. Donated balances could expand trades beyond loan-funded sizing
 - Status: `ADDRESSED`
@@ -265,8 +279,8 @@ The initial deployment is owner-operated with a small set of manually verified, 
 1. ArbHook EIP-170 deployability
 - Status: `ADDRESSED`
 - Notes: Cold registration validation moved into the existing `ArbitrageLogic`
-  dependency and unused runtime surfaces were removed. `ArbHook` is 22,392
-  runtime bytes: 1,608 bytes below the repository's 24,000-byte budget and 2,184
+  dependency and unused runtime surfaces were removed. `ArbHook` is 22,333
+  runtime bytes: 1,667 bytes below the repository's 24,000-byte budget and 2,243
   bytes below the 24,576-byte EIP-170 limit.
 
 7. Shared pool metadata removal

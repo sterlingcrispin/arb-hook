@@ -823,6 +823,8 @@ contract ArbHook is
             loanRequested = ok;
         } catch (bytes memory reason) {
             loanReverted = true;
+            // The bundled adapters bubble callback revert data unchanged. A future
+            // lender that rewrites it can alter retry selection, not settlement safety.
             belowMinimum = _revertSelector(reason) == ArbErrors.FlashProfitBelowMinimum.selector;
         }
 
