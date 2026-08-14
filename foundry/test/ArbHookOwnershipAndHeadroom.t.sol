@@ -206,6 +206,64 @@ contract ArbHookOwnershipAndHeadroomTest is Test {
         assertEq(iterations, 0, "new owner controls the kill switch");
     }
 
+    // ------------------------- Risk ceiling --------------------------------
+
+    /// @dev The runbook presents the flash principal cap as the operator's risk
+    ///      ceiling, but sizing reads the hook's whole balance. Any token sitting
+    ///      in the hook is added to the borrowed principal as trading capital, so
+    ///      the amount actually pushed through the pools can exceed the cap. The
+    ///      donated balance itself is never lost, only the size bound is.
+    function testDonatedBalanceLetsTradesExceedThePrincipalCap() public {
+        uint256 cap = 20e18;
+        hook.setFlashPrincipalForToken(address(startToken), cap);
+
+        uint256 donation = 5_000e18;
+        startToken.mint(address(hook), donation);
+
+        vm.recordLogs();
+        (bool success,,) = hook.runFlashArbForTest(
+            address(sellPool),
+            address(buyPool),
+            address(startToken),
+            address(intermediateToken),
+            2,
+            ArbUtils.PoolType.V2,
+            ArbUtils.PoolType.PANCAKESWAP_V2
+        );
+        assertTrue(success, "route should execute");
+
+        (uint256 principal, uint256 swapped) = _settledAmounts(vm.getRecordedLogs());
+        emit log_named_uint("configured principal cap", cap);
+        emit log_named_uint("borrowed principal", principal);
+        emit log_named_uint("amount actually swapped", swapped);
+
+        assertLe(principal, cap, "borrowing itself stays within the cap");
+        assertGt(swapped, cap, "trade size exceeded the operator's stated ceiling");
+        assertGe(
+            startToken.balanceOf(address(hook)),
+            donation,
+            "donated capital must never be lost"
+        );
+    }
+
+    function _settledAmounts(Vm.Log[] memory entries)
+        private
+        view
+        returns (uint256 principal, uint256 swapped)
+    {
+        bytes32 topic = keccak256(
+            "FlashLoanSettled(address,address,address,address,address,uint256,uint256,uint256,int256,uint256,address)"
+        );
+        for (uint256 i; i < entries.length; ++i) {
+            if (entries[i].emitter == address(hook) && entries[i].topics.length > 0 && entries[i].topics[0] == topic) {
+                (,, principal, swapped,,,,) = abi.decode(
+                    entries[i].data,
+                    (address, address, uint256, uint256, uint256, int256, uint256, address)
+                );
+            }
+        }
+    }
+
     // ------------------------- Gas headroom --------------------------------
 
     /// @dev Each route receives half the scanner's remaining gas, so a swap must
