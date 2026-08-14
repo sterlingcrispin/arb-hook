@@ -959,6 +959,7 @@ contract ArbHook is
 
         IERC20 startTokenContract = IERC20(startToken);
         IERC20 intermediateTokenContract = IERC20(intermediateToken);
+        uint256 activePrincipal = _activeLoanAmount();
         // Any intermediate balance held before this route runs belongs to the hook,
         // not to this attempt. Unwinding is measured against it so a pre-existing
         // balance is never spent and never counted as residue.
@@ -1071,6 +1072,11 @@ contract ArbHook is
             uint256 balanceBeforeIteration = startTokenContract.balanceOf(
                 address(this)
             );
+            // Flash sizing uses only the loan plus profit earned by earlier
+            // iterations. Inventory mode is retained only by the legacy harness.
+            uint256 sizingBalance = activePrincipal == 0
+                ? balanceBeforeIteration
+                : activePrincipal + uint256(cumulativeProfit);
 
             uint256 chunkToSwap = 0;
             uint160 sqrtPriceLimitA_v3 = 0;
@@ -1087,7 +1093,7 @@ contract ArbHook is
                 iterConfig.bpsDivisor = BPS_DIVISOR;
                 iterConfig.maxImpactBps = _MAX_IMPACT_BPS;
                 iterConfig.minChunkForStartToken = minChunkStartToken;
-                iterConfig.currentStartTokenBalance = balanceBeforeIteration;
+                iterConfig.currentStartTokenBalance = sizingBalance;
                 iterConfig
                     .initialAbsSpread = initialAbsSpreadForThisArbOpportunity;
 
@@ -1126,7 +1132,7 @@ contract ArbHook is
                         poolB_addr,
                         startToken,
                         intermediateToken,
-                        balanceBeforeIteration,
+                        sizingBalance,
                         minChunkStartToken,
                         _v2FeeForPoolType(poolAType),
                         _v2FeeForPoolType(poolBType)
@@ -1196,7 +1202,7 @@ contract ArbHook is
             } else {
                 // Mixed V2/V3 path:
                 // exact optimum is expensive on-chain, so probe from half-balance downward.
-                uint256 currentBal = balanceBeforeIteration;
+                uint256 currentBal = sizingBalance;
                 if (currentBal == 0) break;
 
                 // Half-balance is a practical "large first probe":

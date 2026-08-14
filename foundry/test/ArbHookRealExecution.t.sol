@@ -291,7 +291,7 @@ contract ArbHookRealExecutionTest is Test {
     }
 
     function testHookBalanceSurvivesRealExecution() public {
-        // A pre-existing balance may be used as trading capital but never lost.
+        // A pre-existing balance is excluded from sizing and must never be lost.
         startToken.mint(address(hook), 500e18);
         intermediateToken.mint(address(hook), 250e18);
         uint256 startBefore = startToken.balanceOf(address(hook));
