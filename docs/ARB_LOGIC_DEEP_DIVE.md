@@ -52,6 +52,10 @@ Why this is done:
 - Avoids revert cascades from one bad route.
 - Gives each route at most half the remaining scanner gas, so one expensive V3
   path cannot starve the fallback or later base/counter pairs.
+- The available route budget therefore decays geometrically across failures:
+  approximately half for the first route, one quarter for its fallback, and one
+  eighth for the next pair. This is acceptable for the canary's small pool book,
+  not a scale-independent traversal guarantee.
 - Keeps no failed-quote state across later user swaps, so a temporary lender or
   route failure cannot poison a future opportunity.
 
