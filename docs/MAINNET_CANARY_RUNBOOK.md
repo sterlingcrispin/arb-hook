@@ -101,6 +101,12 @@ Review the simulation, then rerun the same command with `--broadcast`. Set
 The script rejects chains other than Base mainnet (`8453`) and leaves hook
 execution disabled.
 
+Ownership renunciation is disabled because a live v4 hook cannot be detached and
+must retain its shutdown controls. If ownership must change, the current owner
+calls `transferOwnership(newOwner)`, the new owner calls `acceptOwnership()`, and
+the operator verifies both `owner()` and `pendingOwner()` before retiring the old
+key. A transfer is not complete when only the first transaction succeeds.
+
 Before configuration, verify:
 
 ```bash

@@ -7,6 +7,7 @@ import {ArbHookHarness} from "../../contracts/test/ArbHookHarness.sol";
 import {PoolManagerHarness} from "../../contracts/test/PoolManagerHarness.sol";
 import {ArbitrageLogic} from "../../contracts/ArbitrageLogic.sol";
 import {ArbUtils} from "../../contracts/ArbUtils.sol";
+import {ArbErrors} from "../../contracts/Errors.sol";
 import {TestToken} from "../../contracts/test/TestToken.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {IERC3156FlashBorrower} from "../../contracts/interfaces/IERC3156FlashBorrower.sol";
@@ -160,26 +161,14 @@ contract ArbHookOwnershipAndHeadroomTest is Test {
 
     // ------------------------- Owner surface -------------------------------
 
-    /// @dev `renounceOwnership` is inherited from Ownable and is NOT two-step. It
-    ///      permanently removes the only mechanism the runbook documents for
-    ///      stopping the hook, and the hook cannot be detached from a live v4 pool.
-    function testRenounceOwnershipPermanentlyDestroysTheKillSwitch() public {
+    function testRenounceOwnershipIsDisabledToPreserveKillSwitch() public {
+        vm.expectRevert(ArbErrors.OwnershipRenunciationDisabled.selector);
         hook.renounceOwnership();
-        assertEq(hook.owner(), address(0), "ownership renounced in one step");
 
-        // Every stop lever is now unreachable, forever.
-        vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, address(this)));
+        assertEq(hook.owner(), address(this), "owner changed after rejected renunciation");
         hook.setHookMaxIterations(0);
-
-        vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, address(this)));
-        hook.setFlashPrincipalForToken(address(startToken), 0);
-
-        vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, address(this)));
-        hook.removeTokens(address(startToken));
-
-        // And the hook keeps executing arbitrage on every swap.
-        poolManager.callAfterSwap(IHooks(address(hook)), makeAddr("router"), abi.encodePacked(makeAddr("ben")));
-        assertEq(lender.flashLoanCallCount(), 1, "hook still trades after renounce");
+        (uint256 iterations,,,) = hook.getExecutionConfig();
+        assertEq(iterations, 0, "kill switch became unreachable");
     }
 
     /// @dev `transferOwnership` is two-step, so a handover that omits

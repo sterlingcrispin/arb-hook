@@ -57,6 +57,16 @@ The initial deployment is owner-operated with a small set of manually verified, 
 
 ## Addressed
 
+56. Ownership renunciation could permanently destroy the kill switch
+- Status: `ADDRESSED`
+- Priority: `CRITICAL`
+- Notes: OpenZeppelin's inherited `renounceOwnership()` was a one-transaction,
+  irreversible path to remove the only account able to disable iterations or
+  flash principal. A hook cannot be detached from an initialized v4 pool, so
+  `ArbHook` now overrides renunciation to revert. Two-step ownership transfer
+  remains available, and the runbook requires `acceptOwnership()` plus owner and
+  pending-owner readback before retiring the old key.
+
 51. V3 edge score was treated as a raw-token profit estimate
 - Status: `ADDRESSED`
 - Priority: `CRITICAL`
