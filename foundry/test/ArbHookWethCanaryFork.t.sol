@@ -69,6 +69,7 @@ contract ArbHookWethCanaryForkTest is Test {
     ArbHook internal hook;
     MorphoERC3156Adapter internal adapter;
     PoolKey internal triggerKey;
+    uint256 internal triggerPositionTokenId;
 
     function setUp() public {
         if (!vm.envOr("RUN_WETH_CANARY_FORK", false)) return;
@@ -138,6 +139,8 @@ contract ArbHookWethCanaryForkTest is Test {
         assertEq(IERC20(WETH).balanceOf(address(hook)), 0, "hook retained WETH");
         assertEq(IERC20(CBBTC).balanceOf(address(hook)), 0, "hook retained cbBTC");
 
+        _removeTriggerLiquidity();
+
         emit log_named_uint("Base fork block", block.number);
         emit log_named_decimal_uint("borrowed WETH", settled.principal, 18);
         emit log_named_decimal_uint("beneficiary profit WETH", uint256(settled.netProfit), 18);
@@ -190,7 +193,7 @@ contract ArbHookWethCanaryForkTest is Test {
         IPermit2Allowance(PERMIT2).approve(USDC, V4_POSITION_MANAGER, uint160(usdcMax), type(uint48).max);
 
         IUniswapV4PositionManager positionManager = IUniswapV4PositionManager(V4_POSITION_MANAGER);
-        uint256 tokenId = positionManager.nextTokenId();
+        triggerPositionTokenId = positionManager.nextTokenId();
         bytes[] memory params = new bytes[](3);
         params[0] = abi.encode(triggerKey, tickLower, tickUpper, liquidity, wethMax, usdcMax, address(this), bytes(""));
         params[1] = abi.encode(triggerKey.currency0);
@@ -213,7 +216,34 @@ contract ArbHookWethCanaryForkTest is Test {
             )
         );
         positionManager.multicall(calls);
-        assertEq(positionManager.ownerOf(tokenId), address(this), "canonical PositionManager mint failed");
+        assertEq(
+            positionManager.ownerOf(triggerPositionTokenId), address(this), "canonical PositionManager mint failed"
+        );
+    }
+
+    function _removeTriggerLiquidity() private {
+        IUniswapV4PositionManager positionManager = IUniswapV4PositionManager(V4_POSITION_MANAGER);
+        uint256 wethBefore = IERC20(WETH).balanceOf(address(this));
+        uint256 usdcBefore = IERC20(USDC).balanceOf(address(this));
+
+        bytes[] memory params = new bytes[](3);
+        params[0] = abi.encode(triggerPositionTokenId, uint128(1), uint128(1), bytes(""));
+        params[1] = abi.encode(triggerKey.currency0);
+        params[2] = abi.encode(triggerKey.currency1);
+        positionManager.modifyLiquidities(
+            abi.encode(
+                abi.encodePacked(
+                    bytes1(uint8(Actions.BURN_POSITION)),
+                    bytes1(uint8(Actions.CLOSE_CURRENCY)),
+                    bytes1(uint8(Actions.CLOSE_CURRENCY))
+                ),
+                params
+            ),
+            block.timestamp
+        );
+
+        assertGt(IERC20(WETH).balanceOf(address(this)), wethBefore, "LP WETH was not returned");
+        assertGt(IERC20(USDC).balanceOf(address(this)), usdcBefore, "LP USDC was not returned");
     }
 
     function _displaceUniswapCbBtcPool(uint256 amountIn) private {
