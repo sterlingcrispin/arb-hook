@@ -16,8 +16,8 @@ contract DeployArbHook is Script {
     address internal constant CREATE2_DEPLOYER = 0x4e59b44847b379578588920cA78FbF26c0B4956C;
     address internal constant POOL_MANAGER = 0x498581fF718922c3f8e6A244956aF099B2652b2b;
     address internal constant AAVE_POOL = 0xA238Dd80C259a72e81d7e4664a9801593F98d1c5;
-    address internal constant USDC = 0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913;
-    address internal constant AAVE_USDC_A_TOKEN = 0x4e65fE4DbA92790696d040ac24Aa414708F5c0AB;
+    address internal constant WETH = 0x4200000000000000000000000000000000000006;
+    address internal constant AAVE_WETH_A_TOKEN = 0xD4a0e0b9149BCee3C920d2E00b5dE09138fd8bb7;
     address internal constant MORPHO_BLUE = 0xBBBBBbbBBb9cC5e90e3b3Af64bdAF62C37EEFFCb;
 
     error WrongChain();
@@ -42,8 +42,8 @@ contract DeployArbHook is Script {
 
         vm.startBroadcast(privateKey);
         logic = new ArbitrageLogic();
-        aaveAdapter = new AaveV3ERC3156Adapter(AAVE_POOL, USDC, AAVE_USDC_A_TOKEN);
-        morphoAdapter = new MorphoERC3156Adapter(MORPHO_BLUE, USDC);
+        aaveAdapter = new AaveV3ERC3156Adapter(AAVE_POOL, WETH, AAVE_WETH_A_TOKEN);
+        morphoAdapter = new MorphoERC3156Adapter(MORPHO_BLUE, WETH);
         vm.stopBroadcast();
 
         bytes memory args = abi.encode(IPoolManager(POOL_MANAGER), owner, address(logic));
