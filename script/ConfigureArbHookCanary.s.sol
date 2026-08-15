@@ -7,7 +7,7 @@ import {console2} from "forge-std/console2.sol";
 import {ArbHook} from "../contracts/ArbHook.sol";
 
 contract ConfigureArbHookCanary is Script {
-    address internal constant USDC = 0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913;
+    address internal constant WETH = 0x4200000000000000000000000000000000000006;
 
     error WrongChain();
     error InvalidEconomicConfig();
@@ -22,9 +22,9 @@ contract ConfigureArbHookCanary is Script {
         // AAVE_ADAPTER remains accepted so existing runbook invocations still work.
         address adapter = vm.envOr("LENDER_ADAPTER", address(0));
         if (adapter == address(0)) adapter = vm.envAddress("AAVE_ADAPTER");
-        uint256 principalCap = vm.envUint("USDC_FLASH_PRINCIPAL_CAP_RAW");
-        uint256 maxFeeBps = vm.envUint("USDC_MAX_FLASH_FEE_BPS");
-        uint256 minNetProfit = vm.envUint("USDC_MIN_NET_PROFIT_RAW");
+        uint256 principalCap = vm.envUint("WETH_FLASH_PRINCIPAL_CAP_WEI");
+        uint256 maxFeeBps = vm.envUint("WETH_MAX_FLASH_FEE_BPS");
+        uint256 minNetProfit = vm.envUint("WETH_MIN_NET_PROFIT_WEI");
 
         if (adapter == address(0) || principalCap == 0 || maxFeeBps == 0 || minNetProfit == 0) {
             revert InvalidEconomicConfig();
@@ -32,14 +32,14 @@ contract ConfigureArbHookCanary is Script {
         if (hook.owner() != vm.addr(privateKey)) revert NotHookOwner();
 
         vm.startBroadcast(privateKey);
-        hook.setLenderForToken(USDC, adapter);
-        hook.setMaxFlashFeeBpsForToken(USDC, maxFeeBps);
-        hook.setMinNetProfitForToken(USDC, minNetProfit);
-        hook.setFlashPrincipalForToken(USDC, principalCap);
+        hook.setLenderForToken(WETH, adapter);
+        hook.setMaxFlashFeeBpsForToken(WETH, maxFeeBps);
+        hook.setMinNetProfitForToken(WETH, minNetProfit);
+        hook.setFlashPrincipalForToken(WETH, principalCap);
         vm.stopBroadcast();
 
-        console2.log("USDC principal cap", principalCap);
-        console2.log("USDC max flash fee bps", maxFeeBps);
-        console2.log("USDC minimum net profit", minNetProfit);
+        console2.log("WETH principal cap (wei)", principalCap);
+        console2.log("WETH max flash fee bps", maxFeeBps);
+        console2.log("WETH minimum net profit (wei)", minNetProfit);
     }
 }
