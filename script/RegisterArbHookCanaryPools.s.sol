@@ -17,13 +17,10 @@ interface IV3PoolManifestEntry {
 /// @notice Registers the reviewed first-stage Base canary pool book.
 contract RegisterArbHookCanaryPools is Script {
     address internal constant WETH = 0x4200000000000000000000000000000000000006;
-    address internal constant CBBTC = 0xcbB7C0000aB88B473b1f5aFd9ef808440eed33Bf;
+    address internal constant USDC = 0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913;
 
-    address internal constant PANCAKE_V3_FACTORY = 0x0BFbCF9fa4f9C56B0F40a671Ad40E0805A091865;
     address internal constant UNISWAP_V3_FACTORY = 0x33128a8fC17869897dcE68Ed026d694621f6FDfD;
-
-    address internal constant PANCAKE_CBBTC_WETH_100 = 0xC211e1f853A898Bd1302385CCdE55f33a8C4B3f3;
-    address internal constant UNISWAP_CBBTC_WETH_500 = 0x7AeA2E8A3843516afa07293a10Ac8E49906dabD1;
+    address internal constant UNISWAP_WETH_USDC_500 = 0xd0b53D9277642d899DF5C87A3966A349A798F224;
 
     error WrongChain();
     error NotHookOwner();
@@ -36,34 +33,29 @@ contract RegisterArbHookCanaryPools is Script {
         ArbHook hook = ArbHook(payable(vm.envAddress("HOOK")));
         if (hook.owner() != vm.addr(privateKey)) revert NotHookOwner();
 
-        _attestPool(PANCAKE_CBBTC_WETH_100, PANCAKE_V3_FACTORY, 100);
-        _attestPool(UNISWAP_CBBTC_WETH_500, UNISWAP_V3_FACTORY, 500);
+        _attestPool(UNISWAP_WETH_USDC_500, UNISWAP_V3_FACTORY, 500);
 
-        address[] memory pools = new address[](2);
-        pools[0] = PANCAKE_CBBTC_WETH_100;
-        pools[1] = UNISWAP_CBBTC_WETH_500;
+        address[] memory pools = new address[](1);
+        pools[0] = UNISWAP_WETH_USDC_500;
 
-        uint24[] memory fees = new uint24[](2);
-        fees[0] = 100;
-        fees[1] = 500;
+        uint24[] memory fees = new uint24[](1);
+        fees[0] = 500;
 
-        ArbUtils.PoolType[] memory types = new ArbUtils.PoolType[](2);
-        types[0] = ArbUtils.PoolType.PANCAKESWAP_V3;
-        types[1] = ArbUtils.PoolType.V3;
+        ArbUtils.PoolType[] memory types = new ArbUtils.PoolType[](1);
+        types[0] = ArbUtils.PoolType.V3;
 
         vm.broadcast(privateKey);
         hook.addPools(WETH, pools, fees, types);
 
-        console2.log("Registered WETH/cbBTC pools", pools.length);
-        console2.log("PancakeSwap v3", pools[0]);
-        console2.log("Uniswap v3", pools[1]);
+        console2.log("Registered WETH/USDC reference pools", pools.length);
+        console2.log("Uniswap v3 reference", pools[0]);
     }
 
     function _attestPool(address poolAddress, address expectedFactory, uint24 expectedFee) private view {
         IV3PoolManifestEntry pool = IV3PoolManifestEntry(poolAddress);
         if (
             poolAddress.code.length == 0 || pool.factory() != expectedFactory || pool.token0() != WETH
-                || pool.token1() != CBBTC || pool.fee() != expectedFee
+                || pool.token1() != USDC || pool.fee() != expectedFee
         ) revert InvalidPoolManifest();
     }
 }
