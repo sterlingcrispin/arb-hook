@@ -1,4 +1,4 @@
-"""Find arbitrage that actually executed between two pools, rather than inferring it.
+"""Historical evidence for the retired external/external strategy.
 
 Measuring the spread only shows what is left over. It cannot distinguish
 "competitors closed the gap" from "the gap never opened" or from "each pool is
