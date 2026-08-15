@@ -47,6 +47,7 @@ contract ArbHookWethCanaryForkTest is Test {
     address internal constant UNISWAP_WETH_USDC_500 = 0xd0b53D9277642d899DF5C87A3966A349A798F224;
 
     uint256 internal constant PRINCIPAL_CAP = 1 ether;
+    uint256 internal constant MIN_NET_PROFIT = 0.0001 ether;
     bytes32 internal constant FLASH_SETTLED_TOPIC0 = keccak256(
         "FlashLoanSettled(address,address,address,address,address,uint256,uint256,uint256,int256,uint256,address)"
     );
@@ -95,7 +96,7 @@ contract ArbHookWethCanaryForkTest is Test {
         hook.setLenderForToken(WETH, address(adapter));
         hook.setFlashPrincipalForToken(WETH, PRINCIPAL_CAP);
         hook.setMaxFlashFeeBpsForToken(WETH, 1);
-        hook.setMinNetProfitForToken(WETH, 1);
+        hook.setMinNetProfitForToken(WETH, MIN_NET_PROFIT);
         hook.setHookMaxIterations(2);
 
         _registerCbBtcBook();
