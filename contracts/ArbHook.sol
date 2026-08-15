@@ -464,7 +464,7 @@ contract ArbHook is
         return d > 4 ? 10 ** (d - 4) : 1;
     }
 
-    /// @notice Counter-trade the triggering v4 pool against the cheapest registered V3 venue.
+    /// @notice Counter-trade the triggering v4 pool against its registered V3 reference venue.
     /// @dev This self-call is the failure boundary used by afterSwap. The triggering swap's
     ///      output token is the flash principal and the first leg runs in the opposite direction.
     function attemptHookPoolInternal(
@@ -491,7 +491,6 @@ contract ArbHook is
         ) return false;
 
         ArbUtils.PoolInfo memory externalPool;
-        uint256 bestBuyPrice = type(uint256).max;
         ArbUtils.PoolInfo[] storage pools = tokenPools[startToken];
         for (uint256 i; i < pools.length; ) {
             ArbUtils.PoolInfo storage candidate = pools[i];
@@ -503,16 +502,8 @@ contract ArbHook is
                     (candidate.token1 == startToken &&
                         candidate.token0 == intermediateToken))
             ) {
-                (uint256 buyPrice, , bool ok) = arbLib
-                    ._getSinglePoolPrices(
-                        startToken,
-                        intermediateToken,
-                        candidate
-                    );
-                if (ok && buyPrice < bestBuyPrice) {
-                    bestBuyPrice = buyPrice;
-                    externalPool = candidate;
-                }
+                externalPool = candidate;
+                break;
             }
             unchecked {
                 ++i;
