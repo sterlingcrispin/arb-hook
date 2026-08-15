@@ -43,6 +43,59 @@ The initial deployment is owner-operated with a small set of manually verified, 
   routinely move the price past the fee floor, which means thin liquidity
   relative to typical trade size, the opposite of how this target was chosen.
 
+62. Spreads equilibrate just below each venue pair's own fee floor
+- Status: `DOCUMENTED`
+- Priority: `CRITICAL`
+- Summary: Moving to thin, high-turnover pairs does produce much larger price
+  moves, but it does not produce more profit, because the pools that move are
+  also the pools that charge more. Screened with
+  `scripts/find_multivenue_pools.py` and `scripts/sample_intrablock_spread.py`
+  over 20,000 blocks:
+
+  | Pair | Venues | Round trip | Median per-swap move | Median spread | Moments clearing fees |
+  |------|--------|-----------|----------------------|---------------|-----------------------|
+  | cbBTC | UniV3 0.05% / CakeV3 0.01% | 6 bps | 0 | 2 | 0 / 1937 |
+  | DEGEN | UniV3 1% / UniV3 0.3% | 130 bps | 2 | 76 | 1 / 127 |
+  | BRETT | UniV3 1% / CakeV3 0.25% | 125 bps | 10 | 47 | 1 / 15 |
+
+  Median spread tracks the fee floor in every case and stays below it. That is
+  the no-arbitrage band behaving exactly as theory predicts: competitors close
+  any gap that exceeds round-trip cost, so the resting spread settles just under
+  it regardless of which pair is chosen. Thin pools widen the band and the
+  hurdle together.
+- Consequence: no pair selection makes this strategy profitable on its own. Only
+  transient overshoots past the band are tradable, roughly 1% of observed
+  moments, and capturing one still requires the trigger swap to land in that
+  specific block.
+- Decision: stop screening pairs as the primary lever. The exploitable quantity
+  is not the resting spread but the dislocation a large swap creates, which
+  points at item 63.
+
+63. The hook cannot capture the dislocation its own trigger creates
+- Status: `DOCUMENTED`
+- Priority: `CRITICAL`
+- Summary: A swap against the triggering v4 pool moves that pool and nothing
+  else. The registered venues are untouched by it, so the trigger never creates
+  the opportunity the hook then searches for. Combined with item 61, capturing
+  anything needs an unrelated large swap and a trigger swap in the same block,
+  in the right order.
+- Rough magnitude: the best screened pair offers on the order of one tradable
+  moment per ten hours. A canary v4 pool realistically sees a handful of swaps
+  per day against roughly 43,000 blocks. The chance of those coinciding is far
+  below one capture per year.
+- The version that works: include the triggering v4 pool in the searched pool
+  book. A large swap against it dislocates that pool relative to the external
+  venues, and `afterSwap` runs inside the same transaction, so the hook is first
+  by construction rather than by luck. This is the edge the original design
+  described, and item 26 currently excludes it by never quoting or trading
+  against the triggering pool.
+- Caveats before adopting: trading against the triggering pool inside its own
+  `afterSwap` needs v4 re-entrancy and accounting review, the hook would be
+  taking the other side of the user's own price impact, and profit routing back
+  to that same user needs rethinking under item 41.
+- Decision: resolve this before any further market selection or deployment work.
+  It determines whether the strategy has an edge at all.
+
 61. Backrunning only pays if the hook can be ordered behind the dislocating swap
 - Status: `DOCUMENTED`
 - Priority: `HIGH`
