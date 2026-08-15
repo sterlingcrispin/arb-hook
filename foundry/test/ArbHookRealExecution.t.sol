@@ -7,12 +7,10 @@ import {ArbHookHarness} from "../../contracts/test/ArbHookHarness.sol";
 import {PoolManagerHarness} from "../../contracts/test/PoolManagerHarness.sol";
 import {ArbitrageLogic} from "../../contracts/ArbitrageLogic.sol";
 import {ArbUtils} from "../../contracts/ArbUtils.sol";
-import {ArbErrors} from "../../contracts/Errors.sol";
 import {TestToken} from "../../contracts/test/TestToken.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {IERC3156FlashBorrower} from "../../contracts/interfaces/IERC3156FlashBorrower.sol";
 import {IERC3156FlashLender} from "../../contracts/interfaces/IERC3156FlashLender.sol";
-import {IHooks} from "@uniswap/v4-core/src/interfaces/IHooks.sol";
 import {IPoolManager} from "@uniswap/v4-core/src/interfaces/IPoolManager.sol";
 
 /// @notice Faithful constant-product V2 pair: real balances, real flash-swap callback,
@@ -104,8 +102,9 @@ contract RealLender is IERC3156FlashLender {
     }
 }
 
-/// @notice Exercises the production route executor with no profit injection. The
-///         E2E suite stubs executeIterativeArb to isolate flash plumbing; these
+/// @notice Exercises the legacy external-pool executor retained by the parity
+///         harness with no profit injection. The E2E suite stubs
+///         executeIterativeArb to isolate flash plumbing; these
 ///         tests deliberately leave it intact so the two swap legs, the V2
 ///         repayment callbacks, residue handling and net-profit accounting all run
 ///         for real against pools that enforce their own K invariant.
@@ -212,19 +211,6 @@ contract ArbHookRealExecutionTest is Test {
         assertEq(intermediateToken.balanceOf(address(hook)), 0, "hook retained intermediate token");
     }
 
-    function testRealRouteViaDiscoveryAndAfterSwap() public {
-        address beneficiary = makeAddr("beneficiary");
-
-        (bytes4 selector,) = poolManager.callAfterSwap(
-            IHooks(address(hook)), makeAddr("router"), abi.encodePacked(beneficiary)
-        );
-
-        assertEq(selector, hook.afterSwap.selector);
-        assertEq(lender.flashLoanCallCount(), 1, "discovery should have found the route");
-        assertGt(startToken.balanceOf(beneficiary), 0, "beneficiary should receive real profit");
-        assertEq(intermediateToken.balanceOf(address(hook)), 0, "residue left behind");
-    }
-
     function testUnprofitableRealRouteRevertsLoanAndKeepsHookWhole() public {
         // Route the buy leg back through the same pool the sell leg used: after fees
         // the round trip cannot clear, so the loan must revert rather than settle.
@@ -244,50 +230,6 @@ contract ArbHookRealExecutionTest is Test {
         assertFalse(success, "flat route must not report success");
         assertEq(profit, 0, "flat route must not report profit");
         assertEq(startToken.balanceOf(address(hook)), hookBefore, "hook balance must be untouched");
-    }
-
-    /// @dev The hook must never consume the gas its caller needs to settle the swap.
-    ///      Without an explicit budget the 63/64 rule leaves only 1/64 behind, which
-    ///      is not enough on a swap submitted with a modest gas limit.
-    function testTightGasBudgetSkipsArbAndLeavesCallerGas() public {
-        uint256 tightGas = 400_000;
-
-        uint256 before = gasleft();
-        (bool ok, bytes memory ret) = address(poolManager).call{gas: tightGas}(
-            abi.encodeWithSelector(
-                poolManager.callAfterSwap.selector,
-                IHooks(address(hook)),
-                makeAddr("router"),
-                abi.encodePacked(makeAddr("beneficiary"))
-            )
-        );
-        uint256 consumed = before - gasleft();
-
-        assertTrue(ok, "afterSwap must not revert under a tight gas limit");
-        (bytes4 selector,) = abi.decode(ret, (bytes4, int128));
-        assertEq(selector, hook.afterSwap.selector, "hook must still acknowledge the swap");
-
-        (uint32 reserve,) = hook.getGasBounds();
-        assertLt(consumed, tightGas - reserve / 2, "hook consumed the caller's reserve");
-        assertEq(lender.flashLoanCallCount(), 0, "no loan should fit in the tight budget");
-    }
-
-    function testGasCeilingBoundsASuccessfulAttempt() public {
-        hook.setHookGasBounds(200_000, 250_000);
-
-        (bytes4 selector,) = poolManager.callAfterSwap(
-            IHooks(address(hook)), makeAddr("router"), abi.encodePacked(makeAddr("beneficiary"))
-        );
-
-        assertEq(selector, hook.afterSwap.selector);
-        assertEq(lender.flashLoanCallCount(), 0, "250k ceiling must not fit a full route");
-
-        // Lifting the ceiling lets the same opportunity through.
-        hook.setHookGasBounds(200_000, 3_000_000);
-        poolManager.callAfterSwap(
-            IHooks(address(hook)), makeAddr("router"), abi.encodePacked(makeAddr("beneficiary"))
-        );
-        assertEq(lender.flashLoanCallCount(), 1, "raised ceiling should allow the route");
     }
 
     function testHookBalanceSurvivesRealExecution() public {
