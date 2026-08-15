@@ -1,8 +1,9 @@
-"""Sample the live tick spread between the two cbBTC/WETH canary pools.
+"""Historical external/external strategy research for the retired cbBTC/WETH target.
 
 The hook gates V3/V3 routes on the absolute tick difference between the two
-pools (minSpreadBps, currently 10). One tick is approximately one basis point,
-so this measures directly what the hook would see, historically, block by block.
+pools (minSpreadBps, currently 10). One tick is approximately one basis point.
+This is retained as evidence for why the production route now counter-trades its
+own v4 pool. It is not the current canary market sampler.
 
 A round trip must also clear both pool fees: Pancake 0.01% + Uniswap 0.05% =
 6 bps, plus gas. So a spread only represents a real opportunity when it exceeds

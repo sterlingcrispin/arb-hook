@@ -7,10 +7,10 @@ This tracker records the audit findings list and current disposition.
 
 The initial deployment is owner-operated with a small set of manually verified, canonical Base tokens, pools, and lenders. Malicious owner-supplied assets and permissionless registry inputs are not part of the current threat model. External callbacks, atomic repayment, economic correctness, and recipient routing remain in scope.
 
-## Open For Canary
+## Strategy Findings
 
 60. No dislocation ever opens on the selected cbBTC/WETH pair
-- Status: `BLOCKS DEPLOYMENT`
+- Status: `RESOLVED BY ARCHITECTURE CHANGE`
 - Priority: `CRITICAL`
 - Summary: The intended edge is same-block backrunning: a large swap dislocates
   one venue and the hook, ordered behind it, captures the gap before anyone
@@ -34,17 +34,13 @@ The initial deployment is owner-operated with a small set of manually verified, 
   plus Uniswap 5 bps, so it needs more than 6 ticks before gas, and `minSpreadBps`
   gates V3/V3 at 10.
 - Interpretation: the gap is not being closed by faster competitors. It never
-  opens. Trades against this pair are far too small relative to its liquidity to
-  move the price. `ArbHookWethCanaryFork.t.sol` has to swap 150 WETH, roughly
-  $450k, to manufacture the dislocation it then captures, which is why its
-  0.001606 WETH result measures execution rather than opportunity.
-- Decision: do not fund this pair. Screen candidates on per-swap tick movement,
-  not volume or liquidity. The requirement is a venue where ordinary trades
-  routinely move the price past the fee floor, which means thin liquidity
-  relative to typical trade size, the opposite of how this target was chosen.
+  opens. The earlier external/external fork proof had to manufacture a large
+  cbBTC/WETH displacement, so it measured settlement rather than opportunity.
+- Decision: the canary no longer registers or trades this pair. The production
+  route captures movement created in its own hooked WETH/USDC pool instead.
 
 62. Spreads equilibrate just below each venue pair's own fee floor
-- Status: `DOCUMENTED`
+- Status: `RESOLVED BY ARCHITECTURE CHANGE`
 - Priority: `CRITICAL`
 - Summary: Moving to thin, high-turnover pairs does produce much larger price
   moves, but it does not produce more profit, because the pools that move are
@@ -82,14 +78,14 @@ The initial deployment is owner-operated with a small set of manually verified, 
   and diverge little; volatile assets sit in 0.3% to 1% pools and diverge a lot.
   Spread and hurdle are therefore set by the same underlying property, which is
   why every pair measured lands just under its own fee floor.
-- Consequence: the hook's model, comparing two registered pools and trading
-  between them, targets a flow that essentially does not exist on Base. Pair
-  selection is not the lever.
+- Consequence: the former model, comparing two registered external pools and
+  trading between them, targeted a flow that essentially does not exist on Base.
+  Pair selection is not the lever.
 - Decision: stop screening pairs. The exploitable quantity is the dislocation a
-  large swap creates in the pool it hits, which points at item 63.
+  swap creates in the pool it hits. The implemented route now follows item 63.
 
 63. The hook cannot capture the dislocation its own trigger creates
-- Status: `DOCUMENTED`
+- Status: `ADDRESSED`
 - Priority: `CRITICAL`
 - Summary: A swap against the triggering v4 pool moves that pool and nothing
   else. The registered venues are untouched by it, so the trigger never creates
@@ -100,24 +96,27 @@ The initial deployment is owner-operated with a small set of manually verified, 
   moment per ten hours. A canary v4 pool realistically sees a handful of swaps
   per day against roughly 43,000 blocks. The chance of those coinciding is far
   below one capture per year.
-- The version that works: include the triggering v4 pool in the searched pool
-  book. A large swap against it dislocates that pool relative to the external
+- The version that works: use the triggering v4 pool directly as the first leg.
+  A large swap against it dislocates that pool relative to the external
   venues, and `afterSwap` runs inside the same transaction, so the hook is first
   by construction rather than by luck. This is the edge the original design
-  described, and item 26 currently excludes it by never quoting or trading
+  described; the former implementation excluded it by never quoting or trading
   against the triggering pool.
-- Caveats before adopting: trading against the triggering pool inside its own
-  `afterSwap` needs v4 re-entrancy and accounting review, the hook would be
-  taking the other side of the user's own price impact, and profit routing back
-  to that same user needs rethinking under item 41.
-- Decision: resolve this before any further market selection or deployment work.
-  It determines whether the strategy has an edge at all.
+- Resolution: `afterSwap` now reads the post-swap v4 state, sizes a directional
+  counter-trade, borrows the user's output token, trades the same v4 pool while
+  PoolManager is unlocked, settles every v4 delta, closes through a registered
+  V3 reference, repays, and transfers realized profit to the packed beneficiary.
+  The older external/external scanner remains only in the parity harness.
+- Evidence: the current-head Base test performs an ordinary 100 USDC-to-WETH
+  swap with no external displacement. At block `50018535` it borrowed
+  `0.008907102809547629 WETH`, paid `0.000427463494774361 WETH`, repaid Morpho,
+  left no token residue, and removed the LP position.
 
 61. Backrunning only pays if the hook can be ordered behind the dislocating swap
-- Status: `DOCUMENTED`
+- Status: `ADDRESSED`
 - Priority: `HIGH`
-- Summary: The hook fires on swaps against its own v4 pool and never trades
-  against that pool (item 26). In the WETH canary the trigger is WETH/USDC while
+- Summary: The former hook fired on swaps against its own v4 pool but never traded
+  against that pool (item 26). In the old canary the trigger was WETH/USDC while
   the opportunity is cbBTC/WETH, so the two are unrelated events that must land
   in the same block in the right order.
 - What works in the design's favour: Base does not publicly gossip its mempool,
@@ -129,19 +128,21 @@ The initial deployment is owner-operated with a small set of manually verified, 
   triggering swap happens to be ordered. Landing behind a specific transaction
   requires bidding for placement, which is the searcher game rather than an
   alternative to it. Under organic traffic the placement is luck.
-- Decision: settle this before selecting a market. Either accept a low capture
-  rate on genuinely large dislocations, or change the trigger so the swap that
-  fires the hook is the same event that creates the dislocation, for example by
-  attaching the hook to a pool that is itself one of the arbitrage venues.
+- Decision: implemented the second option. The triggering v4 swap is the event
+  that creates the edge and the v4 pool is the first arbitrage leg, so no random
+  same-block coincidence or transaction-placement race is required.
+
+## Open For Canary
 
 20. Independent review of release commit
 - Status: `BLOCKS DEPLOYMENT`
 - Priority: `CRITICAL`
-- Summary: The flash-loan, callback, and route-execution changes need independent Solidity review against the exact release commit.
+- Summary: The trigger-pool V4/V3 execution, nested PoolManager settlement, and
+  flash-loan changes need independent Solidity review against the exact release
+  commit.
 - Decision: no mainnet swap routing before sign-off on the exact release diff.
-  The prior external review predates the unequal-decimal WETH normalization and
-  WETH canary tooling. This is an external release gate, not a reason to add more
-  onchain checks.
+  Prior review of the external/external version does not cover this architecture.
+  This is an external release gate, not a reason to add more onchain checks.
 
 ## Accepted By Design
 
@@ -160,22 +161,28 @@ The initial deployment is owner-operated with a small set of manually verified, 
 - Status: `ADDRESSED FOR FIXED CANARY; GENERIC ENFORCEMENT DEFERRED`
 - Summary: V3 registration trusts the owner-supplied pool address rather than proving it against a factory.
 - Decision: `RegisterArbHookCanaryPools` attests code, factory, tokens, and fees
-  for the exact two-pool manifest before broadcast. Generic owner-supplied V3
-  registration still relies on operator verification to avoid adding runtime
-  registry machinery outside the canary threat model.
+  for the exact one-pool reference manifest before broadcast. Generic
+  owner-supplied V3 registration still relies on operator verification to avoid
+  adding runtime registry machinery outside the canary threat model.
 
 9. Arbitrary registry-scale gas limits
 - Status: `DEFERRED`
-- Summary: Discovery cost scales with configured bases, counters, and pools.
-- Decision: the canary uses a small bounded pool book. Because each isolated
-  route receives half the remaining scanner gas, failed-route budgets decay
-  approximately `G/2`, `G/4`, then `G/8` across pairs. Revisit traversal and add
-  explicit scale limits before supporting a broad registry.
+- Summary: Production reference lookup scales with the pools registered under
+  the triggering output token. Legacy scanner cost also scales with configured
+  bases, counters, and pools.
+- Decision: the canary registers one reference pool. Revisit traversal and add
+  explicit scale limits before supporting a broad production registry. The
+  legacy scanner's geometric per-pair gas budgets are test-harness behavior.
 
 29. Approximate V3 initialized-tick capacity
 - Status: `DEFERRED`
-- Summary: `_exactCapacity` advances by tick-spacing intervals rather than scanning the initialized-tick bitmap, so it can miss liquidity changes when the current tick is not aligned to an initialized boundary.
-- Decision: do not add expensive tick traversal for the canary. Pool price limits, atomic repayment, intermediate-balance restoration, and realized minimum-profit enforcement remain authoritative; revisit sizing precision after canary results.
+- Summary: Production V4/V3 sizing uses active liquidity over a bounded local
+  movement instead of traversing either venue's initialized-tick bitmap. It can
+  therefore misestimate capacity when the target crosses a liquidity boundary.
+- Decision: do not add expensive tick traversal for the canary. Both legs now
+  enforce the computed price limits, while atomic repayment, exact intermediate
+  restoration, and realized minimum-profit enforcement remain authoritative.
+  Revisit sizing precision after canary results.
 
 ## Addressed
 
@@ -183,14 +190,13 @@ The initial deployment is owner-operated with a small set of manually verified, 
 - Status: `ADDRESSED; RE-RUN IMMEDIATELY BEFORE BROADCAST`
 - Priority: `CRITICAL`
 - Notes: `ArbHookWethCanaryForkTest` now runs against an unpinned Base head with
-  the exact two-pool cbBTC/WETH manifest, WETH-bound Morpho adapter, canonical
-  V4 PoolManager, PositionManager, Permit2, Universal Router, packed beneficiary,
-  LP mint, and LP burn. On 2026-08-15 it borrowed 1 WETH, paid zero fee, returned
-  no residue, and paid `0.001606426560759256 WETH` to the beneficiary. An
-  identical-snapshot disabled/enabled replay measured 162,467 versus 899,973
-  gas, or 737,506 incremental gas. At the observed 0.006 gwei RPC price this was
-  `0.000004425036 WETH`; the provisional `0.0001 WETH` floor was about 22.6x
-  measured incremental L2 cost.
+  canonical WETH/USDC V3 reference, WETH-bound Morpho adapter, canonical V4
+  PoolManager, PositionManager, Permit2, Universal Router, packed beneficiary,
+  LP mint, and LP burn. At Base block `50018535`, an ordinary 100 USDC swap
+  created the edge itself. The route borrowed `0.008907102809547629 WETH`, paid
+  zero lender fee, returned no residue, and paid `0.000427463494774361 WETH` to
+  the beneficiary. The same-snapshot disabled/enabled replay measured about
+  `419546` incremental gas.
 - Decision: the integration and calibration blocker is addressed in code. The
   runbook still requires the same unpinned test and address checks immediately
   before broadcast because lender liquidity, gas price, and market state move.
@@ -326,18 +332,17 @@ The initial deployment is owner-operated with a small set of manually verified, 
   Boundary tests cover WETH/cbBTC in both directions, the former floor-to-zero
   case, the reciprocal near the minimum sqrt price, and `type(uint160).max`.
   Exact inventory parity remains 18,679,602 raw USDC, the Morpho fixed-block
-  sequence keeps all ten routes, and the current-head WETH canary settles the
-  real cbBTC/WETH route naturally.
+  sequence keeps all ten routes, and the current-head canary settles a live
+  WETH/USDC V4/V3 route in the WETH direction.
 
 42. Unbounded hook gas could revert the triggering swap
 - Status: `ADDRESSED`
-- Notes: The `attemptAllInternal` self-call forwarded all remaining gas. The
+- Notes: The speculative self-call previously forwarded all remaining gas. The
   63/64 rule leaves only 1/64 behind, which does not cover v4 settlement when the
-  swap was submitted with a modest gas limit, so an expensive discovery pass
-  could revert the user's swap. The attempt now runs on an explicit budget from
-  `setHookGasBounds` (200,000 reserve, 3,000,000 ceiling by default), covered by
-  `testTightGasBudgetSkipsArbAndLeavesCallerGas` and
-  `testGasCeilingBoundsASuccessfulAttempt`.
+  swap was submitted with a modest gas limit. The production V4/V3 attempt now
+  runs on an explicit budget from `setHookGasBounds` (200,000 reserve and
+  3,000,000 ceiling by default). The current-head test measures the full enabled
+  router lifecycle against an identical disabled snapshot.
 
 43. Unwind skipped for USDC and WETH intermediates
 - Status: `ADDRESSED`
@@ -393,10 +398,11 @@ The initial deployment is owner-operated with a small set of manually verified, 
 - Notes: `ArbHookFlashLoanE2E.t.sol` replaces `executeIterativeArb` with a
   profit-minting stub, so all eleven of its tests validated flash plumbing
   against synthetic profit while real route math sat behind skipped fork tests.
-  `ArbHookRealExecution.t.sol` adds six local tests that run the real executor
+  `ArbHookRealExecution.t.sol` adds three local tests that run the legacy real executor
   against constant-product pools enforcing their own K invariant, covering both
-  swap legs, the V2 repayment callbacks, residue handling, unprofitable-route
-  containment and the gas budget.
+  swap legs, V2 repayment callbacks, residue handling, unprofitable-route
+  containment, and donated-balance isolation. The production V4/V3 callback is
+  covered against canonical Base contracts rather than a second local mock stack.
 
 50. Flash principal sized above what is traded
 - Status: `WONTFIX`
@@ -414,9 +420,10 @@ The initial deployment is owner-operated with a small set of manually verified, 
 1. ArbHook EIP-170 deployability
 - Status: `ADDRESSED`
 - Notes: Cold registration validation moved into the existing `ArbitrageLogic`
-  dependency and unused runtime surfaces were removed. `ArbHook` is 22,333
-  runtime bytes: 1,667 bytes below the repository's 24,000-byte budget and 2,243
-  bytes below the 24,576-byte EIP-170 limit.
+  dependency, live v4 state preparation moved into that stateless contract, and
+  legacy scanner/flash dispatch moved to `ArbHookHarness` without deleting the
+  algorithms. `ArbHook` is 21,621 runtime bytes: 2,379 bytes below the
+  repository's 24,000-byte budget and 2,955 bytes below EIP-170.
 
 7. Shared pool metadata removal
 - Status: `ADDRESSED`
@@ -474,9 +481,8 @@ The initial deployment is owner-operated with a small set of manually verified, 
 - Status: `ADDRESSED`
 - Notes: Fork tests send a real v4 swap through Base's canonical Universal Router
   and PoolManager, then verify that the arb pays the beneficiary encoded as
-  exactly 20 packed bytes. The Aave lifecycle remains covered, and a fresh
-  current-head rehearsal passed through the intended Morpho adapter on
-  2026-08-02 with zero lender fee.
+  exactly 20 packed bytes. The current-head WETH/USDC counter-trade passed
+  through the intended Morpho adapter with zero lender fee at block `50018535`.
 
 5. CREATE2 deployment workflow
 - Status: `ADDRESSED`
@@ -492,7 +498,11 @@ The initial deployment is owner-operated with a small set of manually verified, 
 
 23. Fail-closed canary economic configuration
 - Status: `ADDRESSED`
-- Notes: The owner-run configuration script requires explicit nonzero USDC principal, fee-cap, and minimum-net-profit values, applies the principal cap last, and does not enable hook iterations. The runbook defines the raw-unit differential-gas formula and records `0.10 USDC` only as a provisional rehearsal floor; the final value remains part of the current-head release gate.
+- Notes: The owner-run configuration script requires explicit nonzero WETH
+  principal, fee-cap, and minimum-net-profit values, applies the principal cap
+  last, and does not enable execution. The runbook defines the WETH-denominated
+  differential-gas formula and records `0.0001 WETH` only as a provisional
+  rehearsal floor; the final value remains part of the current-head release gate.
 
 24. Swap callback binding to active execution
 - Status: `ADDRESSED`
@@ -506,8 +516,10 @@ The initial deployment is owner-operated with a small set of manually verified, 
   adapters, and `ArbHook`.
 
 26. Triggering v4 pool is not an arbitrage venue
-- Status: `DOCUMENTED`
-- Notes: `afterSwap` uses the v4 swap only as an execution trigger. Current route discovery and execution compare registered V2/V3 pools and do not quote or trade against the triggering v4 pool.
+- Status: `ADDRESSED`
+- Notes: The production route now quotes and counter-trades the triggering v4
+  pool as its first leg, then exits through the first registered matching V3
+  reference venue. The external/external scanner remains test-only.
 
 27. Flash settlement can retain intermediate-token residue
 - Status: `ADDRESSED`

@@ -1,14 +1,17 @@
 # Flash Loan Migration Plan
 
-Status: implemented. This file records the constraints and phased migration;
-the remaining deployment gates are tracked in `OPEN_ISSUES.md` and
-`docs/MAINNET_CANARY_RUNBOOK.md`.
+Status: implemented, then superseded at the production trigger layer. This file
+records the original inventory-to-flash migration. The current production route
+uses the triggering v4 pool as its first leg; see `README.md` and
+`docs/ARB_LOGIC_DEEP_DIVE.md` before using the historical phases below.
 
 ## Goal
 Migrate `ArbHook` from inventory-funded arbitrage to flash-loan-funded arbitrage, so the hook does not need to hold principal inventory and net profits are paid to the swap initiator (or an explicit beneficiary).
 
 ## Context
-- Current execution is hook-triggered and best-effort via `_afterSwap -> _attemptAllViaSelfCall -> attemptAllInternal -> _runPair -> executeIterativeArb`.
+- Production execution is hook-triggered and best-effort via `_afterSwap -> attemptHookPoolInternal -> onFlashLoan`.
+- The triggering v4 pool is counter-traded against the first registered matching concentrated-liquidity reference venue.
+- The older `_attemptAllInternal -> _runPair -> executeIterativeArb` path remains in `ArbHookHarness` for exact parity and flash-migration regression tests.
 - The pre-migration implementation used contract balances as principal in iterative sizing and callback repayment logic.
 - The legacy inventory parity suite is the historical gross-profit baseline. The flash fork suite must preserve its natural per-round route sequence while remaining net-positive after lender fees.
 
@@ -33,8 +36,9 @@ Migrate `ArbHook` from inventory-funded arbitrage to flash-loan-funded arbitrage
 - A permissionless or adversarial asset registry.
 
 ## Deployment Size
-- The post-migration size pass moved cold registration validation into `ArbitrageLogic` and removed unused production surfaces without changing the execution loops.
+- Live v4 state preparation lives in `ArbitrageLogic`, and legacy scanner/flash dispatch lives only in the test harness.
 - `npm run size` enforces a 24,000-byte runtime budget for every production contract, preserving margin below EIP-170.
+- `ArbHook` is currently 21,621 runtime bytes.
 - Further gas optimization remains separate from flash-loan correctness and parity work.
 
 ## Refactor Constraints (Critical)
@@ -54,18 +58,12 @@ Migrate `ArbHook` from inventory-funded arbitrage to flash-loan-funded arbitrage
    - and explicit sign-off before merge.
 
 ## Target Architecture
-1. Hook trigger remains unchanged: `afterSwap` starts attempt cycle.
-2. Pair discovery remains unchanged: `findBestPools` and `_runPair` keep selecting candidate pools.
-3. Execution funding changes:
-   - Replace direct call to `executeIterativeArb` with `executeIterativeArbViaFlash`.
-   - `executeIterativeArbViaFlash` requests flash principal in `startToken`.
-   - `onFlashLoan` executes existing iterative arb path and repays lender principal + fee.
-4. Profit settlement:
-   - Net profit is transferred to the beneficiary explicitly encoded in swap hook data.
-   - `FlashLoanSettled` records route details and net profit without permanent trade storage.
-5. Failure containment stays the same:
-   - Any flash-path failure is isolated by existing self-call boundary.
-   - User swap settlement should never be blocked by arbitrage failure.
+1. `afterSwap` observes the triggering pool after the user's price movement.
+2. The user's output token is the flash principal and profit token.
+3. Route sizing compares the same v4 pair with the first registered matching V3 reference pool.
+4. The loan callback counter-trades the v4 pool, closes through V3, repays, and pays the encoded beneficiary.
+5. Realized balance checks remain authoritative and all speculative work stays behind the self-call failure boundary.
+6. Legacy external/external traversal and iterative execution remain available through test-only harness entrypoints.
 
 ## Data Model and Config Additions
 Implemented in `ArbHook`:
@@ -91,7 +89,7 @@ Rules:
 - If hook data is malformed or resolves to zero, do not execute flash arb.
 - Emit chosen recipient in logs for observability.
 
-## Implementation Plan (Phased)
+## Historical Implementation Plan (Phased)
 
 ### Phase 0: Branching and Baseline
 - Create a dedicated flash-loan feature branch (done).

@@ -1,39 +1,33 @@
 # Base Mainnet WETH Canary Runbook
 
-This is the release procedure for a small, owner-operated proof-of-concept on
-Base. The exact trigger PoolKey and external pool book are in
-[`BASE_WETH_CANARY_MANIFEST.md`](BASE_WETH_CANARY_MANIFEST.md).
+This is the release procedure for a small owner-operated proof of concept on Base. The exact PoolKey, reference venue, and addresses are in [`BASE_WETH_CANARY_MANIFEST.md`](BASE_WETH_CANARY_MANIFEST.md).
 
 ## Launch Boundary
 
-The first canary is intentionally narrow:
+The first canary contains:
 
-- one hooked Uniswap V4 WETH/USDC trigger pool;
-- one external cbBTC/WETH market containing exactly two pools;
-- WETH principal borrowed from Morpho Blue;
-- at most two iterative chunks per trigger;
-- all realized WETH profit paid to the beneficiary supplied by the swap caller;
-- no Aerodrome pools and no additional registered markets.
+- one hooked Uniswap v4 WETH/USDC pool;
+- one canonical Uniswap v3 WETH/USDC reference pool;
+- WETH principal borrowed through the Morpho Blue adapter;
+- USDC-to-WETH trigger swaps only;
+- one bounded V4/V3 counter-trade per trigger;
+- all realized WETH profit paid to the supplied beneficiary; and
+- no unrelated markets, V2 routes, or additional reference venues.
 
-The trigger pool is not an arbitrage leg. A USDC/WETH swap invokes the hook, and
-the hook independently checks the two cbBTC/WETH pools for an opportunity.
+The user's swap creates the edge by moving the hooked v4 pool. `afterSwap` counter-trades that same pool and exits through Uniswap v3 in the same transaction.
 
-Do not broadcast until all of these are true:
+Do not broadcast until:
 
-1. The intended release commit has been reviewed and recorded.
-2. The release gates below pass from a clean checkout.
-3. Current official sources still list every canonical Base address in the
-   manifest, and each address has runtime code on the deployment RPC.
-4. The owner and LP recipient are the intended canary wallets.
-5. The accepted LP deposit caps, 1 WETH flash-principal ceiling, and provisional
-   WETH profit floor are recorded.
-6. The owner can disable iterations and the LP wallet can burn the position.
-7. The controlled router call has an explicit minimum WETH output and exactly
-   20 bytes of beneficiary hook data.
+1. The intended release commit and Foundry version are recorded.
+2. Every release gate below passes from a clean checkout.
+3. Canonical Base addresses and runtime code are reverified.
+4. The hook owner and LP recipient are the intended canary wallets.
+5. LP caps, swap size, 1 WETH principal ceiling, and WETH profit floor are recorded.
+6. The owner can set `hookMaxIterations` to zero.
+7. The LP wallet can simulate burning the position.
+8. The controlled swap has a current minimum WETH output and exactly 20 bytes of beneficiary hook data.
 
 ## Release Gates
-
-Use the lockfile and the compiler pinned in `foundry.toml`:
 
 ```bash
 npm ci --ignore-scripts
@@ -43,25 +37,38 @@ forge test --summary
 npm run size
 ```
 
-Record the Foundry version, release commit, and runtime sizes. Solc is pinned to
-0.8.26; Foundry is not pinned. The size gate requires every production runtime
-to remain below the repository's 24,000-byte budget.
+The size gate requires every production runtime below 24,000 bytes. The current expected sizes are:
 
-Run the historical inventory oracle:
+| Contract | Runtime bytes |
+|---|---:|
+| `ArbHook` | `21621` |
+| `ArbitrageLogic` | `19678` |
+| `AaveV3ERC3156Adapter` | `2590` |
+| `MorphoERC3156Adapter` | `2144` |
+
+Run the exact historical inventory oracle:
 
 ```bash
 RUN_LEGACY_INVENTORY_PARITY=true \
 BASE_RPC_URL="$BASE_RPC_URL" \
-forge test --match-contract ArbHookParityTest -v
+forge test --match-contract ArbHookParityTest \
+  --match-test testAttemptAllOnForkMatchesArbLightweightFlow -vv
 ```
 
-Run the fixed-block Morpho flash replay:
+Expected total: `18,679,602` raw USDC with all ten exact pool selections and profits.
+
+Run the Morpho-funded historical sequence:
 
 ```bash
-BASE_RPC_URL="$BASE_RPC_URL" scripts/test_flash_fork_cached.sh
+RUN_FLASH_FORK_INTEGRATION=true \
+BASE_RPC_URL="$BASE_RPC_URL" \
+forge test --match-contract ArbHookFlashForkAaveTest \
+  --match-test testForkMorphoAttemptAllTracksLegacyRoundSequenceFull -vv
 ```
 
-Run the intended WETH canary against a fresh, unpinned Base head:
+Expected current result: all ten rounds positive, zero lender fees, total `18,543,625` raw USDC.
+
+Run the actual production architecture against current Base state:
 
 ```bash
 RUN_WETH_CANARY_FORK=true \
@@ -69,16 +76,9 @@ BASE_RPC_URL="$BASE_RPC_URL" \
 forge test --match-contract ArbHookWethCanaryForkTest -vv
 ```
 
-The current-head test uses Base's canonical PoolManager, PositionManager,
-Permit2, Universal Router, Morpho Blue, and the two manifest pools. It creates a
-deterministic external dislocation so that borrowing, trading, repayment,
-beneficiary payout, and LP withdrawal are always exercised. It proves the
-integration path, not expected live yield.
+This test uses canonical Base v4 periphery, Morpho, and Uniswap v3. It initializes the hooked pool, submits an ordinary 100 USDC swap, captures the edge created by that swap, repays, pays the beneficiary, and removes liquidity. It does not force an unrelated external dislocation.
 
 ## 1. Deploy Disabled
-
-`DeployArbHook` creates `ArbitrageLogic`, WETH-bound Aave and Morpho adapters,
-and a CREATE2-mined after-swap-only hook. `hookMaxIterations` starts at zero.
 
 Simulate:
 
@@ -88,23 +88,29 @@ OWNER="$OWNER" PRIVATE_KEY="$OWNER_KEY" forge script \
   --rpc-url "$BASE_RPC_URL"
 ```
 
-Record the logic, adapter, hook, and salt outputs. Review the simulation, then
-repeat the exact command with `--broadcast`. Do not initialize a pool until the
-hook deployment and ownership have been verified.
+Review the deployment trace and predicted addresses. Add `--broadcast` only after review. Record:
+
+- linked `ArbMath` deployment;
+- `ArbitrageLogic`;
+- Aave WETH adapter;
+- Morpho WETH adapter;
+- `ArbHook`; and
+- CREATE2 salt.
+
+The hook starts with `hookMaxIterations = 0`. Do not initialize a pool until ownership, code, and permission bits have been verified.
 
 ## 2. Verify Deployment
 
-Set the recorded addresses locally:
-
 ```bash
 export WETH=0x4200000000000000000000000000000000000006
+export USDC=0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913
+export POOL_MANAGER=0x498581fF718922c3f8e6A244956aF099B2652b2b
+export V3_REFERENCE=0xd0b53D9277642d899DF5C87A3966A349A798F224
 export HOOK=<deployed-hook>
 export LOGIC=<deployed-logic>
 export MORPHO_ADAPTER=<deployed-morpho-adapter>
 export AAVE_ADAPTER=<deployed-aave-adapter>
 ```
-
-Read back the deployment:
 
 ```bash
 cast call "$HOOK" "owner()(address)" --rpc-url "$BASE_RPC_URL"
@@ -127,19 +133,13 @@ cast codesize "$MORPHO_ADAPTER" --rpc-url "$BASE_RPC_URL"
 cast codesize "$AAVE_ADAPTER" --rpc-url "$BASE_RPC_URL"
 ```
 
-Expected initial execution config is `(0, 10, 1500, 500)` and expected gas
-bounds are `(200000, 3000000)`. The hook address's low 14 bits must be `0x40`,
-the after-swap-only permission mask. The Morpho adapter must report WETH as its
-supported token and quote zero fee.
+Expected initial execution config is `(0, 10, 1500, 500)`. Expected gas bounds are `(200000, 3000000)`. The hook address low permission bits must encode `afterSwap` only. The Morpho adapter must report WETH and quote zero fee.
 
-Ownership renunciation is disabled. Ownership transfer is two-step:
-`transferOwnership(newOwner)` followed by `acceptOwnership()` from the new
-wallet.
+Ownership renunciation is disabled. Ownership transfer is two-step: call `transferOwnership(newOwner)`, then call `acceptOwnership()` from the new owner.
 
-## 3. Register The External Book
+## 3. Register The Reference Venue
 
-Keep iterations at zero. Review the exact addresses and order in the manifest,
-then simulate:
+Keep execution disabled. Simulate:
 
 ```bash
 PRIVATE_KEY="$OWNER_KEY" HOOK="$HOOK" forge script \
@@ -147,14 +147,13 @@ PRIVATE_KEY="$OWNER_KEY" HOOK="$HOOK" forge script \
   --rpc-url "$BASE_RPC_URL"
 ```
 
-The script checks each pool's factory, token ordering, and fee before calling
-`addPools(WETH, ...)`. Repeat with `--broadcast` only if both attestations pass.
-The registry is append-only. If this transaction is wrong, abandon this hook and
-deploy a fresh one rather than trying to repair traversal order.
+The script attests the canonical Uniswap V3 factory, WETH/USDC ordering, and fee `500`, then calls `addPools(WETH, ...)` with exactly one pool. Repeat with `--broadcast` only if the attestation and transaction are correct.
+
+The first registered matching concentrated pool is the production reference venue. The registry is append-only. If this step is wrong, abandon the hook before traffic and deploy a fresh one.
 
 ## 4. Configure WETH Flash Funding
 
-The initial reviewed values are:
+Initial reviewed values:
 
 ```text
 WETH_FLASH_PRINCIPAL_CAP_WEI = 1000000000000000000   # 1 WETH ceiling
@@ -162,11 +161,9 @@ WETH_MAX_FLASH_FEE_BPS       = 1                     # smallest enabled cap
 WETH_MIN_NET_PROFIT_WEI      = 100000000000000       # provisional 0.0001 WETH
 ```
 
-The principal value is a ceiling. Existing route math chooses the amount to
-borrow and may choose less. A zero principal, fee cap, or profit floor disables
-borrowing.
+The principal is a ceiling, not the requested amount. A zero principal, fee cap, or profit floor disables borrowing.
 
-Simulate while iterations remain zero:
+Simulate while the hook remains disabled:
 
 ```bash
 PRIVATE_KEY="$OWNER_KEY" \
@@ -179,7 +176,7 @@ forge script script/ConfigureArbHookCanary.s.sol:ConfigureArbHookCanary \
   --rpc-url "$BASE_RPC_URL"
 ```
 
-Repeat with `--broadcast`, then verify:
+Repeat with `--broadcast`, then read back:
 
 ```bash
 cast call "$HOOK" \
@@ -187,9 +184,7 @@ cast call "$HOOK" \
   --rpc-url "$BASE_RPC_URL"
 ```
 
-The `0.0001 WETH` floor is a provisional canary value, not a timeless constant.
-Because gas and profit are both ETH-denominated, recalibrate immediately before
-launch without an ETH/USD oracle conversion:
+Recalculate the profit floor immediately before launch:
 
 ```text
 minimumProfitWei >=
@@ -198,110 +193,90 @@ minimumProfitWei >=
   + desiredBeneficiaryMarginWei
 ```
 
-The 2026-08-15 same-snapshot replay measured 162,467 gas with iterations
-disabled and 899,973 gas with arbitrage enabled: 737,506 incremental gas. At the
-observed 0.006 gwei RPC gas price that is `0.000004425036 WETH`, making the
-provisional floor about 22.6 times measured incremental L2 cost. The forced edge
-paid `0.001606426560759256 WETH` and cleared the floor. Re-measure at the release
-head and include any fee not represented by `gasUsed * gasPrice`.
+The block `50018535` fork rehearsal measured about `419546` incremental gas and `0.000427463494774361 WETH` profit. Neither value is a production guarantee.
 
-## 5. Initialize And Fund The Trigger Pool
+## 5. Initialize And Fund The V4 Pool
 
-The LP wallet needs WETH and USDC. Choose small, explicit caps. For example,
-`0.1 WETH` plus `250 USDC` is a proof-of-concept-sized deposit, not a required
-ratio or recommendation:
+Choose explicit LP caps and test them on a current fork with the intended swap size. The integration proof uses up to 2 WETH and 5,000 USDC; those are test parameters, not mandatory launch amounts.
 
 ```bash
 PRIVATE_KEY="$LP_KEY" \
 HOOK="$HOOK" \
 LP_RECIPIENT="$LP_RECIPIENT" \
-WETH_LP_AMOUNT_WEI=100000000000000000 \
-USDC_LP_AMOUNT_RAW=250000000 \
+WETH_LP_AMOUNT_WEI="$WETH_LP_AMOUNT_WEI" \
+USDC_LP_AMOUNT_RAW="$USDC_LP_AMOUNT_RAW" \
 forge script \
   script/InitializeArbHookCanaryPool.s.sol:InitializeArbHookCanaryPool \
   --rpc-url "$BASE_RPC_URL"
 ```
 
-The script reads the current price from canonical Uniswap V3 WETH/USDC 0.05%,
-computes full-range liquidity, approves only the supplied caps, and atomically
-initializes plus mints through the canonical V4 PositionManager. Any unused cap
-remains in the LP wallet.
+The script reads the current canonical V3 price, computes full-range liquidity, approves only the supplied caps, and atomically initializes plus mints through the canonical V4 PositionManager.
 
-Review the PoolKey, opening price, liquidity, LP recipient, and predicted token
-ID. Repeat with `--broadcast`, then record the minted PositionManager token ID
-from the receipt. Keep that NFT in the canary wallet; it controls withdrawal.
+Review the PoolKey, opening price, liquidity, LP recipient, and predicted token ID. Repeat with `--broadcast`, record `POSITION_TOKEN_ID`, and keep the NFT in the canary LP wallet.
 
 ## 6. Prove Normal Settlement While Disabled
 
-Before enabling arbitrage, send a very small controlled USDC-to-WETH swap with
-iterations still zero. Obtain a current output quote and set a real minimum;
-never use `1` as production slippage protection.
+Use a small protected USDC-to-WETH swap. Obtain a current quote and choose an explicit minimum WETH output. Never use `1` as production slippage protection.
 
 ```bash
 PRIVATE_KEY="$SWAP_KEY" \
 HOOK="$HOOK" \
 BENEFICIARY="$SWAP_BENEFICIARY" \
-USDC_SWAP_AMOUNT_RAW=1000000 \
+USDC_SWAP_AMOUNT_RAW="$USDC_SWAP_AMOUNT_RAW" \
 MIN_WETH_OUT_WEI="$MIN_WETH_OUT_WEI" \
 forge script script/SwapArbHookCanary.s.sol:SwapArbHookCanary \
   --rpc-url "$BASE_RPC_URL"
 ```
 
-First run without `--broadcast`. Adjust only from a current quote and the
-accepted slippage, not until the simulation happens to pass. Then broadcast and
-confirm the payer spent exactly the intended USDC and received WETH. No
-`FlashLoanSettled` event should exist while iterations are zero.
+Simulate first, then broadcast. Confirm exact USDC spend, normal WETH output, and no `FlashLoanSettled` event while disabled.
 
-## 7. Enable And Run The Canary
+## 7. Enable And Run One Canary Swap
 
-Recheck all config, then enable two chunks:
+Recheck all configuration and enable the production path:
 
 ```bash
-cast send "$HOOK" "setHookMaxIterations(uint256)" 2 \
+cast send "$HOOK" "setHookMaxIterations(uint256)" 1 \
   --private-key "$OWNER_KEY" --rpc-url "$BASE_RPC_URL"
 ```
 
-Read back `getExecutionConfig()`, then run another small protected swap with the
-same script. Use enough transaction gas for discovery; the current rehearsal
-used about 0.9 million gas, while failed pair attempts receive progressively
-smaller subcall budgets. A low-gas swap can skip arbitrage and still settle.
+`1` is an enable value. The production route performs one bounded V4/V3 counter-trade; it does not execute one legacy scanner iteration.
 
-A successful arbitrage emits `FlashLoanSettled`. Verify:
+Read back `getExecutionConfig()`, then simulate the intended protected USDC-to-WETH swap with the same script. Supply enough gas for the 3,000,000-gas attempt ceiling plus normal router settlement. A low-gas attempt may be skipped while the user swap still settles.
+
+A successful `FlashLoanSettled` event must show:
 
 - lender equals the deployed Morpho adapter;
-- `tokenA` is WETH and `tokenB` is cbBTC;
-- buy and sell pools are the two manifest addresses;
+- `tokenA` is WETH;
+- `tokenB` is USDC;
+- `buyPool` is `0xd0b53D9277642d899DF5C87A3966A349A798F224`;
+- `sellPool` is the canonical v4 PoolManager `0x498581fF718922c3f8e6A244956aF099B2652b2b`;
 - principal is positive and no more than 1 WETH;
 - fee is zero;
-- net profit is at least the configured WETH floor;
-- beneficiary matches the packed hook data;
-- Morpho's WETH balance is unchanged after the transaction;
-- the hook retains neither WETH nor cbBTC.
+- iterations equals `1`;
+- net profit meets the configured WETH floor; and
+- beneficiary matches the 20 packed hook-data bytes.
 
-No event is a valid result when the live pools have no profitable discrepancy.
-Do not create an unsafe mainnet dislocation merely to force a loan. The fresh
-fork gate is the deterministic proof that the path executes.
+Also verify Morpho's WETH balance is unchanged after the transaction and the hook retains neither WETH nor USDC.
+
+No event is valid for a swap too small to clear pool fees and the minimum-profit floor. Do not deliberately create an unsafe mainnet trade merely to force a loan. Reproduce the exact intended LP and swap parameters on a current fork first.
 
 ## Beneficiary And Router Requirement
 
-The router must pass exactly `abi.encodePacked(beneficiary)`, which is 20 bytes,
-in V4 `hookData`. Empty, zero-address, or differently encoded data deliberately
-skips the arbitrage attempt. There is no fallback to the router or `tx.origin`.
+The router must pass exactly:
 
-The normal swap output is returned by the Universal Router. Arbitrage profit is
-a separate WETH transfer from the hook to the beneficiary; the hook returns zero
-V4 delta. If payer and beneficiary are the same address, their WETH balance
-increase combines normal output and arb profit, while `FlashLoanSettled`
-identifies the profit component.
+```solidity
+abi.encodePacked(beneficiary)
+```
 
-Do not assume the public Uniswap app or an aggregator will route through a new
-hooked pool or encode this custom beneficiary. Until a frontend explicitly
-supports it, only the repository's controlled router script is a validated
-traffic path.
+Empty, zero-address, or differently encoded data skips the attempt. There is no fallback to the router or `tx.origin`.
+
+Normal swap output is returned by the router. Arbitrage profit is a separate WETH transfer from the hook, and the hook returns zero V4 delta. If payer and beneficiary are the same address, `FlashLoanSettled` identifies the profit component of their combined WETH balance increase.
+
+Do not assume the public Uniswap interface or an aggregator will route through the canary pool or encode custom hook data. The repository script is the only validated traffic path until a frontend explicitly integrates it.
 
 ## Stop And Withdraw
 
-Stop borrowing before touching liquidity:
+Stop attempts before changing liquidity:
 
 ```bash
 cast send "$HOOK" "setHookMaxIterations(uint256)" 0 \
@@ -310,8 +285,7 @@ cast send "$HOOK" "setFlashPrincipalForToken(address,uint256)" "$WETH" 0 \
   --private-key "$OWNER_KEY" --rpc-url "$BASE_RPC_URL"
 ```
 
-Read back both configs. Then quote the position's current WETH and USDC amounts,
-set nonzero accepted minimums, and simulate the burn:
+Read back both configurations. Quote the position's current WETH and USDC amounts, set accepted withdrawal minimums, and simulate:
 
 ```bash
 PRIVATE_KEY="$LP_KEY" \
@@ -324,8 +298,6 @@ forge script \
   --rpc-url "$BASE_RPC_URL"
 ```
 
-Repeat with `--broadcast` only after reviewing the simulation. Confirm both
-assets returned to the LP wallet and the PositionManager NFT was burned.
+Repeat with `--broadcast` only after reviewing the simulation. Confirm both assets returned and the PositionManager NFT was burned.
 
-A hook attached to an initialized V4 pool cannot be detached. Disabling
-iterations stops arbitrage; burning the LP position removes the canary capital.
+A hook cannot be detached from an initialized v4 pool. Setting the enable value to zero stops arbitrage; burning the LP position removes canary liquidity.

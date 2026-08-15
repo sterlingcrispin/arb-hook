@@ -1,4 +1,4 @@
-"""Reconstruct the INTRA-BLOCK tick spread between two V3 pools.
+"""Reconstruct the intra-block tick spread for the retired external/external model.
 
 Reading pool state at block boundaries measures the residual spread left after
 every in-block arbitrage has already run, so it systematically cannot see the
@@ -10,10 +10,9 @@ event, so ordering every Swap log by (blockNumber, logIndex) and tracking each
 pool's running tick reproduces the state a transaction inserted at that point in
 the block would have observed.
 
-For each event the script reports the spread visible immediately after it. That
-is what the hook would see if its trigger swap were ordered directly behind that
-transaction. It also separates the spread at the block boundary, which is what
-survives to the next block, so the two can be compared directly.
+For each event the script reports the spread an unrelated trigger would have
+seen immediately afterward. The production route no longer depends on this
+ordering coincidence; this script remains as strategy-research evidence.
 
 Usage:
     BASE_RPC_URL=... python3 scripts/sample_intrablock_spread.py [blocks]

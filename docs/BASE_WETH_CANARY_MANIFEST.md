@@ -1,28 +1,20 @@
 # Base WETH Canary Manifest
 
-This is the exact first-stage market manifest for the Base canary. Registration
-is append-only and order-sensitive. Do not substitute pools or add a second
-market during the initial launch.
+This is the exact first-stage Base canary market. Registration is append-only and order-sensitive. Do not add another reference pool before the initial deployment has been observed and stopped cleanly.
 
-Market data below is a point-in-time screening snapshot from 2026-08-15 near
-Base block `50011045`. Volume and liquidity are indexer estimates and will
-change. Contract identity, token ordering, factories, and fees were also read
-directly from Base at that block.
+## Route Architecture
 
-## Architecture Boundary
+The two venues have different roles in one WETH/USDC round trip:
 
-The canary has two separate pool roles:
+1. A user swaps USDC to WETH in the hooked Uniswap v4 pool.
+2. That swap raises the WETH price in the v4 pool relative to the external reference.
+3. `afterSwap` borrows WETH and counter-trades the same v4 pool from WETH to USDC.
+4. The hook trades the received USDC back to WETH in canonical Uniswap v3.
+5. The hook repays WETH and transfers all net WETH profit to the beneficiary encoded by the swap caller.
 
-- The **trigger pool** is a new hooked Uniswap V4 WETH/USDC pool. Its swaps call
-  `afterSwap`; it is not one of the pools compared by the route planner.
-- The **arbitrage market** is cbBTC/WETH across two existing external pools.
-  The hook compares those pools, borrows WETH, trades WETH to cbBTC and back,
-  repays WETH, and sends remaining WETH to the trigger-swap beneficiary.
+The v4 pool is therefore both the trigger and the first arbitrage leg. The external V3 pool supplies the comparison price and second leg. No unrelated market and no pre-existing external/external spread is required.
 
-A USDC-to-WETH trigger can therefore earn unrelated cbBTC/WETH arbitrage profit
-without requiring a price discrepancy among WETH/USDC pools.
-
-## Trigger Pool
+## Hooked V4 Pool
 
 | Field | Value |
 |---|---|
@@ -31,74 +23,57 @@ without requiring a price discrepancy among WETH/USDC pools.
 | `currency1` | USDC `0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913` |
 | LP fee | `500` hundredths of a basis point, or 0.05% |
 | Tick spacing | `10` |
-| Hook | The release deployment of `ArbHook` |
-| Opening price source | Uniswap V3 WETH/USDC 0.05% `0xd0b53D9277642d899DF5C87A3966A349A798F224` |
-| First position | Full range, with explicit WETH and USDC wallet caps |
+| Hook permissions | `afterSwap` only |
+| Opening price source | Canonical Uniswap V3 WETH/USDC 0.05% |
+| First position | Full range, bounded by explicit wallet-supplied WETH and USDC caps |
 
-`script/InitializeArbHookCanaryPool.s.sol` creates this PoolKey and mints the
-first position through Base's canonical PositionManager. The pool ID depends on
-the final hook address and cannot be known before deployment.
+`script/InitializeArbHookCanaryPool.s.sol` reads the live reference price, initializes this PoolKey, and mints the first position through Base's canonical PositionManager. The pool ID depends on the final mined hook address.
 
-## External Pool Book
+## External Reference
 
-Register both entries under WETH in exactly this order:
+Register exactly one pool under WETH:
 
 | Order | Venue | Pool | Fee | `PoolType` | token0 | token1 |
 |---|---|---|---:|---|---|---|
-| 1 | PancakeSwap V3 | `0xC211e1f853A898Bd1302385CCdE55f33a8C4B3f3` | `100` | `PANCAKESWAP_V3` | WETH | cbBTC |
-| 2 | Uniswap V3 | `0x7AeA2E8A3843516afa07293a10Ac8E49906dabD1` | `500` | `V3` | WETH | cbBTC |
+| 1 | Uniswap V3 | `0xd0b53D9277642d899DF5C87A3966A349A798F224` | `500` | `V3` | WETH | USDC |
 
-Canonical cbBTC is
-`0xcbB7C0000aB88B473b1f5aFd9ef808440eed33Bf`. The registration script rejects
-the transaction unless each pool's code, factory, token ordering, and fee match
-this manifest.
+The production route selects the first registered matching Uniswap V3 or PancakeSwap V3 pool for the triggering pair. Registration order is therefore the operator's reference-venue choice, not a runtime cheapest-pool auction.
 
-Snapshot screening data:
+`script/RegisterArbHookCanaryPools.s.sol` rejects the transaction unless this address has code and reports:
 
-| Pool | 24h volume | Liquidity | Screening link |
-|---|---:|---:|---|
-| PancakeSwap V3 cbBTC/WETH 0.01% | ~$12.04M | ~$4.80M | [DexScreener](https://dexscreener.com/base/0xc211e1f853a898bd1302385ccde55f33a8c4b3f3) |
-| Uniswap V3 cbBTC/WETH 0.05% | ~$3.28M | ~$6.02M | [DexScreener](https://dexscreener.com/base/0x7aea2e8a3843516afa07293a10ac8e49906dabd1) |
+- factory `0x33128a8fC17869897dcE68Ed026d694621f6FDfD`;
+- token0 WETH;
+- token1 USDC; and
+- fee `500`.
 
-This is the strongest first market because it has two independently deployed,
-already-supported concentrated-liquidity pools, high current flow on both, and
-only 6 bps of combined pool fees for a two-leg route. These facts improve the
-chance of executable dislocations; they do not guarantee that one exists on any
-particular swap.
+## Enabled Direction
 
-## Compatible Follow-On Markets
+The initial canary registers and configures WETH only. It supports:
 
-Do not register these in the first deployment. Each addition increases callback
-gas and changes traversal order, so it needs its own current-head route rehearsal.
+```text
+user: USDC -> WETH in v4
+arb:  WETH -> USDC in v4 -> WETH in v3
+profit token: WETH
+```
 
-| Priority | Market | Supported pools | Snapshot 24h volume | Reason deferred |
-|---|---|---|---:|---|
-| 2 | VIRTUAL/WETH | Uniswap V3 `0x9c087Eb773291e50CF6c6a90ef0F4500e349B903`; Uniswap V2 `0xE31c372a7Af875b3B5E0F3713B17ef51556da667` | ~$450K + ~$57K | Compatible mixed V3/V2 route, but far less flow and depth than cbBTC |
-| 3 | AERO/WETH | Uniswap V3 `0x3d5D143381916280ff91407FeBEB52f2b60f33Cf`; PancakeSwap V3 `0x20CB8f872ae894F7c9e32e621C186e5AFCe82Fd0` | ~$39K + ~$31K | Supported venues are small; most AERO liquidity is on unsupported Aerodrome |
+A WETH-to-USDC user swap has USDC as its output and potential flash principal. It will not attempt arbitrage until USDC has its own reviewed lender, cap, fee ceiling, profit floor, and matching reference registration under USDC.
 
-The current runtime supports only Uniswap V2/V3 and PancakeSwap V2/V3 as
-external arbitrage legs. Aerodrome, Uniswap V4, and other CLAMMs are not valid
-registry entries. Several large Base WETH markets, including the dominant
-cbBTC/WETH and liquid-staking-token venues, trade primarily on Aerodrome; their
-volume is inaccessible until an Aerodrome executor and pricing path are added.
+## Lender And Limits
 
-## Lender
-
-Use the WETH-bound Morpho adapter for the first canary:
+Use the WETH-bound Morpho adapter:
 
 | Field | Value |
 |---|---|
 | Morpho Blue | `0xBBBBBbbBBb9cC5e90e3b3Af64bdAF62C37EEFFCb` |
 | Supported asset | WETH |
-| Flash fee | 0 |
-| WETH held at snapshot | ~77,743 WETH |
-| Initial principal ceiling | At most 1 WETH; adaptive route math may choose less |
-| Fee ceiling | 1 bp, the smallest nonzero enabled value |
+| Flash fee | 0 in the tested adapter path |
+| Initial principal ceiling | `1 WETH` |
+| Fee ceiling | `1` bp, the smallest nonzero enabled value |
+| Provisional minimum net profit | `0.0001 WETH` |
 
-The WETH balance is lender capacity, not a recommended loan size. The first
-fork rehearsal reached the explicit 1 WETH ceiling and settled profitably, so
-start no higher than that. Lowering the cap is safe but requires another
-current-head rehearsal to ensure the route can still clear its profit floor.
+The 1 WETH value is only a ceiling. Live route math chooses the amount from post-swap spread and active liquidity. The current-head 100 USDC fork rehearsal selected about `0.0089 WETH`, more than 100 times below the cap.
+
+Recheck lender liquidity, fee behavior, gas, and the profit floor immediately before broadcast.
 
 ## Canonical Base Contracts
 
@@ -109,29 +84,27 @@ current-head rehearsal to ensure the route can still clear its profit floor.
 | Uniswap Universal Router | `0x6fF5693b99212Da76ad316178A184AB56D299b43` |
 | Permit2 | `0x000000000022D473030F116dDEE9F6B43aC78BA3` |
 | Uniswap V3 factory | `0x33128a8fC17869897dcE68Ed026d694621f6FDfD` |
-| PancakeSwap V3 factory | `0x0BFbCF9fa4f9C56B0F40a671Ad40E0805A091865` |
+| Morpho Blue | `0xBBBBBbbBBb9cC5e90e3b3Af64bdAF62C37EEFFCb` |
 
-Recheck all addresses against current official deployment pages immediately
-before broadcast:
+Recheck these against current official deployment sources and confirm runtime code on the deployment RPC before broadcast.
 
-- [Uniswap V4 deployments](https://developers.uniswap.org/docs/protocols/v4/deployments)
-- [Uniswap V3 Base deployments](https://developers.uniswap.org/docs/protocols/v3/deployments/v3-base-deployments)
-- [PancakeSwap V3 addresses](https://developer.pancakeswap.finance/contracts/v3/addresses)
-- [Morpho contract addresses](https://docs.morpho.org/developers/contracts/addresses/)
+## Current Evidence
 
-## Evidence
+`foundry/test/ArbHookWethCanaryFork.t.sol` runs against an unpinned Base fork and proves:
 
-`foundry/test/ArbHookWethCanaryFork.t.sol` runs against an unpinned current Base
-fork and proves the complete intended lifecycle:
+- CREATE2 mining of an after-swap-only hook;
+- canonical PoolManager, PositionManager, Permit2, and Universal Router integration;
+- canonical WETH/USDC V3 reference registration;
+- WETH-bound Morpho borrowing and exact zero-fee repayment;
+- full-range v4 LP mint and withdrawal;
+- a normal 100 USDC-to-WETH trigger with packed beneficiary data;
+- adaptive direction and principal selection without a supplied hint;
+- bounded execution price limits on both swap legs;
+- a counter-swap against the same v4 pool that triggered the hook;
+- a Uniswap V3 WETH exit leg;
+- positive WETH beneficiary payout; and
+- zero residual WETH and USDC in the hook.
 
-- after-swap-only hook address mining against the canonical PoolManager;
-- WETH-bound Morpho adapter and exact repayment at zero fee;
-- this two-pool cbBTC/WETH registration order;
-- hooked WETH/USDC initialization and LP mint through the canonical PositionManager;
-- USDC-to-WETH trigger through the canonical Universal Router with packed beneficiary data;
-- natural route, direction, and principal discovery without a supplied hint;
-- positive WETH payout to the beneficiary and no WETH or cbBTC left in the hook.
+At Base block `50018535`, the proof borrowed `0.008907102809547629 WETH`, paid `0.000427463494774361 WETH`, paid zero lender fee, and measured about `419546` incremental gas. The test did not manufacture an external-pool dislocation. Its own v4 swap created the captured edge.
 
-The test creates a deterministic cbBTC/WETH dislocation so the full path always
-executes. Its observed profit demonstrates settlement correctness, not expected
-production yield.
+These values are a settlement proof, not expected production yield.

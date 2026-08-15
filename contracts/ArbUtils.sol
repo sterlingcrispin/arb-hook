@@ -7,11 +7,11 @@ import {ArbErrors} from "./Errors.sol";
 import {ArbitrageLogic} from "./ArbitrageLogic.sol";
 
 /// @title ArbUtils
-/// @notice Shared state and helper routines for pool registration, route discovery,
-///         pricing support, and V2 swap execution used by ArbHook.
-/// @dev Route planning is intentionally simple and deterministic:
+/// @notice Shared state and helper routines for pool registration, production
+///         reference lookup, and the legacy parity executor.
+/// @dev Legacy route planning is intentionally simple and deterministic:
 ///      `supportedTokens` (outer loop) -> `baseCounterList[base]` (inner loop).
-///      Registration order therefore determines evaluation order in `attemptAllInternal`.
+///      Registration order therefore determines evaluation order in `_attemptAllInternal`.
 abstract contract ArbUtils {
     /// @notice Minimum tick‑spread (in basis points) required to start an iteration.
     uint16 internal minSpreadBps = 10; // 0.10 %
@@ -42,7 +42,7 @@ abstract contract ArbUtils {
 
     // Base token -> all pools registered under that base token.
     mapping(address => PoolInfo[]) internal tokenPools;
-    // Distinct base tokens in insertion order. This order drives attemptAll traversal.
+    // Distinct base tokens in insertion order for the legacy parity scanner.
     address[] internal supportedTokens;
 
     // Base token -> unique counterpart tokens seen in registered pools.
@@ -111,7 +111,7 @@ abstract contract ArbUtils {
             poolAddresses.length != poolTypes.length
         ) revert ArbErrors.InputArrayLengthMismatch();
 
-        // Preserve first-seen ordering for deterministic traversal in attemptAll.
+        // Preserve first-seen ordering for deterministic legacy traversal.
         bool tokenIsNew = true;
         for (uint j; j < supportedTokens.length; ++j)
             if (supportedTokens[j] == token) {
@@ -144,7 +144,7 @@ abstract contract ArbUtils {
         );
         tokenPools[token].push(info);
 
-        // Build the base -> counter adjacency list used by attemptAll route scanning.
+        // Build the base -> counter adjacency list used by the legacy scanner.
         address counter = info.token0 == token ? info.token1 : info.token0;
         if (!isCounterKnown[token][counter]) {
             isCounterKnown[token][counter] = true;

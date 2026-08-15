@@ -1,330 +1,206 @@
-## Arb Hook
+# Arb Hook
 
-A Uniswap v4 hook-driven arbitrage system that checks for opportunities during swaps, without relying on always-on off-chain scanners or mempool racing.
+`ArbHook` is a Uniswap v4 `afterSwap` hook that returns a swap-created arbitrage edge to the swapper who created it.
 
-On L2's where gas is cheap this may be economically viable. When a user attempts a swap, we piggyback some logic to search for arbs and close them as we can.
+The production route is not a generic background scanner. It uses the triggering v4 pool as the first arbitrage leg and one registered concentrated-liquidity pool for the same token pair as the reference and exit venue. Flash-loaned principal means the hook does not need to hold trading inventory.
 
-The swap gives the hook an execution point with current state. The present route
-planner compares registered external pools; it does not quote or trade against
-the triggering v4 pool. An opportunity therefore needs to exist in that external
-pool book when the callback runs.
+## Production Mechanism
 
-If yes, it executes atomically inside the same transaction. If not, it does nothing and the swap proceeds normally.
+For a USDC-to-WETH swap on the Base canary:
 
-## Big Picture
+1. The user's swap moves the hooked v4 WETH/USDC pool away from the external WETH/USDC reference price.
+2. `afterSwap` runs after that price movement while the v4 `PoolManager` is still unlocked.
+3. The hook treats the user's output token, WETH, as the flash-loan and profit token. The user's input token, USDC, is the intermediate token.
+4. `ArbitrageLogic` reads the post-swap v4 price, active liquidity, directional v4 fee, and the first registered matching V3 reference pool.
+5. If the directional spread clears both pool fees and `minSpreadBps`, the hook derives a bounded principal from the same liquidity-and-spread math used by the older arbitrage engine.
+6. The hook borrows WETH, swaps WETH to USDC against its own v4 pool in the direction opposite the user's swap, and swaps that USDC back to WETH on the external V3 pool.
+7. Realized balances must cover the loan, lender fee, and configured minimum profit. The loan is repaid atomically and all remaining WETH profit is transferred to the beneficiary supplied with the triggering swap.
+8. Any discovery, loan, swap, repayment, or profitability failure reverts only the isolated arbitrage attempt. The user's original swap continues.
 
-Instead of constantly scanning markets or competing in gas wars, we wait for real trades to happen and then ask:
+This changes the source of the edge. The hook is no longer waiting for two unrelated external pools to disagree at the exact moment an unrelated v4 swap arrives. The triggering swap itself creates the price movement, and the hook counter-trades it in the same transaction.
 
-“Given the current pool state and prices elsewhere, is there a clean arbitrage worth doing right now?”
+## Adaptive Borrow Sizing
 
-Most of the time the answer is no, and the hook exits almost immediately. When
-the answer is yes, the hook acts inside the triggering transaction instead of
-submitting a second arbitrage transaction. This removes a separate bot's
-reaction delay, but it does not remove block-ordering or state-change risk before
-the triggering transaction is included.
+The production V4/V3 route does not traverse initialized ticks or solve an exact global optimum. That would be too expensive inside a hook. It uses a bounded local estimate:
 
-The hook doesn't assume the arbitrage leg happens on another Uniswap v4 pool. Today the implemented external pool types are Uniswap V2/V3 and PancakeSwap V2/V3, so the v4 hook is acting as an observation point for broader cross-venue price discovery.
+1. Compute the directional tick spread between the post-swap v4 pool and the external reference.
+2. Reject the route if the spread is in the wrong direction, below `minSpreadBps`, or does not clear the combined effective pool fees.
+3. With the defaults, target roughly 17.5% of the observed spread on each leg. This comes from `(1500 + 2000) / (2 * 10000)` because the first attempt uses the current spread as its initial spread.
+4. Cap that target movement at `maxImpactBps`, currently `500` ticks.
+5. Use current active liquidity and the target square-root prices to calculate the v4 input and external-pool capacity without walking the full tick map.
+6. Cap principal by the external leg's capacity, the configured per-token principal ceiling, and lender liquidity.
+7. If execution reverts for a retryable reason, try one-half and then one-quarter of the original principal. A positive result below `minNetProfit` is final and is not retried smaller.
+8. Treat realized post-swap balances as authoritative. Estimates can reject or size a candidate, but they cannot make an unprofitable loan settle.
 
-The production execution path is flash-loan-funded for principal, so the hook does not need to hold full trading inventory. External pool repayment is made directly from authenticated swap callbacks; no standing pool allowance is required. A loan is attempted only when the token has a configured lender plus a non-zero principal cap, fee cap, and minimum net profit.
+The initial principal is therefore not a fixed amount and is not the full cap. On Base block `50018535`, a 100 USDC canary swap selected about `0.008907102809547629 WETH` from a 1 WETH ceiling.
 
-The initial canary is intentionally narrower than the long-term token-agnostic
-architecture: a hooked WETH/USDC v4 pool is the trigger, while the external
-pool book contains exactly two cbBTC/WETH pools registered under WETH. The hook
-borrows WETH, closes any discovered cbBTC/WETH discrepancy, and pays remaining
-WETH to the trigger-swap beneficiary. The trigger pool is an execution point;
-it is not one of the compared arbitrage pools. See the exact addresses and
-registration order in
-[`docs/BASE_WETH_CANARY_MANIFEST.md`](docs/BASE_WETH_CANARY_MANIFEST.md).
+## Current Canary
 
-There is still required operator setup off-chain: pool registration, lender configuration, and runtime-parameter configuration (`hookMaxIterations`, `minSpreadBps`, `chunkSpreadConsumptionBps`, `maxImpactBps`, `hookGasReserve`/`hookGasLimit`). Hook execution is disabled by default (`hookMaxIterations = 0`).
+The first Base canary is deliberately narrow:
 
-Two ERC-3156 lender adapters ship, each bound to one reserve per deployment:
+| Role | Market |
+|---|---|
+| Hooked pool and first arb leg | Uniswap v4 WETH/USDC, fee `500`, tick spacing `10` |
+| External reference and second leg | Uniswap v3 WETH/USDC 0.05% at `0xd0b53D9277642d899DF5C87A3966A349A798F224` |
+| Flash lender | WETH-bound Morpho Blue ERC-3156 adapter |
+| Enabled direction | USDC to WETH trigger swaps, with profit paid in WETH |
 
-| Adapter | Source | Flash fee | Base WETH liquidity at the 2026-08-15 snapshot |
-|---------|--------|-----------|---------------------|
-| `contracts/MorphoERC3156Adapter.sol` | Morpho Blue | **0 bps** | ~77,743 WETH |
-| `contracts/AaveV3ERC3156Adapter.sol` | Aave V3 | 5 bps | ~17,077 WETH |
+Only WETH is configured as a flash-loan token in this canary. A WETH-to-USDC trigger therefore does not attempt arbitrage. Supporting that direction requires a reviewed USDC lender configuration, minimum-profit floor, and registration under USDC.
 
-The production deployment binds the zero-fee WETH Morpho adapter. In the
-historical USDC regression sequence, Aave's 5 bps premium consumed 55% of gross
-edge: 18.679602 USDC gross became 8.365681 USDC net. That result is why Aave is
-kept as a comparison adapter rather than the default canary lender.
+The current-head fork gate initializes and funds the v4 pool, performs an ordinary 100 USDC swap, and does not manufacture a separate external-pool dislocation. At block `50018535` it:
 
-## Who Receives The Profit
+- borrowed `0.008907102809547629 WETH`;
+- paid `0.000427463494774361 WETH` to the beneficiary;
+- paid zero Morpho fee;
+- added about `419,546` gas versus the disabled swap;
+- repaid Morpho exactly;
+- left no WETH or USDC in the hook; and
+- burned the test LP position successfully.
 
-Net profit is paid in full to the beneficiary packed into `hookData` by whoever
-submits the swap. This is deliberate: the hook returns its edge to the trader who
-triggered it rather than collecting rent for the operator. There is no owner fee
-and no allowlist, so any swapper on a hooked pool — including one who initializes
-their own pool with this hook — receives 100% of what their swap's arbitrage
-earns. Do not deploy this expecting the owner address to accumulate profit.
+Those values prove integration and settlement, not future yield. Profit depends on the hooked pool's depth, the triggering swap size, both pool fees, the external reference state, and gas.
 
-## Canary Threat Model
+See [`docs/BASE_WETH_CANARY_MANIFEST.md`](docs/BASE_WETH_CANARY_MANIFEST.md) and [`docs/MAINNET_CANARY_RUNBOOK.md`](docs/MAINNET_CANARY_RUNBOOK.md).
 
-The initial canary is owner-operated and targets a small, explicitly curated set of canonical Base tokens, pools, and lender contracts. Pool registration is not permissionless. The canary assumes the operator has verified those addresses and does not spend runtime gas trying to protect the owner from deliberately registering a malicious token or fake pool.
+## Profit Recipient
 
-The canary pool book is append-only. If registration is wrong, deploy a fresh hook before routing traffic instead of mutating a live registry and risking traversal-order or shared-metadata corruption.
+The router must pass exactly 20 packed bytes in v4 `hookData`:
 
-Runtime safety still treats external callers and callbacks as untrusted. Flash callbacks must come from the exact configured lender for the active loan, swap callbacks must match the active registered route, repayment remains atomic, and an arbitrage failure must be contained from the triggering user swap.
-
-The canary registration script attests the two V3 factories and immutable pool
-metadata before broadcast. Arbitrary registry-scale hardening remains deferred
-because it does not address the initial deployment model. Economic correctness,
-route selection, fee accounting, and recipient routing remain in scope.
-
-## Flash Migration Checklist
-
-- Keep changes minimal and localized; avoid broad rewrites.
-- Preserve existing guardrails unless there is a concrete flash-loan incompatibility.
-- Keep route traversal/order behavior stable (`supportedTokens`, `baseCounterList`, and per-attempt retry order).
-- Preserve bounded loop and early-stop behavior in iterative execution.
-- Maintain failure isolation: arb failures must not break user swap settlement.
-- Preserve the legacy reference route sequence in the flash fork regression test.
-- Keep size reductions behavior-preserving and enforce the runtime-byte budget.
-
-## Primary Test Gate
-
-Run the fast flash safety suites and the fixed-block flash sequence gate:
-
-```bash
-forge test
+```solidity
+abi.encodePacked(beneficiary)
 ```
 
+Missing, malformed, or zero-address data disables the arbitrage attempt for that swap. The hook does not use `tx.origin` and does not pay the router-facing `sender` by default.
+
+Normal swap output is delivered by the router. Arbitrage profit is a separate transfer from the hook to the beneficiary, recorded in `FlashLoanSettled`. If payer and beneficiary are the same address, their final WETH increase combines both amounts.
+
+A public frontend or aggregator will not automatically provide this custom hook data. Until one explicitly supports the hook, the repository's controlled Universal Router script is the validated traffic path.
+
+## Runtime Boundary
+
+The production `afterSwap` path:
+
+- trades only the triggering v4 token pair;
+- supports ERC20 currencies, not native currency;
+- chooses the first registered matching Uniswap V3 or PancakeSwap V3 pool as its reference venue;
+- performs one bounded V4/V3 counter-trade per trigger; and
+- uses `hookMaxIterations` as an enable switch, not as a production chunk count.
+
+The older external/external scanner, V2 routes, mixed routes, and exact `attemptAll` sequence remain in `ArbHookHarness` as regression oracles. Their scanner and legacy flash entrypoints are intentionally absent from the production ABI so unreachable test logic does not consume deployment bytecode.
+
+## Safety Model
+
+The canary assumes a trusted owner registers a small set of manually verified canonical tokens, pools, and lenders. Protecting the owner from intentionally registering a malicious asset is out of scope.
+
+Runtime boundaries remain strict:
+
+- only the immutable v4 `PoolManager` can call `afterSwap`;
+- flash callbacks must match the active lender, initiator, token, amount, and calldata hash;
+- V3 callbacks are single-use and bound to the exact initiated pool swap;
+- both swap legs enforce the bounded square-root price limits produced by sizing;
+- the V4 nested swap must settle all `PoolManager` deltas before returning;
+- intermediate-token balance must be restored exactly;
+- flash repayment and beneficiary profit are checked from realized balances;
+- donated hook balances are excluded from principal sizing and cannot be consumed by the route; and
+- owner renunciation is disabled so the kill switch cannot be destroyed.
+
+Pool registration is append-only. If pre-launch registration is wrong, deploy a fresh hook rather than mutating traversal and callback metadata in place.
+
+## Configuration
+
+Hook execution starts disabled.
+
+- `setHookMaxIterations(value)`
+  - `0` disables production attempts.
+  - Any nonzero value enables one production V4/V3 attempt. Use `1` for the canary.
+  - The historical name remains because the test-only legacy engine still has iterative semantics.
+
+- `setMinSpreadBps(value)`
+  - Requires at least this many directional ticks before sizing continues. The default and canary value is `10`.
+  - This is a cheap prefilter, not the final economic test. Realized `minNetProfit` remains authoritative.
+
+- `setChunkSpreadConsumptionBps(value)`
+  - Controls how aggressively the local sizing estimate consumes the observed spread.
+  - The default `1500`, together with the existing adaptive term, targets about 17.5% of the initial spread per leg on the production route.
+
+- `setMaxImpactBps(value)`
+  - Caps the local tick movement used to derive both price limits. The default is `500`.
+
+- `setHookGasBounds(reserve, limit)`
+  - `reserve`, default `200000`, is withheld so the triggering swap can finish after a failed attempt.
+  - `limit`, default `3000000`, caps the self-called attempt. Zero removes the ceiling.
+
+Per output token:
+
+- `setLenderForToken(token, lender)` selects the ERC-3156 adapter.
+- `setFlashPrincipalForToken(token, cap)` sets an upper bound, not a fixed borrow amount. Zero disables borrowing.
+- `setMaxFlashFeeBpsForToken(token, cap)` rejects quoted or realized fees above the cap. Zero disables borrowing.
+- `setMinNetProfitForToken(token, floor)` requires realized profit after lender fee in raw token units. Zero disables borrowing.
+
+The Base WETH canary uses a 1 WETH principal ceiling, a 1 bp fee ceiling, and a provisional `0.0001 WETH` minimum profit. Recalibrate the profit floor against current incremental gas immediately before broadcast.
+
+## Tests
+
+Fast local gate:
+
 ```bash
-BASE_RPC_URL="$BASE_RPC_URL" scripts/test_flash_fork_cached.sh
+forge test --summary
+npm run size
 ```
+
+Current result:
+
+- 35 local tests pass;
+- `ArbHook` runtime is `21,621` bytes;
+- project-budget margin is `2,379` bytes; and
+- EIP-170 margin is `2,955` bytes.
+
+Current-head production path:
 
 ```bash
 RUN_WETH_CANARY_FORK=true BASE_RPC_URL="$BASE_RPC_URL" \
 forge test --match-contract ArbHookWethCanaryForkTest -vv
 ```
 
-```bash
-npm run size
-```
-
-The cached fork gate replays the ten rounds from `ParityTest/attemptAllOutput.txt` with the intended zero-fee Morpho-backed ERC-3156 adapter. It requires the same buy/sell route in every round and positive net profit. It does not require legacy gross-profit equality because bounded capacity refinement can change trade size. The Aave-backed sequence remains available as a fee-bearing comparison.
-
-The unpinned WETH gate is the release-path test. It uses the exact cbBTC/WETH
-manifest and canonical Base V4 periphery, measures disabled-versus-enabled gas,
-and proves LP mint and withdrawal. It deliberately creates a fork-only market
-dislocation so execution is deterministic; its WETH profit is not a production
-yield forecast.
-
-The size gate caps each production runtime at 24,000 bytes, leaving at least 576 bytes below EIP-170's 24,576-byte limit. It covers `ArbHook`, `ArbitrageLogic`, `AaveV3ERC3156Adapter`, and `MorphoERC3156Adapter`. At this commit, `ArbHook` is 22,333 runtime bytes, leaving 1,667 bytes below the project budget and 2,243 bytes below EIP-170.
-
-`FlashLoanSettled` is the canonical execution record. It reports the lender, tokens, selected pools, borrowed principal, total input swapped, fee, net profit, iterations, and beneficiary without adding permanent per-trade storage writes to the hook.
-
-The swap router must pass the beneficiary as exactly 20 packed address bytes (`abi.encodePacked(beneficiary)`) in v4 `hookData`. Missing, malformed, or zero-address data disables the arb attempt for that swap. The hook does not fall back to the router or `tx.origin`.
-
-`ArbHook` uses Uniswap v4's normal hook-address validation. A production deployment must therefore use CREATE2 to mine an address whose permission bits specify `afterSwap` only. The arbitrary-address validation bypass exists only in `contracts/test/ArbHookHarness.sol`.
-
-## Base Deployment
-
-`script/DeployArbHook.s.sol` deploys the linked `ArbMath` library,
-`ArbitrageLogic`, the WETH Aave and Morpho adapters, and an after-swap-only
-hook mined against Base's canonical CREATE2 deployer. Only the adapter later
-bound with `setLenderForToken` can fund an arbitrage.
-The complete release, configuration, canary, and shutdown procedure is in
-[`docs/MAINNET_CANARY_RUNBOOK.md`](docs/MAINNET_CANARY_RUNBOOK.md).
-Simulate first:
+Historical exact inventory oracle:
 
 ```bash
-PRIVATE_KEY="$PRIVATE_KEY" forge script \
-  script/DeployArbHook.s.sol:DeployArbHook \
-  --rpc-url "$BASE_RPC_URL"
+RUN_LEGACY_INVENTORY_PARITY=true BASE_RPC_URL="$BASE_RPC_URL" \
+forge test --match-contract ArbHookParityTest \
+  --match-test testAttemptAllOnForkMatchesArbLightweightFlow -vv
 ```
 
-Add `--broadcast` only after reviewing the simulation. The optional `OWNER`
-environment variable defaults to the key's address. The script intentionally does not
-register pools, configure lender limits, or enable callback
-iterations; those owner actions must be reviewed separately after deployment.
-`script/ConfigureArbHookCanary.s.sol` applies the reviewed WETH lender and
-economic values in a separate owner transaction sequence. It requires explicit,
-nonzero wei values and does not enable callback iterations. The remaining
-one-shot scripts register the exact cbBTC/WETH book, initialize and fund the
-hooked WETH/USDC pool through the canonical PositionManager, submit a protected
-controlled swap, and burn the canary LP position.
-
-## Cached Fork Workflow (Fast Re-runs)
-
-Fork-level tests are RPC-heavy on the first run because missing state is fetched lazily.
-To speed up repeated runs at the same fork block (`33942262`), use cached Anvil:
+Morpho-funded historical sequence:
 
 ```bash
-# Terminal 1: start a cached local Base fork
-BASE_RPC_URL="$BASE_RPC_URL" npm run anvil:base:cached
+RUN_FLASH_FORK_INTEGRATION=true BASE_RPC_URL="$BASE_RPC_URL" \
+forge test --match-contract ArbHookFlashForkAaveTest \
+  --match-test testForkMorphoAttemptAllTracksLegacyRoundSequenceFull -vv
 ```
 
-```bash
-# Terminal 2: run flash fork tests against local cached Anvil
-BASE_RPC_URL="$BASE_RPC_URL" npm run test:flash:fork:cached
-```
+The inventory oracle still matches all ten legacy rounds exactly for `18.679602 USDC`. The Morpho-funded replay keeps every round profitable and currently totals `18.543625 USDC` with zero lender fees.
 
-`test:flash:fork:cached` defaults to:
-- `ArbHookFlashForkAaveTest`
-- `testForkMorphoAttemptAllTracksLegacyRoundSequenceFull`
+## Deployment
 
-You can pass any other forge test args:
+`script/DeployArbHook.s.sol` deploys `ArbMath`, `ArbitrageLogic`, WETH-bound Aave and Morpho adapters, and a CREATE2-mined after-swap-only hook. It does not register a market, configure risk limits, or enable execution.
 
-```bash
-BASE_RPC_URL="$BASE_RPC_URL" scripts/test_flash_fork_cached.sh --match-contract ArbHookFlashForkAaveTest -vv
-```
+The canary sequence is:
 
-Local cache/state artifacts are ignored by git (`.anvil-cache/`, `.anvil-state/`).
+1. Deploy and verify all artifacts while disabled.
+2. Register the canonical Uniswap V3 WETH/USDC reference with `script/RegisterArbHookCanaryPools.s.sol`.
+3. Configure the WETH Morpho adapter and economic ceilings with `script/ConfigureArbHookCanary.s.sol`.
+4. Initialize and fund the hooked v4 WETH/USDC pool with `script/InitializeArbHookCanaryPool.s.sol`.
+5. Prove a protected swap while disabled.
+6. Set `hookMaxIterations` to `1` and run a protected USDC-to-WETH canary swap.
+7. Disable execution and burn the LP position if settlement or economics are not acceptable.
 
-## Runtime Parameters Explained
+Always simulate Forge scripts before adding `--broadcast`. Full commands and read-back checks are in the runbook.
 
-The main runtime knobs are owner-settable on `ArbHook`:
+## Legacy Parity Context
 
-- `setHookMaxIterations(uint256)`  
-  Limits how many iterative chunks can execute in one trigger.
-  Higher values can capture more residual spread, but increase gas and can over-trade into diminishing returns.
-  Lower values are safer/cheaper but may leave profit on the table.
+The parity suite compares against a previous non-hook, inventory-funded arbitrage implementation, not another hook design. Its golden artifacts are:
 
-- `setMinSpreadBps(uint16)`  
-  Minimum V3 tick spread required before a V3/V3 route continues. **This gates
-  V3/V3 routes only** — V2/V2 and mixed routes never consult it. It is a cheap
-  gas pre-filter, not a profitability control: it compares a tick delta, while
-  profit is spread times depth, so the widest spreads are frequently the least
-  profitable trades. Calibrated against the ten-round gate, `10` keeps all ten
-  rounds; `20` keeps only the three least profitable and turns the sequence into
-  a net loss after gas; `40` and above execute nothing. Leave it at `10`.
+- `ParityTest/ArbLightweight.sol`
+- `ParityTest/ArbLightweight.attemptAll.js`
+- `ParityTest/attemptAllOutput.txt`
 
-- `setChunkSpreadConsumptionBps(uint16)`  
-  Controls chunk aggressiveness: how much spread each iteration tries to consume.
-  Higher values are more aggressive (fewer, larger chunks; more impact risk).
-  Lower values are more conservative (more, smaller chunks; less impact risk).
-
-- `setMaxImpactBps(uint256)`  
-  Caps each V3/V3 leg's adaptive tick movement before the pool-enforced
-  `sqrtPriceLimit` is derived. Mixed routes use the same value as a local
-  liquidity-based estimate of the V3 leg's price movement.
-
-- `setHookGasBounds(uint32 gasReserve, uint32 gasLimit)`  
-  `gasReserve` (default 200,000) is withheld from every arbitrage attempt so the
-  triggering swap can always finish settling. `gasLimit` (default 3,000,000)
-  caps what one attempt may consume; zero removes the ceiling. The 63/64 call
-  rule alone is not sufficient here: on a swap submitted with a modest gas
-  limit, the 1/64 left behind does not cover v4 settlement, so an expensive
-  discovery pass would revert the user's swap. Raise the reserve if a rehearsal
-  shows settlement costing more; raise the ceiling only if profitable routes are
-  being cut short.
-
-  Pair-level failure isolation gives each route at most half the scanner's
-  remaining gas. In the local real-route harness, a path that consumes about
-  505,000 gas first succeeds with a 1,200,000-gas caller limit, roughly 2.4x
-  headroom. Applying that measured ratio to the 1,076,889-gas Base rehearsal is a
-  planning estimate of roughly 2.5 million caller gas before an arb can land, not
-  a release measurement. A tighter swap still settles but may skip arbitrage.
-  Gas also decays approximately `G/2`, `G/4`, then `G/8` across consecutive
-  failed routes; this is acceptable for the small canary pool book and must be
-  revisited before broad registry growth.
-
-The per-token flash controls are:
-
-- `setFlashPrincipalForToken(address,uint256)`
-  Sets the maximum amount that adaptive sizing may borrow. Zero disables borrowing; it never means "use all lender liquidity." Start-token balances already held by the hook are excluded from route sizing, so unsolicited transfers cannot expand a trade. The cap is not a cumulative-volume limit: principal and earned profit can be reused across the configured iterations.
-
-- `setMaxFlashFeeBpsForToken(address,uint256)`
-  Sets the maximum lender fee relative to principal. Zero disables borrowing. Both the quote and actual callback fee are checked with ceiling rounding.
-
-- `setMinNetProfitForToken(address,uint256)`
-  Sets the minimum profit after the flash fee, in raw units of the borrowed token. Zero disables borrowing. V2/V2 and mixed routes use fee-aware raw-token simulations to reject an insufficient estimate before borrowing. The V3/V3 sizing score is only a relative ranking, not a token amount, so that route borrows when an edge exists and enforces the floor against realized balances in `onFlashLoan`. The realized check is authoritative for every route.
-
-### Reference Sequence Profile
-
-In the legacy parity harness (`foundry/test/ArbHookParity.t.sol`), the runtime profile is:
-
-- `hookMaxIterations = 2`
-- `minSpreadBps = 10`
-- `chunkSpreadConsumptionBps = 1500`
-- `maxImpactBps = 500`
-- `flashPrincipal cap = 100,000 USDC`
-- `maxFlashFeeBps = 100`
-- `minNetProfit = 1` raw USDC unit
-
-Why these values are used for parity:
-
-- `2` iterations keeps execution bounded while still allowing a follow-up chunk after the first fill.
-- `10` preserves all ten reference routes and is the legacy traversal threshold. A calibration sweep showed that raising it to `20` removes the high-value deep-liquidity routes first; it is not an economic-profit threshold.
-- `1500` gives a moderate first-step aggressiveness instead of over-consuming spread immediately.
-- `500` caps adaptive V3 price-limit movement at 500 ticks (approximately 5%)
-  and rejects mixed routes whose estimated V3 impact exceeds 500 bps.
-- The `100,000 USDC` value is a ceiling, not the amount borrowed. Existing route math derives each round's principal below that ceiling.
-- The `100 bps` fee cap is a permissive regression value that lets the same profile exercise both the 5 bps Aave baseline and zero-fee Morpho path while rejecting a fee above 1% of principal. It is not a canary recommendation. Because zero disables borrowing, a Morpho canary must use a nonzero cap; use the smallest cap accepted after checking the live quote.
-- The `1` raw-unit profit floor keeps every historically profitable round observable, including very small rounds. It is a regression-test value, not a production recommendation; a canary floor should cover expected transaction cost and desired margin.
-
-`ArbHookParity.t.sol` remains an opt-in inventory-funded baseline that asserts the original gross-profit values exactly. To run it intentionally:
-- Set `RUN_LEGACY_INVENTORY_PARITY=true`
-- Set `BASE_RPC_URL`
-
-`ArbHookFlashForkAave.t.sol` uses the same fixed block, funding setup, pool registration order, and ten-round route sequence with borrowed USDC. Its default Morpho gate asserts every route, zero lender fees, and positive net profit; the Aave sequence preserves the historical fee-bearing comparison.
-
-
-## How an Arbitrage Actually Happens (Step by Step)
-
-1. A user submits a swap to a Uniswap v4 pool that has this hook enabled.
-
-2. During the swap, the hook is invoked with visibility into the pool's updated state.
-
-3. The hook calls into `ArbitrageLogic` to evaluate:
-   - Which registered external pools currently disagree?
-   - Does an executable arbitrage path exist right now?
-   - Is there enough liquidity to do it without self-destructing on price impact?
-
-4. If any check fails, the hook exits immediately. No side effects.
-
-5. If a viable arb exists, the system:
-   - Chooses direction
-   - Searches for a safe trade size
-   - Accounts for fees, slippage, rounding, and impact
-   - Avoids naive “max size” execution
-
-6. The arbitrage is executed via a self-call pattern:
-   - Failures are expected and isolated
-   - Reverts do not affect the user’s swap
-   - State remains clean
-
-7. If the arb clears profit after costs, it commits.
-   If not, it reverts internally and becomes a no-op.
-
-8. The user’s swap completes regardless.
-
-## Why This Design
-
-- Hook-based instead of off chain bots  
-  Because a hook can discover and execute inside the user's transaction rather
-  than racing a separate response transaction. The trigger is still subject to
-  normal block ordering and builders can change external pool state before it.
-
-- Swaps as observation points, not causes  
-  The system doesn’t care why an arb exists, only whether it exists at the moment of execution.
-
-- Opportunistic, not always-on  
-  No background scanning, no constant gas spend. The logic only runs when there’s a real trade.
-
-- Chunked sizing over brute force  
-  Large arbs often lose money due to impact. This code searches for a profitable size instead of assuming one.
-
-- Chunked sizing over “solve the optimum”  
-  Because this is all on chain you can’t cheaply compute the real optimal trade size for concentrated liquidity because the price curve changes at every tick/liquidity boundary. Exact sizing would require expensive tick-by-tick simulation. So instead this system sizes the arb iteratively in bounded chunks and stops when marginal profit flips negative.
-
-- Self-call execution  
-  Arbitrage is treated as speculative and allowed to fail safely without polluting hook state, so the users swap will succeed even if our arb fails.
-
-- Flash safety as the current invariant  
-  Primary gating focuses on flash-loan callback safety, repayment correctness, and net-profit payout behavior.
-
-## Parity Test Context
-
-The parity suite in `foundry/test/ArbHookParity.t.sol` is a regression target against a **previous non-hook arbitrage implementation**, not a comparison between two hook designs. It also represents a legacy inventory-funded flow.
-
-The expected behavior is defined by the legacy reference artifacts in `ParityTest/`:
-- `ParityTest/ArbLightweight.sol` (original non-hook contract)
-- `ParityTest/ArbLightweight.attemptAll.js` (legacy harness logic)
-- `ParityTest/attemptAllOutput.txt` (golden per-round pool/profit sequence)
-
-Legacy comments that referred to a "worker bot" or "worker deployment" were describing that earlier non-hook implementation.
-
-The inventory parity test confirms the historical gross-profit values exactly. The flash fork test keeps the same per-round buy/sell route sequence while requiring positive profit after real lender fees; its gross and net amounts can differ from the inventory reference.
+The exact reference total is `18,679,602` raw USDC across ten rounds. This remains a regression oracle for route math and ordering. It is not the production callback architecture and it is not a forecast of the WETH/USDC canary's returns.

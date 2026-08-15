@@ -1,10 +1,11 @@
-"""Find Base tokens that trade on two or more SUPPORTED venues.
+"""Historical candidate search for the retired external/external strategy.
 
 The execution engine handles Uniswap V2/V3 and PancakeSwap V2/V3 only. Aerodrome
 is not supported, which rules out most Base memecoin liquidity, so a candidate
 pair only qualifies when it has real depth on at least two of the four supported
 venues.
 
+The production route instead pairs its own v4 pool with one reference venue.
 Token addresses are verified on-chain by reading symbol() and decimals(); any
 address that does not respond is dropped rather than assumed.
 
