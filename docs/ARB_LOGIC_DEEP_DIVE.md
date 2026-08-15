@@ -38,8 +38,8 @@ The production path does not traverse `supportedTokens` or compare unrelated ext
 1. Require the immutable PoolManager as caller.
 2. Require `hookMaxIterations != 0`.
 3. Read the configured minimum input for the triggering PoolId and direction. If the actual negative input leg in `BalanceDelta` is smaller, return immediately.
-4. Decode exactly 20 bytes of beneficiary hook data.
-5. Store the beneficiary in transient storage.
+4. Resolve empty hook data to the hook treasury, or decode an exact 20-byte recipient. Malformed nonempty data returns immediately.
+5. Store the payout or retention address in transient storage.
 6. Call `attemptHookPoolInternal` with an explicit gas budget.
 7. Clear the transient beneficiary and return zero hook delta.
 
@@ -157,7 +157,7 @@ After both legs:
 - intermediate balance must equal its snapshot exactly;
 - `netProfit = balanceAfter - balanceBefore - fee`;
 - net profit must be positive and meet `minNetProfit`;
-- net profit is transferred to the authenticated beneficiary;
+- net profit is transferred to the authenticated recipient, or retained when the recipient is the hook itself;
 - repayment approval is set to exactly principal plus fee; and
 - `FlashLoanSettled` records the completed route.
 

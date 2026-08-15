@@ -41,7 +41,7 @@ import {IERC3156FlashLender} from "./interfaces/IERC3156FlashLender.sol";
 /// @title ArbHook
 /// @notice Uniswap v4 hook that counter-trades its triggering pool against a
 ///         registered concentrated-liquidity reference venue, repays flash
-///         principal, and returns realized profit to the triggering swapper.
+///         principal, and pays or retains the realized profit.
 contract ArbHook is
     ArbUtils,
     Ownable2Step,
@@ -196,7 +196,9 @@ contract ArbHook is
                 ) return (IHooks.afterSwap.selector, 0);
             }
 
-            address beneficiary = _resolveProfitRecipient(hookData);
+            address beneficiary = hookData.length == 0
+                ? address(this)
+                : _resolveProfitRecipient(hookData);
             if (beneficiary != address(0)) {
                 _setActiveProfitRecipient(beneficiary);
                 _attemptHookPoolViaSelfCall(key, params.zeroForOne);
@@ -1121,7 +1123,11 @@ contract ArbHook is
         _tstore(_T_LAST_PROFIT, uint256(netProfit));
         _tstore(_T_LAST_ITERATIONS, iters);
 
-        IERC20(token).safeTransfer(params.beneficiary, uint256(netProfit));
+        // Empty hook data selects this contract, leaving profit available to
+        // the owner through removeTokens instead of paying a router recipient.
+        if (params.beneficiary != address(this)) {
+            IERC20(token).safeTransfer(params.beneficiary, uint256(netProfit));
+        }
 
         uint256 repayAmount = amount + fee;
         uint256 repaymentBalance = IERC20(token).balanceOf(address(this));
