@@ -75,6 +75,59 @@ The 1 WETH value is only a ceiling. Live route math chooses the amount from post
 
 Recheck lender liquidity, fee behavior, gas, and the profit floor immediately before broadcast.
 
+## Trigger Size Simulation
+
+`testSweepSwapSizeAgainstLiveReference` replays each amount from the same Base
+fork snapshot with the canary's full-range position capped at 2 WETH and 5,000
+USDC. It compares identical disabled and enabled swaps, so the reported cost is
+the hook's incremental execution gas rather than the gas for a swap the user was
+already making.
+
+At block `50018808`, that position consumed `1.999999999999990607 WETH` and
+`3,762.610635 USDC`; the USDC cap was not the limiting side.
+
+At block `50018808`, with a `0.006 gwei` execution gas price and a one-wei
+test-only profit floor:
+
+| Trigger | Net WETH profit | Incremental gas cost | Result |
+|---:|---:|---:|---|
+| 2.00 USDC | none | n/a | no profitable settlement |
+| 2.25 USDC | 0.000000013519074440 | 0.000002513694 | positive before gas only |
+| 8.50 USDC | 0.000002504145206845 | 0.000002510400 | just below execution cost |
+| 9.00 USDC | 0.000002908310467143 | 0.000002509566 | positive after incremental execution cost |
+| 48.00 USDC | 0.000098104596253525 | 0.000002505456 | below the canary profit floor |
+| 49.00 USDC | 0.000102966132333892 | 0.000002505282 | clears the canary profit floor |
+| 100.00 USDC | 0.000427855387719440 | 0.000002504700 | clears both thresholds |
+
+A second replay with the actual `0.0001 WETH` floor confirmed that 48 USDC
+produces no settlement event while 49 USDC settles with the profit above.
+
+For this exact state and LP depth, the observed thresholds are therefore:
+
+- pool-level positive result: between 2.00 and 2.25 USDC;
+- positive after incremental L2 execution cost: between 8.50 and 9.00 USDC; and
+- settlement with `minNetProfit = 0.0001 WETH`: between 48 and 49 USDC.
+
+The disabled and enabled transactions have identical calldata, so their L1 data
+fee is the same and cancels in the differential comparison. These thresholds are
+not constants: v4 liquidity, range concentration, both pool states, pool fees,
+gas price, and the configured profit floor can move them.
+
+Reproduce the sweep with:
+
+```bash
+RUN_WETH_CANARY_FORK=true \
+RUN_WETH_CANARY_SWEEP=true \
+WETH_CANARY_FORK_BLOCK=50018808 \
+WETH_CANARY_SIM_GAS_PRICE_WEI=6000000 \
+BASE_RPC_URL="$BASE_RPC_URL" \
+forge test --match-contract ArbHookWethCanaryForkTest \
+  --match-test testSweepSwapSizeAgainstLiveReference -vv
+```
+
+Set `WETH_CANARY_SWEEP_MIN_PROFIT_WEI=100000000000000` to replay the actual
+canary floor instead of observing smaller positive results.
+
 ## Canonical Base Contracts
 
 | Contract | Address |
