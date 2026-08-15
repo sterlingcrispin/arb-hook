@@ -9,6 +9,51 @@ The initial deployment is owner-operated with a small set of manually verified, 
 
 ## Open For Canary
 
+60. The selected cbBTC/WETH market has no exploitable spread
+- Status: `BLOCKS DEPLOYMENT`
+- Priority: `CRITICAL`
+- Summary: The two chosen venues track each other far too closely to clear their
+  own fees. Measured live with `scripts/sample_pool_spread.py` across three
+  sampling regimes, 238 samples total:
+
+  | Window | Samples | Median | Max | Cleared 6 bps fees | Passed 10-tick gate |
+  |--------|---------|--------|-----|--------------------|---------------------|
+  | 12h @ 15 min | 48 | 2 | 5 | 0 | 0 |
+  | 60 consecutive blocks | 60 | 2 | 2 | 0 | 0 |
+  | 1.4h @ ~40 s | 130 | 2 | 4 | 0 | 0 |
+
+  A round trip pays PancakeSwap 1 bp plus Uniswap 5 bps, so it needs more than
+  6 ticks before gas. `minSpreadBps` additionally gates V3/V3 routes at 10 ticks.
+  Nothing observed came close to either threshold.
+- Evidence that the fork result is manufactured: `ArbHookWethCanaryFork.t.sol`
+  swaps 150 WETH, roughly $450k, into the Uniswap pool to create the dislocation
+  it then captures. The 0.001606 WETH result measures execution correctness, not
+  market opportunity, which the release notes state.
+- Decision: do not fund this pair. Re-run the sampler against candidate markets
+  and require an observed spread distribution that clears fees plus gas before
+  committing a manifest. See item 61 for why liquid pairs are structurally the
+  wrong place to look.
+
+61. The trigger is uncorrelated with the opportunity
+- Status: `DOCUMENTED`
+- Priority: `HIGH`
+- Summary: The hook fires on swaps against its own v4 pool but never trades
+  against that pool (item 26). In the WETH canary the trigger is WETH/USDC while
+  the opportunity is cbBTC/WETH, and nothing links them. The hook therefore
+  samples the external spread at times that are random with respect to the
+  spread, which is what the 238-sample distribution above approximates.
+- Consequence: capturing a dislocation needs two independent events in the same
+  block, an external dislocation and a v4 swap on the trigger pool. Competing
+  searchers watch the dislocation directly and close it within one block, so a
+  randomly timed observer loses that race by construction.
+- Implication for market selection: the design needs a venue where dislocations
+  persist across blocks rather than one that is already tightly arbitraged. That
+  points away from high-volume pairs, which is the opposite of how the current
+  target was chosen. The alternative is to change the trigger relationship so the
+  swap that fires the hook is the same event that creates the dislocation.
+- Decision: settle this before selecting any market. It determines whether the
+  strategy can work, not merely which pair to use.
+
 20. Independent review of release commit
 - Status: `BLOCKS DEPLOYMENT`
 - Priority: `CRITICAL`
