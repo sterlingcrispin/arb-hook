@@ -1742,6 +1742,7 @@ contract ArbHook is
         if (amountIn > uint256(type(int256).max))
             revert ArbErrors.FlashArbitrageExecutionFailed();
 
+        // V4 skips hook callbacks when the hook itself initiates the swap.
         BalanceDelta delta = poolManager.swap(
             key,
             SwapParams({

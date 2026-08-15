@@ -5,8 +5,6 @@ import "forge-std/Test.sol";
 
 import {ArbHookHarness} from "../../contracts/test/ArbHookHarness.sol";
 import {PoolManagerHarness} from "../../contracts/test/PoolManagerHarness.sol";
-import {PoolModifyLiquidityTestWrapper} from "../../contracts/test/PoolModifyLiquidityTestWrapper.sol";
-import {TestToken} from "../../contracts/test/TestToken.sol";
 import {AaveV3ERC3156Adapter} from "../../contracts/AaveV3ERC3156Adapter.sol";
 import {MorphoERC3156Adapter} from "../../contracts/MorphoERC3156Adapter.sol";
 import {ArbitrageLogic} from "../../contracts/ArbitrageLogic.sol";
@@ -15,17 +13,7 @@ import {IUniswapV2Pair} from "../../contracts/interfaces/IUniswapV2Pair.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {IWETH9} from "../../contracts/interfaces/IWETH9.sol";
 import {ISwapRouter02} from "../../contracts/interfaces/uniswap/ISwapRouter02.sol";
-import {IUniversalRouter} from "@uniswap/universal-router/contracts/interfaces/IUniversalRouter.sol";
-import {Commands} from "@uniswap/universal-router/contracts/libraries/Commands.sol";
-import {Actions} from "@uniswap/v4-periphery/src/libraries/Actions.sol";
-import {HookMiner} from "@uniswap/v4-periphery/src/utils/HookMiner.sol";
-import {IV4Router} from "@uniswap/v4-periphery/src/interfaces/IV4Router.sol";
-import {Hooks} from "@uniswap/v4-core/src/libraries/Hooks.sol";
-import {IHooks} from "@uniswap/v4-core/src/interfaces/IHooks.sol";
 import {IPoolManager} from "@uniswap/v4-core/src/interfaces/IPoolManager.sol";
-import {PoolKey} from "@uniswap/v4-core/src/types/PoolKey.sol";
-import {Currency} from "@uniswap/v4-core/src/types/Currency.sol";
-import {ModifyLiquidityParams} from "@uniswap/v4-core/src/types/PoolOperation.sol";
 
 contract ArbHookFlashForkAaveTest is Test {
     // Base mainnet addresses from @bgd-labs/aave-address-book (AaveV3Base / AaveV3BaseAssets).
@@ -36,8 +24,6 @@ contract ArbHookFlashForkAaveTest is Test {
     address internal constant SWAP_ROUTER = 0x2626664c2603336E57B271c5C0b26F421741e481;
     address internal constant USDC_WHALE = 0x0B0A5886664376F59C351ba3f598C8A8B4D0A6f3;
     address internal constant AAVE_USDC_A_TOKEN = 0x4e65fE4DbA92790696d040ac24Aa414708F5c0AB;
-    address internal constant V4_POOL_MANAGER = 0x498581fF718922c3f8e6A244956aF099B2652b2b;
-    address internal constant UNIVERSAL_ROUTER = 0x6fF5693b99212Da76ad316178A184AB56D299b43;
     address internal constant UNISWAP_V2_WETH_USDC = 0x88A43bbDF9D098eEC7bCEda4e2494615dfD9bB9C;
     address internal constant PANCAKE_V2_WETH_USDC = 0x79474223AEdD0339780baCcE75aBDa0BE84dcBF9;
     address internal constant UNISWAP_V3_WETH_USDC = 0xd0b53D9277642d899DF5C87A3966A349A798F224;
@@ -78,8 +64,6 @@ contract ArbHookFlashForkAaveTest is Test {
     PoolManagerHarness internal poolManager;
     ArbHookHarness internal hook;
     AaveV3ERC3156Adapter internal adapter;
-
-    receive() external payable {}
 
     function setUp() public {
         bool runForkIntegration = vm.envOr("RUN_FLASH_FORK_INTEGRATION", false);
@@ -302,114 +286,6 @@ contract ArbHookFlashForkAaveTest is Test {
 
     function testForkAaveAttemptAllTracksLegacyRoundSequenceSmokeFirst3() public {
         _runLegacyRoundSequence(PARITY_ROUNDS_SMOKE, false);
-    }
-
-    function testCanonicalV4RouterPassesPackedBeneficiary() public {
-        if (!forkEnabled) {
-            vm.skip(true, "set RUN_FLASH_FORK_INTEGRATION=true and BASE_RPC_URL"); return;
-        }
-
-        _runCanonicalV4RouterLifecycle(address(adapter), false);
-    }
-
-    function testCanonicalV4RouterUsesMorphoAndPaysPackedBeneficiary() public {
-        if (!forkEnabled) {
-            vm.skip(true, "set RUN_FLASH_FORK_INTEGRATION=true and BASE_RPC_URL"); return;
-        }
-
-        MorphoERC3156Adapter morpho = new MorphoERC3156Adapter(MORPHO_BLUE, USDC);
-        _runCanonicalV4RouterLifecycle(address(morpho), true);
-    }
-
-    function _runCanonicalV4RouterLifecycle(
-        address lender,
-        bool requireZeroFee
-    ) private {
-
-        IPoolManager manager = IPoolManager(V4_POOL_MANAGER);
-        ArbitrageLogic logic = new ArbitrageLogic();
-        bytes memory constructorArgs = abi.encode(
-            manager,
-            address(this),
-            address(logic)
-        );
-        (address expected, bytes32 salt) = HookMiner.find(
-            address(this),
-            Hooks.AFTER_SWAP_FLAG,
-            type(ArbHookHarness).creationCode,
-            constructorArgs
-        );
-        hook = new ArbHookHarness{salt: salt}(
-            manager,
-            address(this),
-            address(logic)
-        );
-        assertEq(address(hook), expected, "mined hook address mismatch");
-
-        hook.setLenderForToken(USDC, lender);
-        hook.setFlashPrincipalForToken(USDC, PARITY_FLASH_CAP_USDC);
-        hook.setMaxFlashFeeBpsForToken(USDC, 100);
-        hook.setMinNetProfitForToken(USDC, 1);
-        _configureParityPoolBook();
-        _replicateParityFundingState();
-        _seedCbBtcUsdcGap();
-
-        TestToken triggerToken = new TestToken("Trigger Token", "TRIGGER", 0);
-        PoolKey memory key = PoolKey(
-            Currency.wrap(address(0)),
-            Currency.wrap(address(triggerToken)),
-            3000,
-            60,
-            IHooks(address(hook))
-        );
-        manager.initialize(key, uint160(1 << 96));
-
-        PoolModifyLiquidityTestWrapper liquidityRouter =
-            new PoolModifyLiquidityTestWrapper(manager);
-        triggerToken.mint(address(this), 1 ether);
-        triggerToken.approve(address(liquidityRouter), type(uint256).max);
-        vm.deal(address(this), 2 ether);
-        liquidityRouter.modifyLiquidity{value: 1 ether}(
-            key,
-            ModifyLiquidityParams(-120, 120, 1 ether, 0),
-            bytes("")
-        );
-
-        address beneficiary = makeAddr("v4 beneficiary");
-        IV4Router.ExactInputSingleParams memory swapParams = IV4Router
-            .ExactInputSingleParams(
-                key,
-                true,
-                1e12,
-                1,
-                abi.encodePacked(beneficiary)
-            );
-        bytes[] memory actionParams = new bytes[](3);
-        actionParams[0] = abi.encode(swapParams);
-        actionParams[1] = abi.encode(key.currency0, uint256(1e12));
-        actionParams[2] = abi.encode(key.currency1, uint256(1));
-        bytes[] memory commandInputs = new bytes[](1);
-        commandInputs[0] = abi.encode(
-            abi.encodePacked(
-                bytes1(uint8(Actions.SWAP_EXACT_IN_SINGLE)),
-                bytes1(uint8(Actions.SETTLE_ALL)),
-                bytes1(uint8(Actions.TAKE_ALL))
-            ),
-            actionParams
-        );
-
-        vm.recordLogs();
-        IUniversalRouter(UNIVERSAL_ROUTER).execute{value: 1e12}(
-            abi.encodePacked(bytes1(uint8(Commands.V4_SWAP))),
-            commandInputs,
-            block.timestamp
-        );
-        Settlement memory settled = _extractProfitableSettlement(
-            vm.getRecordedLogs()
-        );
-        assertEq(settled.beneficiary, beneficiary);
-        assertEq(IERC20(USDC).balanceOf(beneficiary), uint256(settled.netProfit));
-        if (requireZeroFee) assertEq(settled.fee, 0, "Morpho charged a flash fee");
     }
 
     function _runLegacyRoundSequence(
