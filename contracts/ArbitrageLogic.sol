@@ -347,6 +347,139 @@ contract ArbitrageLogic {
         int24 initialAbsSpread; // For dynamic move calculation
     }
 
+    struct V4V3RouteParams {
+        uint256 principal;
+        uint160 sqrtPriceLimitX96;
+        int24 spread;
+    }
+
+    /// @notice Size the counter-swap that restores a just-traded v4 pool toward an external V3 price.
+    /// @dev The v4 leg sells the triggering swap's output token, so only a directional spread is valid.
+    function getV4V3RouteParams(
+        PoolStatesForIteration memory v4State,
+        uint24 v4Fee,
+        address startToken,
+        address intermediateToken,
+        ArbUtils.PoolInfo memory externalPool,
+        IterationConfig memory config
+    ) external view returns (V4V3RouteParams memory route) {
+        if (
+            (externalPool.poolType != ArbUtils.PoolType.V3 &&
+                externalPool.poolType != ArbUtils.PoolType.PANCAKESWAP_V3) ||
+            externalPool.token0 != v4State.token0 ||
+            !((externalPool.token0 == startToken && externalPool.token1 == intermediateToken) ||
+                (externalPool.token1 == startToken && externalPool.token0 == intermediateToken))
+        ) return route;
+
+        uint160 externalSqrtPriceX96;
+        int24 externalTick;
+        if (externalPool.poolType == ArbUtils.PoolType.V3) {
+            try IUniswapV3Pool(externalPool.poolAddress).slot0() returns (
+                uint160 sqrtPriceX96,
+                int24 tick,
+                uint16,
+                uint16,
+                uint16,
+                uint8,
+                bool
+            ) {
+                externalSqrtPriceX96 = sqrtPriceX96;
+                externalTick = tick;
+            } catch {
+                return route;
+            }
+        } else {
+            try IPancakeV3Pool(externalPool.poolAddress).slot0() returns (
+                uint160 sqrtPriceX96,
+                int24 tick,
+                uint16,
+                uint16,
+                uint16,
+                uint32,
+                bool
+            ) {
+                externalSqrtPriceX96 = sqrtPriceX96;
+                externalTick = tick;
+            } catch {
+                return route;
+            }
+        }
+
+        uint128 externalLiquidity;
+        try IUniswapV3Pool(externalPool.poolAddress).liquidity() returns (uint128 liquidity) {
+            externalLiquidity = liquidity;
+        } catch {
+            return route;
+        }
+        if (v4State.liquidity == 0 || externalLiquidity == 0 || externalSqrtPriceX96 == 0) return route;
+
+        bool zeroForOneV4 = v4State.token0 == startToken;
+        route.spread = zeroForOneV4 ? v4State.tick - externalTick : externalTick - v4State.tick;
+        if (route.spread < int24(uint24(config.minSpreadBps))) return route;
+
+        bool startIsToken0 = externalPool.token0 == startToken;
+        uint256 v4RawPrice = getRawPriceScaled(
+            v4State.sqrtPrice,
+            startIsToken0,
+            externalPool.token0Decimals,
+            externalPool.token1Decimals
+        );
+        uint256 externalRawPrice = getRawPriceScaled(
+            externalSqrtPriceX96,
+            startIsToken0,
+            externalPool.token0Decimals,
+            externalPool.token1Decimals
+        );
+        if (
+            getEffectiveSellPrice(v4RawPrice, v4Fee) <=
+            getEffectiveBuyPrice(externalRawPrice, externalPool.fee)
+        ) return route;
+
+        uint256 initialSpread = uint24(config.initialAbsSpread);
+        if (initialSpread == 0 || config.maxImpactBps == 0) return route;
+        uint256 move =
+            (uint24(route.spread) *
+                (uint256(config.chunkSpreadConsumptionBps) +
+                    (2000 * uint24(route.spread)) /
+                    initialSpread)) /
+            (2 * config.bpsDivisor);
+        if (move == 0) move = 1;
+        if (move > config.maxImpactBps) move = config.maxImpactBps;
+
+        int256 targetV4Tick = int256(v4State.tick) + (zeroForOneV4 ? -int256(move) : int256(move));
+        if (targetV4Tick < TickMath.MIN_TICK) targetV4Tick = TickMath.MIN_TICK;
+        if (targetV4Tick > TickMath.MAX_TICK) targetV4Tick = TickMath.MAX_TICK;
+        route.sqrtPriceLimitX96 = TickMath.getSqrtRatioAtTick(int24(targetV4Tick));
+
+        bool zeroForOneExternal = externalPool.token0 == intermediateToken;
+        int256 targetExternalTick =
+            int256(externalTick) + (zeroForOneExternal ? -int256(move) : int256(move));
+        if (targetExternalTick < TickMath.MIN_TICK) targetExternalTick = TickMath.MIN_TICK;
+        if (targetExternalTick > TickMath.MAX_TICK) targetExternalTick = TickMath.MAX_TICK;
+
+        (uint256 startIn, uint256 intermediateOut) = ArbMath._deltaAmounts(
+            zeroForOneV4,
+            v4State.sqrtPrice,
+            route.sqrtPriceLimitX96,
+            v4State.liquidity
+        );
+        (uint256 externalCapacity, ) = ArbMath._deltaAmounts(
+            zeroForOneExternal,
+            externalSqrtPriceX96,
+            TickMath.getSqrtRatioAtTick(int24(targetExternalTick)),
+            externalLiquidity
+        );
+        if (startIn == 0 || intermediateOut == 0 || externalCapacity == 0) return route;
+
+        route.principal = intermediateOut > externalCapacity
+            ? FullMath.mulDiv(startIn, externalCapacity, intermediateOut)
+            : startIn;
+        if (route.principal > config.currentStartTokenBalance) {
+            route.principal = config.currentStartTokenBalance;
+        }
+        if (route.principal < config.minChunkForStartToken) route.principal = 0;
+    }
+
     /*───────────────────────────────────────────────────────────────────────────
      *  Internal: profit-maximising binary search for V3↔V3 chunk sizing
      *─────────────────────────────────────────────────────────────────────────*/
