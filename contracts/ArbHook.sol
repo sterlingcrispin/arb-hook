@@ -10,8 +10,16 @@ import {Hooks} from "@uniswap/v4-core/src/libraries/Hooks.sol";
 import {IHooks} from "@uniswap/v4-core/src/interfaces/IHooks.sol";
 import {IPoolManager} from "@uniswap/v4-core/src/interfaces/IPoolManager.sol";
 import {PoolKey} from "@uniswap/v4-core/src/types/PoolKey.sol";
-import {BalanceDelta} from "@uniswap/v4-core/src/types/BalanceDelta.sol";
+import {PoolIdLibrary} from "@uniswap/v4-core/src/types/PoolId.sol";
+import {Currency} from "@uniswap/v4-core/src/types/Currency.sol";
+import {
+    BalanceDelta,
+    BalanceDeltaLibrary
+} from "@uniswap/v4-core/src/types/BalanceDelta.sol";
 import {SwapParams} from "@uniswap/v4-core/src/types/PoolOperation.sol";
+import {StateLibrary} from "@uniswap/v4-core/src/libraries/StateLibrary.sol";
+import {ProtocolFeeLibrary} from "@uniswap/v4-core/src/libraries/ProtocolFeeLibrary.sol";
+import {TickMath as V4TickMath} from "@uniswap/v4-core/src/libraries/TickMath.sol";
 
 import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 import {Ownable2Step} from "@openzeppelin/contracts/access/Ownable2Step.sol";
@@ -44,6 +52,11 @@ contract ArbHook is
     IERC3156FlashBorrower
 {
     using SafeERC20 for IERC20;
+    using BalanceDeltaLibrary for BalanceDelta;
+    using PoolIdLibrary for PoolKey;
+    using ProtocolFeeLibrary for uint16;
+    using ProtocolFeeLibrary for uint24;
+    using StateLibrary for IPoolManager;
 
     error NotPoolManager();
 
@@ -159,8 +172,8 @@ contract ArbHook is
     }
 
     function _afterSwap(
-        PoolKey calldata,
-        SwapParams calldata,
+        PoolKey calldata key,
+        SwapParams calldata params,
         BalanceDelta,
         bytes calldata hookData
     ) internal returns (bytes4, int128) {
@@ -170,7 +183,7 @@ contract ArbHook is
             address beneficiary = _resolveProfitRecipient(hookData);
             if (beneficiary != address(0)) {
                 _setActiveProfitRecipient(beneficiary);
-                _attemptAllViaSelfCall(iterations);
+                _attemptHookPoolViaSelfCall(key, params.zeroForOne);
                 _setActiveProfitRecipient(address(0));
             }
         }
@@ -211,6 +224,25 @@ contract ArbHook is
 
         bool tradeSuccess = successCall && abi.decode(returndata, (bool));
         return successCall && tradeSuccess;
+    }
+
+    function _attemptHookPoolViaSelfCall(
+        PoolKey calldata key,
+        bool triggerZeroForOne
+    ) private returns (bool) {
+        uint256 gasBudget = _attemptGasBudget();
+        if (gasBudget == 0) return false;
+
+        (bool successCall, bytes memory returndata) = address(this).call{
+            gas: gasBudget
+        }(
+            abi.encodeWithSelector(
+                this.attemptHookPoolInternal.selector,
+                key,
+                triggerZeroForOne
+            )
+        );
+        return successCall && abi.decode(returndata, (bool));
     }
 
     function getHookPermissions()
@@ -430,6 +462,133 @@ contract ArbHook is
             }
         }
         return d > 4 ? 10 ** (d - 4) : 1;
+    }
+
+    /// @notice Counter-trade the triggering v4 pool against the cheapest registered V3 venue.
+    /// @dev This self-call is the failure boundary used by afterSwap. The triggering swap's
+    ///      output token is the flash principal and the first leg runs in the opposite direction.
+    function attemptHookPoolInternal(
+        PoolKey calldata key,
+        bool triggerZeroForOne
+    ) external returns (bool) {
+        if (msg.sender != address(this)) revert ArbErrors.WrapperOnlySelf();
+
+        address startToken = Currency.unwrap(
+            triggerZeroForOne ? key.currency1 : key.currency0
+        );
+        address intermediateToken = Currency.unwrap(
+            triggerZeroForOne ? key.currency0 : key.currency1
+        );
+        if (startToken == address(0) || intermediateToken == address(0)) return false;
+
+        address lender = lenderByToken[startToken];
+        uint256 principalCap = _resolvePrincipalCap(startToken, lender);
+        uint256 maxFeeBps = maxFlashFeeBpsByToken[startToken];
+        if (
+            principalCap == 0 ||
+            maxFeeBps == 0 ||
+            minNetProfitByToken[startToken] == 0
+        ) return false;
+
+        ArbUtils.PoolInfo memory externalPool;
+        uint256 bestBuyPrice = type(uint256).max;
+        ArbUtils.PoolInfo[] storage pools = tokenPools[startToken];
+        for (uint256 i; i < pools.length; ) {
+            ArbUtils.PoolInfo storage candidate = pools[i];
+            if (
+                (candidate.poolType == ArbUtils.PoolType.V3 ||
+                    candidate.poolType == ArbUtils.PoolType.PANCAKESWAP_V3) &&
+                ((candidate.token0 == startToken &&
+                    candidate.token1 == intermediateToken) ||
+                    (candidate.token1 == startToken &&
+                        candidate.token0 == intermediateToken))
+            ) {
+                (uint256 buyPrice, , bool ok) = arbLib
+                    ._getSinglePoolPrices(
+                        startToken,
+                        intermediateToken,
+                        candidate
+                    );
+                if (ok && buyPrice < bestBuyPrice) {
+                    bestBuyPrice = buyPrice;
+                    externalPool = candidate;
+                }
+            }
+            unchecked {
+                ++i;
+            }
+        }
+        if (externalPool.poolAddress == address(0)) return false;
+
+        (uint160 sqrtPriceX96, int24 tick, uint24 protocolFee, uint24 lpFee) =
+            poolManager.getSlot0(key.toId());
+        bool v4ZeroForOne = !triggerZeroForOne;
+        uint16 directionalProtocolFee = v4ZeroForOne
+            ? protocolFee.getZeroForOneFee()
+            : protocolFee.getOneForZeroFee();
+        uint24 v4Fee = directionalProtocolFee == 0
+            ? lpFee
+            : directionalProtocolFee.calculateSwapFee(lpFee);
+
+        ArbitrageLogic.IterationConfig memory config;
+        config.minSpreadBps = minSpreadBps;
+        config.chunkSpreadConsumptionBps = CHUNK_SPREAD_CONSUMPTION_BPS;
+        config.bpsDivisor = BPS_DIVISOR;
+        config.maxImpactBps = _MAX_IMPACT_BPS;
+        config.minChunkForStartToken = _minChunk(startToken);
+        config.currentStartTokenBalance = principalCap;
+
+        ArbitrageLogic.V4V3RouteParams memory route = arbLib
+            .getV4V3RouteParams(
+                ArbitrageLogic.PoolStatesForIteration({
+                    sqrtPrice: sqrtPriceX96,
+                    tick: tick,
+                    liquidity: poolManager.getLiquidity(key.toId()),
+                    token0: Currency.unwrap(key.currency0)
+                }),
+                v4Fee,
+                startToken,
+                intermediateToken,
+                externalPool,
+                config
+            );
+        if (route.principal == 0) return false;
+
+        FlashLoanExecutionParams memory params = FlashLoanExecutionParams({
+            sellPool: address(poolManager),
+            buyPool: externalPool.poolAddress,
+            tokenA: startToken,
+            tokenB: intermediateToken,
+            maxIterations: 1,
+            sellPoolType: ArbUtils.PoolType.V3,
+            buyPoolType: externalPool.poolType,
+            beneficiary: _activeProfitRecipient()
+        });
+        bytes memory loanData = abi.encode(params, key, route.sqrtPriceLimitX96);
+        uint256 principal = route.principal;
+        for (uint8 attempt; attempt < 3; ) {
+            uint256 fee;
+            try IERC3156FlashLender(lender).flashFee(startToken, principal) returns (
+                uint256 quotedFee
+            ) {
+                fee = quotedFee;
+            } catch {
+                return false;
+            }
+            if (_feeExceedsCap(principal, fee, maxFeeBps)) return false;
+
+            (bool requested, bool reverted, bool belowMinimum) =
+                _requestFlashLoan(lender, startToken, principal, loanData);
+            if (requested) return _flashLastTradeSuccess();
+            if (!reverted || belowMinimum) return false;
+
+            principal >>= 1;
+            if (principal < config.minChunkForStartToken) return false;
+            unchecked {
+                ++attempt;
+            }
+        }
+        return false;
     }
 
     // -------------------------- Core entrypoint ----------------------------
@@ -869,28 +1028,70 @@ contract ArbHook is
             address(this)
         );
 
-        (bool successCall, bytes memory returndata) = address(this).call(
-            abi.encodeWithSelector(
-                this.executeIterativeArb.selector,
-                params.sellPool,
+        bool tradeSuccess;
+        uint256 iters;
+        uint256 totalAmountSwapped;
+        if (params.sellPool == address(poolManager)) {
+            PoolKey memory key;
+            uint160 sqrtPriceLimitX96;
+            (, key, sqrtPriceLimitX96) = abi.decode(
+                data,
+                (FlashLoanExecutionParams, PoolKey, uint160)
+            );
+            bool zeroForOne = Currency.unwrap(key.currency0) == token;
+            if (
+                address(key.hooks) != address(this) ||
+                Currency.unwrap(zeroForOne ? key.currency1 : key.currency0) !=
+                params.tokenB
+            ) revert ArbErrors.FlashTokenMismatch();
+
+            uint256 intermediateReceived;
+            (totalAmountSwapped, intermediateReceived) = _executeV4Swap(
+                key,
+                zeroForOne,
+                amount,
+                sqrtPriceLimitX96
+            );
+            bool externalZeroForOne = poolMetaByAddr[params.buyPool].token0 ==
+                params.tokenB;
+            bool externalSuccess = _executeSwapInternal_noBalanceCheck(
                 params.buyPool,
-                params.tokenA,
+                params.buyPoolType,
                 params.tokenB,
-                params.maxIterations,
-                params.sellPoolType,
-                params.buyPoolType
-            )
-        );
-        if (!successCall) revert ArbErrors.FlashArbitrageExecutionFailed();
+                token,
+                intermediateReceived,
+                externalZeroForOne
+                    ? V4TickMath.MIN_SQRT_PRICE + 1
+                    : V4TickMath.MAX_SQRT_PRICE - 1
+            );
+            if (!externalSuccess)
+                revert ArbErrors.FlashArbitrageExecutionFailed();
+            tradeSuccess = true;
+            iters = 1;
+        } else {
+            (bool successCall, bytes memory returndata) = address(this).call(
+                abi.encodeWithSelector(
+                    this.executeIterativeArb.selector,
+                    params.sellPool,
+                    params.buyPool,
+                    params.tokenA,
+                    params.tokenB,
+                    params.maxIterations,
+                    params.sellPoolType,
+                    params.buyPoolType
+                )
+            );
+            if (!successCall)
+                revert ArbErrors.FlashArbitrageExecutionFailed();
+            (tradeSuccess, , iters, totalAmountSwapped) = abi.decode(
+                returndata,
+                (bool, int256, uint256, uint256)
+            );
+        }
         if (
             IERC20(params.tokenB).balanceOf(address(this)) !=
             intermediateBalanceBefore
         ) revert ArbErrors.UnwindFailed();
-
-        (bool tradeSuccess, , uint256 iters, uint256 totalAmountSwapped) = abi.decode(
-            returndata,
-            (bool, int256, uint256, uint256)
-        );
 
         uint256 balanceAfter = IERC20(token).balanceOf(address(this));
         int256 netProfit = int256(balanceAfter) -
@@ -1521,6 +1722,43 @@ contract ArbHook is
     }
 
     // ----------------------- Swap helpers (V3/V2) --------------------------
+    function _executeV4Swap(
+        PoolKey memory key,
+        bool zeroForOne,
+        uint256 amountIn,
+        uint160 sqrtPriceLimitX96
+    ) private returns (uint256 paid, uint256 received) {
+        if (amountIn > uint256(type(int256).max))
+            revert ArbErrors.FlashArbitrageExecutionFailed();
+
+        BalanceDelta delta = poolManager.swap(
+            key,
+            SwapParams({
+                zeroForOne: zeroForOne,
+                amountSpecified: -int256(amountIn),
+                sqrtPriceLimitX96: sqrtPriceLimitX96
+            }),
+            bytes("")
+        );
+        int128 inputDelta = zeroForOne ? delta.amount0() : delta.amount1();
+        int128 outputDelta = zeroForOne ? delta.amount1() : delta.amount0();
+        if (inputDelta >= 0 || outputDelta <= 0)
+            revert ArbErrors.FlashArbitrageExecutionFailed();
+
+        paid = uint256(-int256(inputDelta));
+        received = uint256(uint128(outputDelta));
+        Currency inputCurrency = zeroForOne ? key.currency0 : key.currency1;
+        Currency outputCurrency = zeroForOne ? key.currency1 : key.currency0;
+
+        poolManager.sync(inputCurrency);
+        IERC20(Currency.unwrap(inputCurrency)).safeTransfer(
+            address(poolManager),
+            paid
+        );
+        poolManager.settle();
+        poolManager.take(outputCurrency, address(this), received);
+    }
+
     function _executeSwapInternal_noBalanceCheck(
         address poolAddress,
         ArbUtils.PoolType poolType,

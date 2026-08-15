@@ -11,7 +11,6 @@ import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {IWETH9} from "../../contracts/interfaces/IWETH9.sol";
 import {IUniswapV3Pool} from "../../contracts/interfaces/uniswap/IUniswapV3Pool.sol";
 import {IUniswapV4PositionManager} from "../../contracts/interfaces/uniswap/IUniswapV4PositionManager.sol";
-import {ISwapRouter02} from "../../contracts/interfaces/uniswap/ISwapRouter02.sol";
 import {IUniversalRouter} from "@uniswap/universal-router/contracts/interfaces/IUniversalRouter.sol";
 import {Commands} from "@uniswap/universal-router/contracts/libraries/Commands.sol";
 import {Actions} from "@uniswap/v4-periphery/src/libraries/Actions.sol";
@@ -32,18 +31,12 @@ interface IPermit2Allowance {
 contract ArbHookWethCanaryForkTest is Test {
     address internal constant WETH = 0x4200000000000000000000000000000000000006;
     address internal constant USDC = 0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913;
-    address internal constant CBBTC = 0xcbB7C0000aB88B473b1f5aFd9ef808440eed33Bf;
-
     address internal constant MORPHO_BLUE = 0xBBBBBbbBBb9cC5e90e3b3Af64bdAF62C37EEFFCb;
     address internal constant AAVE_USDC_A_TOKEN = 0x4e65fE4DbA92790696d040ac24Aa414708F5c0AB;
     address internal constant V4_POOL_MANAGER = 0x498581fF718922c3f8e6A244956aF099B2652b2b;
     address internal constant V4_POSITION_MANAGER = 0x7C5f5A4bBd8fD63184577525326123B519429bDc;
     address internal constant UNIVERSAL_ROUTER = 0x6fF5693b99212Da76ad316178A184AB56D299b43;
     address internal constant PERMIT2 = 0x000000000022D473030F116dDEE9F6B43aC78BA3;
-    address internal constant SWAP_ROUTER = 0x2626664c2603336E57B271c5C0b26F421741e481;
-
-    address internal constant PANCAKE_CBBTC_WETH_100 = 0xC211e1f853A898Bd1302385CCdE55f33a8C4B3f3;
-    address internal constant UNISWAP_CBBTC_WETH_500 = 0x7AeA2E8A3843516afa07293a10Ac8E49906dabD1;
     address internal constant UNISWAP_WETH_USDC_500 = 0xd0b53D9277642d899DF5C87A3966A349A798F224;
 
     uint256 internal constant PRINCIPAL_CAP = 1 ether;
@@ -100,11 +93,11 @@ contract ArbHookWethCanaryForkTest is Test {
         hook.setMinNetProfitForToken(WETH, MIN_NET_PROFIT);
         hook.setHookMaxIterations(2);
 
-        _registerCbBtcBook();
+        _registerExternalWethUsdcPool();
         _initializeTriggerPool();
     }
 
-    function testWethCanaryClosesCbBtcArbDuringUsdcToWethSwap() public {
+    function testSwapCreatesAndCapturesItsOwnWethArbitrage() public {
         if (!forkEnabled) {
             vm.skip(true, "set RUN_WETH_CANARY_FORK=true and BASE_RPC_URL");
             return;
@@ -112,10 +105,6 @@ contract ArbHookWethCanaryForkTest is Test {
 
         uint256 lenderBalanceBefore = IERC20(WETH).balanceOf(MORPHO_BLUE);
         assertGt(lenderBalanceBefore, PRINCIPAL_CAP, "insufficient Morpho WETH liquidity");
-
-        // A real swap creates a deterministic spread; the hook still discovers
-        // the direction, route, and flash principal without a supplied hint.
-        _displaceUniswapCbBtcPool(150 ether);
 
         address beneficiary = makeAddr("WETH canary beneficiary");
         uint256 snapshot = vm.snapshotState();
@@ -134,7 +123,9 @@ contract ArbHookWethCanaryForkTest is Test {
 
         Settlement memory settled = _extractSettlement(vm.getRecordedLogs());
         assertEq(settled.tokenA, WETH, "flash principal must be WETH");
-        assertEq(settled.tokenB, CBBTC, "wrong arbitrage market");
+        assertEq(settled.tokenB, USDC, "wrong arbitrage market");
+        assertEq(settled.buyPool, UNISWAP_WETH_USDC_500, "wrong external pool");
+        assertEq(settled.sellPool, V4_POOL_MANAGER, "triggering v4 pool was not traded");
         assertGt(settled.principal, 0, "adaptive sizing returned zero");
         assertLe(settled.principal, PRINCIPAL_CAP, "principal exceeded canary cap");
         assertGt(settled.totalAmountSwapped, 0, "no arbitrage input was swapped");
@@ -145,7 +136,7 @@ contract ArbHookWethCanaryForkTest is Test {
         assertGt(IERC20(WETH).balanceOf(address(this)), swapOutputBefore, "trigger swap returned no WETH");
         assertEq(IERC20(WETH).balanceOf(MORPHO_BLUE), lenderBalanceBefore, "Morpho was not repaid");
         assertEq(IERC20(WETH).balanceOf(address(hook)), 0, "hook retained WETH");
-        assertEq(IERC20(CBBTC).balanceOf(address(hook)), 0, "hook retained cbBTC");
+        assertEq(IERC20(USDC).balanceOf(address(hook)), 0, "hook retained USDC");
 
         _removeTriggerLiquidity();
 
@@ -157,18 +148,15 @@ contract ArbHookWethCanaryForkTest is Test {
         emit log_named_uint("incremental arbitrage gas", gasUsed - baselineGasUsed);
     }
 
-    function _registerCbBtcBook() private {
-        address[] memory pools = new address[](2);
-        pools[0] = PANCAKE_CBBTC_WETH_100;
-        pools[1] = UNISWAP_CBBTC_WETH_500;
+    function _registerExternalWethUsdcPool() private {
+        address[] memory pools = new address[](1);
+        pools[0] = UNISWAP_WETH_USDC_500;
 
-        uint24[] memory fees = new uint24[](2);
-        fees[0] = 100;
-        fees[1] = 500;
+        uint24[] memory fees = new uint24[](1);
+        fees[0] = 500;
 
-        ArbUtils.PoolType[] memory types = new ArbUtils.PoolType[](2);
-        types[0] = ArbUtils.PoolType.PANCAKESWAP_V3;
-        types[1] = ArbUtils.PoolType.V3;
+        ArbUtils.PoolType[] memory types = new ArbUtils.PoolType[](1);
+        types[0] = ArbUtils.PoolType.V3;
         hook.addPools(WETH, pools, fees, types);
     }
 
@@ -254,22 +242,6 @@ contract ArbHookWethCanaryForkTest is Test {
 
         assertGt(IERC20(WETH).balanceOf(address(this)), wethBefore, "LP WETH was not returned");
         assertGt(IERC20(USDC).balanceOf(address(this)), usdcBefore, "LP USDC was not returned");
-    }
-
-    function _displaceUniswapCbBtcPool(uint256 amountIn) private {
-        IERC20(WETH).approve(SWAP_ROUTER, amountIn);
-        ISwapRouter02(SWAP_ROUTER)
-            .exactInputSingle(
-                ISwapRouter02.ExactInputSingleParams({
-                    tokenIn: WETH,
-                    tokenOut: CBBTC,
-                    fee: 500,
-                    recipient: address(this),
-                    amountIn: amountIn,
-                    amountOutMinimum: 0,
-                    sqrtPriceLimitX96: 0
-                })
-            );
     }
 
     function _swapTriggerPool(uint128 amountIn, address beneficiary) private {
