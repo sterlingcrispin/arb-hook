@@ -91,7 +91,7 @@ contract ArbHookWethCanaryForkTest is Test {
         hook.setFlashPrincipalForToken(WETH, PRINCIPAL_CAP);
         hook.setMaxFlashFeeBpsForToken(WETH, 1);
         hook.setMinNetProfitForToken(WETH, MIN_NET_PROFIT);
-        hook.setHookMaxIterations(2);
+        hook.setHookMaxIterations(1);
 
         _registerExternalWethUsdcPool();
         _initializeTriggerPool();
