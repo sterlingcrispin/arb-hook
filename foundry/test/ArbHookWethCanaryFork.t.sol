@@ -7,10 +7,10 @@ import {ArbHook} from "../../contracts/ArbHook.sol";
 import {ArbitrageLogic} from "../../contracts/ArbitrageLogic.sol";
 import {ArbUtils} from "../../contracts/ArbUtils.sol";
 import {MorphoERC3156Adapter} from "../../contracts/MorphoERC3156Adapter.sol";
-import {PoolModifyLiquidityTestWrapper} from "../../contracts/test/PoolModifyLiquidityTestWrapper.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {IWETH9} from "../../contracts/interfaces/IWETH9.sol";
 import {IUniswapV3Pool} from "../../contracts/interfaces/uniswap/IUniswapV3Pool.sol";
+import {IUniswapV4PositionManager} from "../../contracts/interfaces/uniswap/IUniswapV4PositionManager.sol";
 import {ISwapRouter02} from "../../contracts/interfaces/uniswap/ISwapRouter02.sol";
 import {IUniversalRouter} from "@uniswap/universal-router/contracts/interfaces/IUniversalRouter.sol";
 import {Commands} from "@uniswap/universal-router/contracts/libraries/Commands.sol";
@@ -18,11 +18,12 @@ import {Actions} from "@uniswap/v4-periphery/src/libraries/Actions.sol";
 import {HookMiner} from "@uniswap/v4-periphery/src/utils/HookMiner.sol";
 import {IV4Router} from "@uniswap/v4-periphery/src/interfaces/IV4Router.sol";
 import {Hooks} from "@uniswap/v4-core/src/libraries/Hooks.sol";
+import {TickMath} from "@uniswap/v4-core/src/libraries/TickMath.sol";
 import {IHooks} from "@uniswap/v4-core/src/interfaces/IHooks.sol";
 import {IPoolManager} from "@uniswap/v4-core/src/interfaces/IPoolManager.sol";
 import {PoolKey} from "@uniswap/v4-core/src/types/PoolKey.sol";
 import {Currency} from "@uniswap/v4-core/src/types/Currency.sol";
-import {ModifyLiquidityParams} from "@uniswap/v4-core/src/types/PoolOperation.sol";
+import {LiquidityAmounts} from "@uniswap/v4-periphery/src/libraries/LiquidityAmounts.sol";
 
 interface IPermit2Allowance {
     function approve(address token, address spender, uint160 amount, uint48 expiration) external;
@@ -36,6 +37,7 @@ contract ArbHookWethCanaryForkTest is Test {
     address internal constant MORPHO_BLUE = 0xBBBBBbbBBb9cC5e90e3b3Af64bdAF62C37EEFFCb;
     address internal constant AAVE_USDC_A_TOKEN = 0x4e65fE4DbA92790696d040ac24Aa414708F5c0AB;
     address internal constant V4_POOL_MANAGER = 0x498581fF718922c3f8e6A244956aF099B2652b2b;
+    address internal constant V4_POSITION_MANAGER = 0x7C5f5A4bBd8fD63184577525326123B519429bDc;
     address internal constant UNIVERSAL_ROUTER = 0x6fF5693b99212Da76ad316178A184AB56D299b43;
     address internal constant PERMIT2 = 0x000000000022D473030F116dDEE9F6B43aC78BA3;
     address internal constant SWAP_ROUTER = 0x2626664c2603336E57B271c5C0b26F421741e481;
@@ -97,7 +99,7 @@ contract ArbHookWethCanaryForkTest is Test {
         hook.setHookMaxIterations(2);
 
         _registerCbBtcBook();
-        _initializeTriggerPool(manager);
+        _initializeTriggerPool();
     }
 
     function testWethCanaryClosesCbBtcArbDuringUsdcToWethSwap() public {
@@ -156,7 +158,7 @@ contract ArbHookWethCanaryForkTest is Test {
         hook.addPools(WETH, pools, fees, types);
     }
 
-    function _initializeTriggerPool(IPoolManager manager) private {
+    function _initializeTriggerPool() private {
         (uint160 sqrtPriceX96,,,,,,) = IUniswapV3Pool(UNISWAP_WETH_USDC_500).slot0();
         triggerKey = PoolKey({
             currency0: Currency.wrap(WETH),
@@ -165,15 +167,52 @@ contract ArbHookWethCanaryForkTest is Test {
             tickSpacing: 10,
             hooks: IHooks(address(hook))
         });
-        manager.initialize(triggerKey, sqrtPriceX96);
-
-        PoolModifyLiquidityTestWrapper liquidityRouter = new PoolModifyLiquidityTestWrapper(manager);
         vm.deal(address(this), 200 ether);
         IWETH9(WETH).deposit{value: 200 ether}();
         _pullUsdc(50_000e6);
-        IERC20(WETH).approve(address(liquidityRouter), type(uint256).max);
-        IERC20(USDC).approve(address(liquidityRouter), type(uint256).max);
-        liquidityRouter.modifyLiquidity(triggerKey, ModifyLiquidityParams(-887270, 887270, 1e14, bytes32(0)), bytes(""));
+
+        uint256 wethMax = 2 ether;
+        uint256 usdcMax = 5_000e6;
+        int24 tickLower = TickMath.minUsableTick(triggerKey.tickSpacing);
+        int24 tickUpper = TickMath.maxUsableTick(triggerKey.tickSpacing);
+        uint128 liquidity = LiquidityAmounts.getLiquidityForAmounts(
+            sqrtPriceX96,
+            TickMath.getSqrtPriceAtTick(tickLower),
+            TickMath.getSqrtPriceAtTick(tickUpper),
+            wethMax,
+            usdcMax
+        );
+
+        IERC20(WETH).approve(PERMIT2, wethMax);
+        IERC20(USDC).approve(PERMIT2, usdcMax);
+        IPermit2Allowance(PERMIT2).approve(WETH, V4_POSITION_MANAGER, uint160(wethMax), type(uint48).max);
+        IPermit2Allowance(PERMIT2).approve(USDC, V4_POSITION_MANAGER, uint160(usdcMax), type(uint48).max);
+
+        IUniswapV4PositionManager positionManager = IUniswapV4PositionManager(V4_POSITION_MANAGER);
+        uint256 tokenId = positionManager.nextTokenId();
+        bytes[] memory params = new bytes[](3);
+        params[0] = abi.encode(triggerKey, tickLower, tickUpper, liquidity, wethMax, usdcMax, address(this), bytes(""));
+        params[1] = abi.encode(triggerKey.currency0);
+        params[2] = abi.encode(triggerKey.currency1);
+
+        bytes[] memory calls = new bytes[](2);
+        calls[0] = abi.encodeCall(IUniswapV4PositionManager.initializePool, (triggerKey, sqrtPriceX96));
+        calls[1] = abi.encodeCall(
+            IUniswapV4PositionManager.modifyLiquidities,
+            (
+                abi.encode(
+                    abi.encodePacked(
+                        bytes1(uint8(Actions.MINT_POSITION)),
+                        bytes1(uint8(Actions.CLOSE_CURRENCY)),
+                        bytes1(uint8(Actions.CLOSE_CURRENCY))
+                    ),
+                    params
+                ),
+                block.timestamp
+            )
+        );
+        positionManager.multicall(calls);
+        assertEq(positionManager.ownerOf(tokenId), address(this), "canonical PositionManager mint failed");
     }
 
     function _displaceUniswapCbBtcPool(uint256 amountIn) private {
