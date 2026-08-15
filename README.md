@@ -17,32 +17,38 @@ Instead of constantly scanning markets or competing in gas wars, we wait for rea
 
 “Given the current pool state and prices elsewhere, is there a clean arbitrage worth doing right now?”
 
-Most of the time the answer is no, and the hook exits almost immediately. When the answer is yes, the hook can act instantly, without latency or MEV competition.
+Most of the time the answer is no, and the hook exits almost immediately. When
+the answer is yes, the hook acts inside the triggering transaction instead of
+submitting a second arbitrage transaction. This removes a separate bot's
+reaction delay, but it does not remove block-ordering or state-change risk before
+the triggering transaction is included.
 
 The hook doesn't assume the arbitrage leg happens on another Uniswap v4 pool. Today the implemented external pool types are Uniswap V2/V3 and PancakeSwap V2/V3, so the v4 hook is acting as an observation point for broader cross-venue price discovery.
 
 The production execution path is flash-loan-funded for principal, so the hook does not need to hold full trading inventory. External pool repayment is made directly from authenticated swap callbacks; no standing pool allowance is required. A loan is attempted only when the token has a configured lender plus a non-zero principal cap, fee cap, and minimum net profit.
 
 The initial canary is intentionally narrower than the long-term token-agnostic
-architecture: it registers routes under USDC as the base and borrows USDC.
-That matches the reviewed fixed-block manifest and keeps its route ordering
-stable. Price normalization supports both token orientations, but WETH-base
-routes are outside the current release gate and require their own route and
-economic rehearsal before registration.
+architecture: a hooked WETH/USDC v4 pool is the trigger, while the external
+pool book contains exactly two cbBTC/WETH pools registered under WETH. The hook
+borrows WETH, closes any discovered cbBTC/WETH discrepancy, and pays remaining
+WETH to the trigger-swap beneficiary. The trigger pool is an execution point;
+it is not one of the compared arbitrage pools. See the exact addresses and
+registration order in
+[`docs/BASE_WETH_CANARY_MANIFEST.md`](docs/BASE_WETH_CANARY_MANIFEST.md).
 
 There is still required operator setup off-chain: pool registration, lender configuration, and runtime-parameter configuration (`hookMaxIterations`, `minSpreadBps`, `chunkSpreadConsumptionBps`, `maxImpactBps`, `hookGasReserve`/`hookGasLimit`). Hook execution is disabled by default (`hookMaxIterations = 0`).
 
 Two ERC-3156 lender adapters ship, each bound to one reserve per deployment:
 
-| Adapter | Source | Flash fee | Base USDC liquidity |
+| Adapter | Source | Flash fee | Base WETH liquidity at the 2026-08-15 snapshot |
 |---------|--------|-----------|---------------------|
-| `contracts/MorphoERC3156Adapter.sol` | Morpho Blue | **0 bps** | ~197.6M USDC |
-| `contracts/AaveV3ERC3156Adapter.sol` | Aave V3 | 5 bps | Aave reserve |
+| `contracts/MorphoERC3156Adapter.sol` | Morpho Blue | **0 bps** | ~77,743 WETH |
+| `contracts/AaveV3ERC3156Adapter.sol` | Aave V3 | 5 bps | ~17,077 WETH |
 
-The fee is the dominant cost at canary size. Replaying the ten-round fixed-block
-sequence, Aave's 5 bps premium consumed 55% of gross edge: 18.679602 USDC gross
-became 8.365681 USDC net. `setLenderForToken` chooses which adapter is live, so
-this is a configuration decision, not a redeployment.
+The production deployment binds the zero-fee WETH Morpho adapter. In the
+historical USDC regression sequence, Aave's 5 bps premium consumed 55% of gross
+edge: 18.679602 USDC gross became 8.365681 USDC net. That result is why Aave is
+kept as a comparison adapter rather than the default canary lender.
 
 ## Who Receives The Profit
 
@@ -61,7 +67,10 @@ The canary pool book is append-only. If registration is wrong, deploy a fresh ho
 
 Runtime safety still treats external callers and callbacks as untrusted. Flash callbacks must come from the exact configured lender for the active loan, swap callbacks must match the active registered route, repayment remains atomic, and an arbitrage failure must be contained from the triggering user swap.
 
-Factory attestation for owner-supplied V3 pools and arbitrary registry-scale hardening are deferred because they do not address the initial deployment model. Economic correctness, route selection, fee accounting, and recipient routing remain in scope.
+The canary registration script attests the two V3 factories and immutable pool
+metadata before broadcast. Arbitrary registry-scale hardening remains deferred
+because it does not address the initial deployment model. Economic correctness,
+route selection, fee accounting, and recipient routing remain in scope.
 
 ## Flash Migration Checklist
 
@@ -86,10 +95,21 @@ BASE_RPC_URL="$BASE_RPC_URL" scripts/test_flash_fork_cached.sh
 ```
 
 ```bash
+RUN_WETH_CANARY_FORK=true BASE_RPC_URL="$BASE_RPC_URL" \
+forge test --match-contract ArbHookWethCanaryForkTest -vv
+```
+
+```bash
 npm run size
 ```
 
 The cached fork gate replays the ten rounds from `ParityTest/attemptAllOutput.txt` with the intended zero-fee Morpho-backed ERC-3156 adapter. It requires the same buy/sell route in every round and positive net profit. It does not require legacy gross-profit equality because bounded capacity refinement can change trade size. The Aave-backed sequence remains available as a fee-bearing comparison.
+
+The unpinned WETH gate is the release-path test. It uses the exact cbBTC/WETH
+manifest and canonical Base V4 periphery, measures disabled-versus-enabled gas,
+and proves LP mint and withdrawal. It deliberately creates a fork-only market
+dislocation so execution is deterministic; its WETH profit is not a production
+yield forecast.
 
 The size gate caps each production runtime at 24,000 bytes, leaving at least 576 bytes below EIP-170's 24,576-byte limit. It covers `ArbHook`, `ArbitrageLogic`, `AaveV3ERC3156Adapter`, and `MorphoERC3156Adapter`. At this commit, `ArbHook` is 22,333 runtime bytes, leaving 1,667 bytes below the project budget and 2,243 bytes below EIP-170.
 
@@ -102,7 +122,7 @@ The swap router must pass the beneficiary as exactly 20 packed address bytes (`a
 ## Base Deployment
 
 `script/DeployArbHook.s.sol` deploys the linked `ArbMath` library,
-`ArbitrageLogic`, the USDC Aave and Morpho adapters, and an after-swap-only
+`ArbitrageLogic`, the WETH Aave and Morpho adapters, and an after-swap-only
 hook mined against Base's canonical CREATE2 deployer. Only the adapter later
 bound with `setLenderForToken` can fund an arbitrage.
 The complete release, configuration, canary, and shutdown procedure is in
@@ -119,9 +139,12 @@ Add `--broadcast` only after reviewing the simulation. The optional `OWNER`
 environment variable defaults to the key's address. The script intentionally does not
 register pools, configure lender limits, or enable callback
 iterations; those owner actions must be reviewed separately after deployment.
-`script/ConfigureArbHookCanary.s.sol` applies the reviewed USDC lender and
+`script/ConfigureArbHookCanary.s.sol` applies the reviewed WETH lender and
 economic values in a separate owner transaction sequence. It requires explicit,
-nonzero raw-unit values and does not enable callback iterations.
+nonzero wei values and does not enable callback iterations. The remaining
+one-shot scripts register the exact cbBTC/WETH book, initialize and fund the
+hooked WETH/USDC pool through the canonical PositionManager, submit a protected
+controlled swap, and burn the canary LP position.
 
 ## Cached Fork Workflow (Fast Re-runs)
 
@@ -271,7 +294,9 @@ Why these values are used for parity:
 ## Why This Design
 
 - Hook-based instead of off chain bots  
-  Because hooks remove latency, gas wars, and mempool uncertainty entirely. And I thought it would be cool to do this all onchain.
+  Because a hook can discover and execute inside the user's transaction rather
+  than racing a separate response transaction. The trigger is still subject to
+  normal block ordering and builders can change external pool state before it.
 
 - Swaps as observation points, not causes  
   The system doesn’t care why an arb exists, only whether it exists at the moment of execution.

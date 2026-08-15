@@ -18,7 +18,7 @@ Migrate `ArbHook` from inventory-funded arbitrage to flash-loan-funded arbitrage
 - Protecting the owner from intentionally or accidentally registering a malicious token or fake pool is not part of the initial canary.
 - The curated pool book is append-only; a bad registration requires a fresh deployment before traffic is routed through the hook.
 - External callers, forged callbacks, incorrect flash-loan context, repayment failure, profit accounting, and beneficiary routing remain untrusted runtime boundaries.
-- Factory attestation and arbitrary registry-scale limits are deferred unless the operating model changes.
+- The fixed canary registration script attests its V3 factories and pool metadata before broadcast. Generic onchain factory enforcement and arbitrary registry-scale limits remain deferred unless the operating model changes.
 
 ## Scope
 - Add a production-capable flash-loan execution path (initially ERC-3156 lenders).

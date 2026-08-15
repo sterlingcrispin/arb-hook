@@ -13,19 +13,10 @@ The initial deployment is owner-operated with a small set of manually verified, 
 - Status: `BLOCKS DEPLOYMENT`
 - Priority: `CRITICAL`
 - Summary: The flash-loan, callback, and route-execution changes need independent Solidity review against the exact release commit.
-- Decision: no mainnet swap routing before external sign-off. This is an external release gate, not a reason to add more onchain checks.
-
-21. Current-head Base rehearsal and economic calibration
-- Status: `BLOCKS DEPLOYMENT`
-- Priority: `CRITICAL`
-- Summary: The deterministic fork gates use Base block 33942262. They cannot prove current lender premiums, liquidity, canonical contract state, route economics, or transaction cost.
-- Evidence: The canonical router lifecycle passed on Base block 49149499 with
-  Aave and again on a fresh current-head fork on 2026-08-02 with the intended
-  Morpho adapter. Both rehearsals settled through the packed beneficiary path;
-  the Morpho run used the real route book and paid zero lender fee.
-- Decision: repeat the intended final manifest on a fresh current-head fork,
-  verify canonical addresses and code, and set the minimum net-profit floor from
-  a same-snapshot differential gas replay immediately before deployment.
+- Decision: no mainnet swap routing before sign-off on the exact release diff.
+  The prior external review predates the unequal-decimal WETH normalization and
+  WETH canary tooling. This is an external release gate, not a reason to add more
+  onchain checks.
 
 ## Accepted By Design
 
@@ -41,9 +32,12 @@ The initial deployment is owner-operated with a small set of manually verified, 
 ## Deferred Outside Canary Threat Model
 
 8. V3 factory attestation
-- Status: `DEFERRED`
+- Status: `ADDRESSED FOR FIXED CANARY; GENERIC ENFORCEMENT DEFERRED`
 - Summary: V3 registration trusts the owner-supplied pool address rather than proving it against a factory.
-- Decision: the canary operator verifies canonical pool addresses before registration.
+- Decision: `RegisterArbHookCanaryPools` attests code, factory, tokens, and fees
+  for the exact two-pool manifest before broadcast. Generic owner-supplied V3
+  registration still relies on operator verification to avoid adding runtime
+  registry machinery outside the canary threat model.
 
 9. Arbitrary registry-scale gas limits
 - Status: `DEFERRED`
@@ -59,6 +53,22 @@ The initial deployment is owner-operated with a small set of manually verified, 
 - Decision: do not add expensive tick traversal for the canary. Pool price limits, atomic repayment, intermediate-balance restoration, and realized minimum-profit enforcement remain authoritative; revisit sizing precision after canary results.
 
 ## Addressed
+
+21. Current-head Base rehearsal and economic calibration
+- Status: `ADDRESSED; RE-RUN IMMEDIATELY BEFORE BROADCAST`
+- Priority: `CRITICAL`
+- Notes: `ArbHookWethCanaryForkTest` now runs against an unpinned Base head with
+  the exact two-pool cbBTC/WETH manifest, WETH-bound Morpho adapter, canonical
+  V4 PoolManager, PositionManager, Permit2, Universal Router, packed beneficiary,
+  LP mint, and LP burn. On 2026-08-15 it borrowed 1 WETH, paid zero fee, returned
+  no residue, and paid `0.001606426560759256 WETH` to the beneficiary. An
+  identical-snapshot disabled/enabled replay measured 162,467 versus 899,973
+  gas, or 737,506 incremental gas. At the observed 0.006 gwei RPC price this was
+  `0.000004425036 WETH`; the provisional `0.0001 WETH` floor was about 22.6x
+  measured incremental L2 cost.
+- Decision: the integration and calibration blocker is addressed in code. The
+  runbook still requires the same unpinned test and address checks immediately
+  before broadcast because lender liquidity, gas price, and market state move.
 
 58. Retry suppression depends on lender revert-data propagation
 - Status: `DOCUMENTED`
@@ -188,11 +198,11 @@ The initial deployment is owner-operated with a small set of manually verified, 
 - Status: `ADDRESSED`
 - Notes: `_calculatePrice1e18_corrected` now uses exact quotient/remainder
   arithmetic in both token orientations without materializing a 320-bit square.
-  Boundary tests cover the former WETH-base floor-to-zero case, the reciprocal
-  near the minimum sqrt price, and `type(uint160).max`. Exact inventory parity
-  and both fixed-block lender sequences remain unchanged. The canary still uses
-  USDC only because that is the reviewed manifest, not because normalization is
-  known to fail for WETH.
+  Boundary tests cover WETH/cbBTC in both directions, the former floor-to-zero
+  case, the reciprocal near the minimum sqrt price, and `type(uint160).max`.
+  Exact inventory parity remains 18,679,602 raw USDC, the Morpho fixed-block
+  sequence keeps all ten routes, and the current-head WETH canary settles the
+  real cbBTC/WETH route naturally.
 
 42. Unbounded hook gas could revert the triggering swap
 - Status: `ADDRESSED`
@@ -208,9 +218,9 @@ The initial deployment is owner-operated with a small set of manually verified, 
 - Status: `ADDRESSED`
 - Notes: `executeIterativeArb` skipped residue unwinding when the intermediate
   was USDC or WETH and when running profit was non-positive, but `onFlashLoan`
-  requires exact intermediate restoration. For the USDC-base canary the
-  intermediate *is* WETH, so any partially filled leg aborted the loan. Unwinding
-  now runs for every intermediate token and covers V2 pools as well as V3.
+  requires exact intermediate restoration. In the historical USDC-base fixture
+  the intermediate *is* WETH, so any partially filled leg aborted the loan.
+  Unwinding now runs for every intermediate token and covers V2 pools as well as V3.
   Residue is measured as a delta against the balance held at route entry, so a
   pre-existing intermediate balance is never spent or counted.
 

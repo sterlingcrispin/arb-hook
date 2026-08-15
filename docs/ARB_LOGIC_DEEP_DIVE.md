@@ -72,9 +72,10 @@ Single pass over `tokenPools[tokenA]`:
 This is deliberately simple and fast; it is rerun frequently inside callback-driven execution.
 
 The price normalizer handles both token orientations with exact quotient and
-remainder arithmetic over the full V3 sqrt-price range. The initial canary still
-registers only USDC-base routes because that is the reviewed, regression-tested
-manifest; adding a WETH-base route requires separate route and economic coverage.
+remainder arithmetic over the full V3 sqrt-price range. The initial canary
+registers two cbBTC/WETH pools under WETH. Exact unequal-decimal unit cases,
+the historical USDC oracle, and the current-head WETH canary test cover both
+orientations without adding tick traversal to price discovery.
 
 ## 4) Iterative Arbitrage Engine
 
