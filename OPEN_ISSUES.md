@@ -112,6 +112,21 @@ The initial deployment is owner-operated with a small set of manually verified, 
   `0.008907102809547629 WETH`, paid `0.000427463494774361 WETH`, repaid Morpho,
   left no token residue, and removed the LP position.
 
+64. Known-undersized trigger swaps still enter the full arbitrage path
+- Status: `ADDRESSED`
+- Priority: `HIGH`
+- Summary: The realized `minNetProfit` check safely rejects small opportunities,
+  but only after route discovery, a flash loan, and both swap attempts. At pinned
+  block `50018808`, 48 USDC fell below the `0.0001 WETH` floor while 49 USDC
+  cleared it for the tested v4 liquidity.
+- Resolution: each PoolId and direction can now have a minimum actual input.
+  `afterSwap` reads the input leg from PoolManager's `BalanceDelta` and returns
+  before beneficiary parsing or discovery when it is too small. The canary sets
+  49 USDC for USDC-to-WETH; 48 USDC used only 2,495 incremental gas in the
+  boundary replay, while 49 USDC remained eligible and settled.
+- Constraint: this is a calibrated gas prefilter, not a profitability proof.
+  Recalibrate it when liquidity, pool selection, or the profit floor changes.
+
 61. Backrunning only pays if the hook can be ordered behind the dislocating swap
 - Status: `ADDRESSED`
 - Priority: `HIGH`
@@ -422,8 +437,8 @@ The initial deployment is owner-operated with a small set of manually verified, 
 - Notes: Cold registration validation moved into the existing `ArbitrageLogic`
   dependency, live v4 state preparation moved into that stateless contract, and
   legacy scanner/flash dispatch moved to `ArbHookHarness` without deleting the
-  algorithms. `ArbHook` is 21,621 runtime bytes: 2,379 bytes below the
-  repository's 24,000-byte budget and 2,955 bytes below EIP-170.
+  algorithms. `ArbHook` is 22,042 runtime bytes: 1,958 bytes below the
+  repository's 24,000-byte budget and 2,534 bytes below EIP-170.
 
 7. Shared pool metadata removal
 - Status: `ADDRESSED`

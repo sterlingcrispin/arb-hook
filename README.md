@@ -10,12 +10,13 @@ For a USDC-to-WETH swap on the Base canary:
 
 1. The user's swap moves the hooked v4 WETH/USDC pool away from the external WETH/USDC reference price.
 2. `afterSwap` runs after that price movement while the v4 `PoolManager` is still unlocked.
-3. The hook treats the user's output token, WETH, as the flash-loan and profit token. The user's input token, USDC, is the intermediate token.
-4. `ArbitrageLogic` reads the post-swap v4 price, active liquidity, directional v4 fee, and the first registered matching V3 reference pool.
-5. If the directional spread clears both pool fees and `minSpreadBps`, the hook derives a bounded principal from the same liquidity-and-spread math used by the older arbitrage engine.
-6. The hook borrows WETH, swaps WETH to USDC against its own v4 pool in the direction opposite the user's swap, and swaps that USDC back to WETH on the external V3 pool.
-7. Realized balances must cover the loan, lender fee, and configured minimum profit. The loan is repaid atomically and all remaining WETH profit is transferred to the beneficiary supplied with the triggering swap.
-8. Any discovery, loan, swap, repayment, or profitability failure reverts only the isolated arbitrage attempt. The user's original swap continues.
+3. The hook compares the swap's actual input with the configured minimum for this PoolId and direction. Smaller swaps return immediately without route discovery or borrowing.
+4. The hook treats the user's output token, WETH, as the flash-loan and profit token. The user's input token, USDC, is the intermediate token.
+5. `ArbitrageLogic` reads the post-swap v4 price, active liquidity, directional v4 fee, and the first registered matching V3 reference pool.
+6. If the directional spread clears both pool fees and `minSpreadBps`, the hook derives a bounded principal from the same liquidity-and-spread math used by the older arbitrage engine.
+7. The hook borrows WETH, swaps WETH to USDC against its own v4 pool in the direction opposite the user's swap, and swaps that USDC back to WETH on the external V3 pool.
+8. Realized balances must cover the loan, lender fee, and configured minimum profit. The loan is repaid atomically and all remaining WETH profit is transferred to the beneficiary supplied with the triggering swap.
+9. Any discovery, loan, swap, repayment, or profitability failure reverts only the isolated arbitrage attempt. The user's original swap continues.
 
 This changes the source of the edge. The hook is no longer waiting for two unrelated external pools to disagree at the exact moment an unrelated v4 swap arrives. The triggering swap itself creates the price movement, and the hook counter-trades it in the same transaction.
 
@@ -44,6 +45,7 @@ The first Base canary is deliberately narrow:
 | External reference and second leg | Uniswap v3 WETH/USDC 0.05% at `0xd0b53D9277642d899DF5C87A3966A349A798F224` |
 | Flash lender | WETH-bound Morpho Blue ERC-3156 adapter |
 | Enabled direction | USDC to WETH trigger swaps, with profit paid in WETH |
+| Minimum eligible trigger | `49 USDC` of actual input for the USDC-to-WETH direction |
 
 Only WETH is configured as a flash-loan token in this canary. A WETH-to-USDC trigger therefore does not attempt arbitrage. Supporting that direction requires a reviewed USDC lender configuration, minimum-profit floor, and registration under USDC.
 
@@ -81,6 +83,7 @@ The production `afterSwap` path:
 
 - trades only the triggering v4 token pair;
 - supports ERC20 currencies, not native currency;
+- skips swaps below the configured actual-input floor for that PoolId and direction;
 - chooses the first registered matching Uniswap V3 or PancakeSwap V3 pool as its reference venue;
 - performs one bounded V4/V3 counter-trade per trigger; and
 - uses `hookMaxIterations` as an enable switch, not as a production chunk count.
@@ -129,6 +132,11 @@ Hook execution starts disabled.
   - `reserve`, default `200000`, is withheld so the triggering swap can finish after a failed attempt.
   - `limit`, default `3000000`, caps the self-called attempt. Zero removes the ceiling.
 
+- `setMinTriggerAmount(poolId, zeroForOne, amount)`
+  - Sets the minimum actual swap input before route discovery. `amount` uses currency0 raw units when `zeroForOne` is true and currency1 raw units otherwise; zero disables the gate.
+  - The canary uses `49,000,000` raw USDC for its WETH/USDC PoolId with `zeroForOne = false`. The value is pool-specific because liquidity and pool state determine how large a swap must be to create the required edge.
+  - This avoids spending full arbitrage gas on known-undersized swaps. The spread and realized-profit checks still decide whether an eligible swap can settle.
+
 Per output token:
 
 - `setLenderForToken(token, lender)` selects the ERC-3156 adapter.
@@ -136,7 +144,7 @@ Per output token:
 - `setMaxFlashFeeBpsForToken(token, cap)` rejects quoted or realized fees above the cap. Zero disables borrowing.
 - `setMinNetProfitForToken(token, floor)` requires realized profit after lender fee in raw token units. Zero disables borrowing.
 
-The Base WETH canary uses a 1 WETH principal ceiling, a 1 bp fee ceiling, and a provisional `0.0001 WETH` minimum profit. Recalibrate the profit floor against current incremental gas immediately before broadcast.
+The Base WETH canary uses a 49 USDC trigger floor, a 1 WETH principal ceiling, a 1 bp fee ceiling, and a provisional `0.0001 WETH` minimum profit. Recalibrate the input and profit floors against the intended liquidity and current fork state immediately before broadcast.
 
 ## Tests
 
@@ -149,10 +157,10 @@ npm run size
 
 Current result:
 
-- 35 local tests pass;
-- `ArbHook` runtime is `21,621` bytes;
-- project-budget margin is `2,379` bytes; and
-- EIP-170 margin is `2,955` bytes.
+- 36 local tests pass;
+- `ArbHook` runtime is `22,042` bytes;
+- project-budget margin is `1,958` bytes; and
+- EIP-170 margin is `2,534` bytes.
 
 Current-head production path:
 
@@ -187,7 +195,7 @@ The canary sequence is:
 
 1. Deploy and verify all artifacts while disabled.
 2. Register the canonical Uniswap V3 WETH/USDC reference with `script/RegisterArbHookCanaryPools.s.sol`.
-3. Configure the WETH Morpho adapter and economic ceilings with `script/ConfigureArbHookCanary.s.sol`.
+3. Configure the WETH Morpho adapter, economic ceilings, and 49 USDC trigger floor with `script/ConfigureArbHookCanary.s.sol`.
 4. Initialize and fund the hooked v4 WETH/USDC pool with `script/InitializeArbHookCanaryPool.s.sol`.
 5. Prove a protected swap while disabled.
 6. Set `hookMaxIterations` to `1` and run a protected USDC-to-WETH canary swap.

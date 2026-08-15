@@ -22,7 +22,7 @@ Do not broadcast until:
 2. Every release gate below passes from a clean checkout.
 3. Canonical Base addresses and runtime code are reverified.
 4. The hook owner and LP recipient are the intended canary wallets.
-5. LP caps, swap size, 1 WETH principal ceiling, and WETH profit floor are recorded.
+5. LP caps, swap size, 49 USDC trigger floor, 1 WETH principal ceiling, and WETH profit floor are recorded.
 6. The owner can set `hookMaxIterations` to zero.
 7. The LP wallet can simulate burning the position.
 8. The controlled swap has a current minimum WETH output and exactly 20 bytes of beneficiary hook data.
@@ -41,7 +41,7 @@ The size gate requires every production runtime below 24,000 bytes. The current 
 
 | Contract | Runtime bytes |
 |---|---:|
-| `ArbHook` | `21621` |
+| `ArbHook` | `22042` |
 | `ArbitrageLogic` | `19678` |
 | `AaveV3ERC3156Adapter` | `2590` |
 | `MorphoERC3156Adapter` | `2144` |
@@ -159,9 +159,10 @@ Initial reviewed values:
 WETH_FLASH_PRINCIPAL_CAP_WEI = 1000000000000000000   # 1 WETH ceiling
 WETH_MAX_FLASH_FEE_BPS       = 1                     # smallest enabled cap
 WETH_MIN_NET_PROFIT_WEI      = 100000000000000       # provisional 0.0001 WETH
+USDC_MIN_TRIGGER_AMOUNT_RAW  = 49000000               # 49 USDC actual input
 ```
 
-The principal is a ceiling, not the requested amount. A zero principal, fee cap, or profit floor disables borrowing.
+The principal is a ceiling, not the requested amount. A zero principal, fee cap, or profit floor disables borrowing. The trigger floor is keyed to the exact WETH/USDC PoolId and USDC-to-WETH direction; swaps below it skip before route discovery.
 
 Simulate while the hook remains disabled:
 
@@ -172,15 +173,19 @@ LENDER_ADAPTER="$MORPHO_ADAPTER" \
 WETH_FLASH_PRINCIPAL_CAP_WEI=1000000000000000000 \
 WETH_MAX_FLASH_FEE_BPS=1 \
 WETH_MIN_NET_PROFIT_WEI=100000000000000 \
+USDC_MIN_TRIGGER_AMOUNT_RAW=49000000 \
 forge script script/ConfigureArbHookCanary.s.sol:ConfigureArbHookCanary \
   --rpc-url "$BASE_RPC_URL"
 ```
 
-Repeat with `--broadcast`, then read back:
+Record the deterministic PoolId printed by the simulation as `POOL_ID`. Repeat with `--broadcast`, then read back:
 
 ```bash
 cast call "$HOOK" \
   "getFlashConfig(address)(address,uint256,uint256,uint256)" "$WETH" \
+  --rpc-url "$BASE_RPC_URL"
+cast call "$HOOK" \
+  "getMinTriggerAmount(bytes32,bool)(uint256)" "$POOL_ID" false \
   --rpc-url "$BASE_RPC_URL"
 ```
 
@@ -193,7 +198,7 @@ minimumProfitWei >=
   + desiredBeneficiaryMarginWei
 ```
 
-The block `50018535` fork rehearsal measured about `419546` incremental gas and `0.000427463494774361 WETH` profit. Neither value is a production guarantee.
+At pinned block `50018808`, the calibrated boundary was 48 USDC below the `0.0001 WETH` floor and 49 USDC above it. With the 49 USDC input gate enabled, smaller swaps added only about 2,500 to 3,100 gas instead of entering the roughly 419,500-gas attempt. These values depend on pool liquidity and state and are not production guarantees.
 
 ## 5. Initialize And Fund The V4 Pool
 
@@ -258,7 +263,7 @@ A successful `FlashLoanSettled` event must show:
 
 Also verify Morpho's WETH balance is unchanged after the transaction and the hook retains neither WETH nor USDC.
 
-No event is valid for a swap too small to clear pool fees and the minimum-profit floor. Do not deliberately create an unsafe mainnet trade merely to force a loan. Reproduce the exact intended LP and swap parameters on a current fork first.
+No event is expected below the configured 49 USDC actual-input floor or when an eligible swap cannot clear pool fees and the minimum-profit floor. Do not deliberately create an unsafe mainnet trade merely to force a loan. Reproduce the exact intended LP and swap parameters on a current fork first.
 
 ## Beneficiary And Router Requirement
 

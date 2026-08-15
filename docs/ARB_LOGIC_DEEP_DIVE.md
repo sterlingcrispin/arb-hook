@@ -37,10 +37,13 @@ The production path does not traverse `supportedTokens` or compare unrelated ext
 
 1. Require the immutable PoolManager as caller.
 2. Require `hookMaxIterations != 0`.
-3. Decode exactly 20 bytes of beneficiary hook data.
-4. Store the beneficiary in transient storage.
-5. Call `attemptHookPoolInternal` with an explicit gas budget.
-6. Clear the transient beneficiary and return zero hook delta.
+3. Read the configured minimum input for the triggering PoolId and direction. If the actual negative input leg in `BalanceDelta` is smaller, return immediately.
+4. Decode exactly 20 bytes of beneficiary hook data.
+5. Store the beneficiary in transient storage.
+6. Call `attemptHookPoolInternal` with an explicit gas budget.
+7. Clear the transient beneficiary and return zero hook delta.
+
+The input gate is pool- and direction-specific because the useful threshold depends on that pool's liquidity and state. For `zeroForOne`, it compares the magnitude of `amount0`; otherwise it compares `amount1`. Values are therefore raw units of the input currency. Zero disables the gate. This check deliberately uses PoolManager's realized delta rather than trusting router calldata or `amountSpecified`, and it runs before beneficiary decoding, reference reads, lender quoting, or a self-call.
 
 The self-call is important. Any deep revert from pool lookup, lender quoting, V4 settlement, V3 execution, repayment, or profit enforcement is caught by the low-level call and does not bubble into the user's swap.
 

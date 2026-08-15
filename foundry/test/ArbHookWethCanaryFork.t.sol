@@ -21,6 +21,7 @@ import {TickMath} from "@uniswap/v4-core/src/libraries/TickMath.sol";
 import {IHooks} from "@uniswap/v4-core/src/interfaces/IHooks.sol";
 import {IPoolManager} from "@uniswap/v4-core/src/interfaces/IPoolManager.sol";
 import {PoolKey} from "@uniswap/v4-core/src/types/PoolKey.sol";
+import {PoolIdLibrary} from "@uniswap/v4-core/src/types/PoolId.sol";
 import {Currency} from "@uniswap/v4-core/src/types/Currency.sol";
 import {LiquidityAmounts} from "@uniswap/v4-periphery/src/libraries/LiquidityAmounts.sol";
 
@@ -29,6 +30,8 @@ interface IPermit2Allowance {
 }
 
 contract ArbHookWethCanaryForkTest is Test {
+    using PoolIdLibrary for PoolKey;
+
     address internal constant WETH = 0x4200000000000000000000000000000000000006;
     address internal constant USDC = 0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913;
     address internal constant MORPHO_BLUE = 0xBBBBBbbBBb9cC5e90e3b3Af64bdAF62C37EEFFCb;
@@ -41,6 +44,7 @@ contract ArbHookWethCanaryForkTest is Test {
 
     uint256 internal constant PRINCIPAL_CAP = 1 ether;
     uint256 internal constant MIN_NET_PROFIT = 0.0001 ether;
+    uint256 internal constant MIN_TRIGGER_USDC = 49e6;
     bytes32 internal constant FLASH_SETTLED_TOPIC0 = keccak256(
         "FlashLoanSettled(address,address,address,address,address,uint256,uint256,uint256,int256,uint256,address)"
     );
@@ -99,6 +103,7 @@ contract ArbHookWethCanaryForkTest is Test {
 
         _registerExternalWethUsdcPool();
         _initializeTriggerPool();
+        hook.setMinTriggerAmount(triggerKey.toId(), false, MIN_TRIGGER_USDC);
     }
 
     function testSwapCreatesAndCapturesItsOwnWethArbitrage() public {
@@ -160,7 +165,9 @@ contract ArbHookWethCanaryForkTest is Test {
         if (!forkEnabled) revert("set RUN_WETH_CANARY_FORK=true and BASE_RPC_URL");
 
         uint256 sweepMinProfit = vm.envOr("WETH_CANARY_SWEEP_MIN_PROFIT_WEI", uint256(1));
+        uint256 sweepMinTrigger = vm.envOr("WETH_CANARY_SWEEP_MIN_TRIGGER_AMOUNT_RAW", uint256(0));
         hook.setMinNetProfitForToken(WETH, sweepMinProfit);
+        hook.setMinTriggerAmount(triggerKey.toId(), false, sweepMinTrigger);
         uint256 gasPriceWei = vm.envOr("WETH_CANARY_SIM_GAS_PRICE_WEI", uint256(0));
         uint128[23] memory amounts = [
             uint128(1e6),
@@ -190,6 +197,7 @@ contract ArbHookWethCanaryForkTest is Test {
 
         emit log_named_uint("Base fork block", block.number);
         emit log_named_uint("sweep minimum profit wei", sweepMinProfit);
+        emit log_named_uint("sweep minimum trigger amount raw", sweepMinTrigger);
         emit log_named_uint("execution gas price wei", gasPriceWei);
         emit log_named_decimal_uint("v4 WETH deposited", v4WethDeposited, 18);
         emit log_named_decimal_uint("v4 USDC deposited", v4UsdcDeposited, 6);
@@ -197,6 +205,11 @@ contract ArbHookWethCanaryForkTest is Test {
             (bool settled, Settlement memory result, uint256 disabledGas, uint256 enabledGas) =
                 _simulateTriggerSize(amounts[i]);
             uint256 incrementalGas = enabledGas > disabledGas ? enabledGas - disabledGas : 0;
+
+            if (sweepMinTrigger != 0 && amounts[i] < sweepMinTrigger) {
+                assertFalse(settled, "below-minimum trigger settled");
+                assertLt(incrementalGas, 10_000, "below-minimum trigger entered arb path");
+            }
 
             emit log_string("---");
             emit log_named_decimal_uint("trigger USDC", amounts[i], 6);

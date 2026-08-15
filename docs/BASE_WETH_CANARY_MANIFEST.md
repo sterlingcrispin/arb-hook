@@ -70,10 +70,13 @@ Use the WETH-bound Morpho adapter:
 | Initial principal ceiling | `1 WETH` |
 | Fee ceiling | `1` bp, the smallest nonzero enabled value |
 | Provisional minimum net profit | `0.0001 WETH` |
+| Minimum triggering input | `49 USDC` (`49,000,000` raw), USDC-to-WETH only |
 
 The 1 WETH value is only a ceiling. Live route math chooses the amount from post-swap spread and active liquidity. The current-head 100 USDC fork rehearsal selected about `0.0089 WETH`, more than 100 times below the cap.
 
-Recheck lender liquidity, fee behavior, gas, and the profit floor immediately before broadcast.
+The 49 USDC value is an early gas-saving gate for this exact PoolId and direction. It uses the actual USDC input reported by v4's `BalanceDelta`, not caller-supplied calldata. Smaller swaps skip before route discovery and borrowing; eligible swaps must still clear spread, fee, and realized-profit checks.
+
+Recheck lender liquidity, fee behavior, gas, the input floor, and the profit floor immediately before broadcast.
 
 ## Trigger Size Simulation
 
@@ -99,8 +102,11 @@ test-only profit floor:
 | 49.00 USDC | 0.000102966132333892 | 0.000002505282 | clears the canary profit floor |
 | 100.00 USDC | 0.000427855387719440 | 0.000002504700 | clears both thresholds |
 
-A second replay with the actual `0.0001 WETH` floor confirmed that 48 USDC
-produces no settlement event while 49 USDC settles with the profit above.
+A second replay with the actual `0.0001 WETH` floor established the input gate:
+48 USDC produced no settlement while 49 USDC settled. With the resulting
+49 USDC gate enabled, every smaller sample skipped the arbitrage path for only
+about 2,500 to 3,100 incremental gas; 49 USDC remained inclusive and used about
+419,500 incremental gas for the full attempt.
 
 For this exact state and LP depth, the observed thresholds are therefore:
 
@@ -126,7 +132,9 @@ forge test --match-contract ArbHookWethCanaryForkTest \
 ```
 
 Set `WETH_CANARY_SWEEP_MIN_PROFIT_WEI=100000000000000` to replay the actual
-canary floor instead of observing smaller positive results.
+canary profit floor instead of observing smaller positive results. Also set
+`WETH_CANARY_SWEEP_MIN_TRIGGER_AMOUNT_RAW=49000000` to replay the production
+input gate and its 48/49 USDC boundary assertion.
 
 ## Canonical Base Contracts
 
@@ -151,6 +159,7 @@ Recheck these against current official deployment sources and confirm runtime co
 - WETH-bound Morpho borrowing and exact zero-fee repayment;
 - full-range v4 LP mint and withdrawal;
 - a normal 100 USDC-to-WETH trigger with packed beneficiary data;
+- a pool-and-direction-specific 49 USDC actual-input gate before discovery;
 - adaptive direction and principal selection without a supplied hint;
 - bounded execution price limits on both swap legs;
 - a counter-swap against the same v4 pool that triggered the hook;

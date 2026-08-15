@@ -10,7 +10,7 @@ import {Hooks} from "@uniswap/v4-core/src/libraries/Hooks.sol";
 import {IHooks} from "@uniswap/v4-core/src/interfaces/IHooks.sol";
 import {IPoolManager} from "@uniswap/v4-core/src/interfaces/IPoolManager.sol";
 import {PoolKey} from "@uniswap/v4-core/src/types/PoolKey.sol";
-import {PoolIdLibrary} from "@uniswap/v4-core/src/types/PoolId.sol";
+import {PoolId, PoolIdLibrary} from "@uniswap/v4-core/src/types/PoolId.sol";
 import {Currency} from "@uniswap/v4-core/src/types/Currency.sol";
 import {
     BalanceDelta,
@@ -115,6 +115,7 @@ contract ArbHook is
     mapping(address => uint256) internal flashPrincipalByToken;
     mapping(address => uint256) internal maxFlashFeeBpsByToken;
     mapping(address => uint256) internal minNetProfitByToken;
+    mapping(PoolId => uint256[2]) private minTriggerAmountByPool;
 
     // Flash-loan runtime context. All of it is single-transaction state and lives
     // in transient storage; see ArbUtils for the slot assignments.
@@ -175,12 +176,26 @@ contract ArbHook is
     function _afterSwap(
         PoolKey calldata key,
         SwapParams calldata params,
-        BalanceDelta,
+        BalanceDelta delta,
         bytes calldata hookData
     ) internal returns (bytes4, int128) {
         // Hook path is best-effort only: trade failure must never block user swap settlement.
         uint256 iterations = hookMaxIterations;
         if (iterations > 0) {
+            // Avoid route discovery and borrowing for calibrated-small swaps.
+            uint256 minimumInput = minTriggerAmountByPool[key.toId()][
+                params.zeroForOne ? 1 : 0
+            ];
+            if (minimumInput != 0) {
+                int128 inputDelta = params.zeroForOne
+                    ? delta.amount0()
+                    : delta.amount1();
+                if (
+                    inputDelta >= 0 ||
+                    uint256(-int256(inputDelta)) < minimumInput
+                ) return (IHooks.afterSwap.selector, 0);
+            }
+
             address beneficiary = _resolveProfitRecipient(hookData);
             if (beneficiary != address(0)) {
                 _setActiveProfitRecipient(beneficiary);
@@ -374,6 +389,23 @@ contract ArbHook is
         returns (uint32 gasReserve, uint32 gasLimit)
     {
         return (hookGasReserve, hookGasLimit);
+    }
+
+    /// @notice Set the actual input required before one pool direction attempts arbitrage.
+    /// @dev Amount uses currency0 units for zeroForOne, otherwise currency1; zero disables.
+    function setMinTriggerAmount(
+        PoolId poolId,
+        bool zeroForOne,
+        uint256 amount
+    ) external onlyOwner {
+        minTriggerAmountByPool[poolId][zeroForOne ? 1 : 0] = amount;
+    }
+
+    function getMinTriggerAmount(
+        PoolId poolId,
+        bool zeroForOne
+    ) external view returns (uint256) {
+        return minTriggerAmountByPool[poolId][zeroForOne ? 1 : 0];
     }
 
     function setLenderForToken(
