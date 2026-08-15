@@ -45,6 +45,11 @@ contract ArbHookHarness is ArbHook {
         return success;
     }
 
+    /// @dev Self-call target retained only for the legacy parity harness.
+    function attemptAllInternal(uint256 iterations) external returns (bool) {
+        return _attemptAllInternal(iterations);
+    }
+
     function getPoolsForToken(
         address token
     ) external view returns (ArbUtils.PoolInfo[] memory) {

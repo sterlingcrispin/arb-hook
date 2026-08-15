@@ -83,6 +83,8 @@ contract ArbHook is
     uint256 private constant FEE_BPS_DIVISOR = 10_000;
     bytes32 private constant ERC3156_CALLBACK_SUCCESS =
         keccak256("ERC3156FlashBorrower.onFlashLoan");
+    bytes4 private constant ATTEMPT_ALL_INTERNAL_SELECTOR =
+        bytes4(keccak256("attemptAllInternal(uint256)"));
 
     // Trusted factories for callback validation
     IUniswapV2Factory private constant V2_FACTORY =
@@ -215,7 +217,7 @@ contract ArbHook is
         // and the explicit budget bounds what a failure can cost the user.
         (bool successCall, bytes memory returndata) = address(this).call{
             gas: gasBudget
-        }(abi.encodeWithSelector(this.attemptAllInternal.selector, iterations));
+        }(abi.encodeWithSelector(ATTEMPT_ALL_INTERNAL_SELECTOR, iterations));
 
         bool tradeSuccess = successCall && abi.decode(returndata, (bool));
         return successCall && tradeSuccess;
@@ -568,9 +570,9 @@ contract ArbHook is
     /// @dev Must be executed via self-call. Individual pair attempts are isolated with
     ///      low-level calls so a failing path does not revert the full cycle.
     ///      This internal execution path may still revert on invariant or auth failures.
-    function attemptAllInternal(
+    function _attemptAllInternal(
         uint256 maxIterations
-    ) external returns (bool success) {
+    ) internal returns (bool success) {
         if (msg.sender != address(this)) revert ArbErrors.WrapperOnlySelf();
 
         int256 totalProfit = 0;
