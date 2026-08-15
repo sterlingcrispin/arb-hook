@@ -9,50 +9,60 @@ The initial deployment is owner-operated with a small set of manually verified, 
 
 ## Open For Canary
 
-60. The selected cbBTC/WETH market has no exploitable spread
+60. No dislocation ever opens on the selected cbBTC/WETH pair
 - Status: `BLOCKS DEPLOYMENT`
 - Priority: `CRITICAL`
-- Summary: The two chosen venues track each other far too closely to clear their
-  own fees. Measured live with `scripts/sample_pool_spread.py` across three
-  sampling regimes, 238 samples total:
+- Summary: The intended edge is same-block backrunning: a large swap dislocates
+  one venue and the hook, ordered behind it, captures the gap before anyone
+  reading published state can react. The mechanism is sound. The premise is not
+  met on this pair, because no swap opens a gap worth trading.
+- Measurement: `scripts/sample_intrablock_spread.py` replays every Swap event
+  from both pools over 20,000 blocks (about 11 hours, 1,953 swaps), tracking each
+  pool's post-swap tick by log index. This reconstructs the exact state a
+  transaction inserted at any point inside a block would observe, which
+  block-boundary sampling cannot see.
 
-  | Window | Samples | Median | Max | Cleared 6 bps fees | Passed 10-tick gate |
-  |--------|---------|--------|-----|--------------------|---------------------|
-  | 12h @ 15 min | 48 | 2 | 5 | 0 | 0 |
-  | 60 consecutive blocks | 60 | 2 | 2 | 0 | 0 |
-  | 1.4h @ ~40 s | 130 | 2 | 4 | 0 | 0 |
+  | Series | Median | p99 | Max | Cleared 6 bps fees |
+  |--------|--------|-----|-----|--------------------|
+  | Spread right after each swap | 2 | 5 | 5 | 0/1937 |
+  | Spread at block boundary | 2 | 5 | 5 | 0/1419 |
+  | Peak dislocation inside each block | 2 | 5 | 5 | 0/1419 |
+  | Per-swap tick movement | 0 | 1 | **3** | n/a |
 
-  A round trip pays PancakeSwap 1 bp plus Uniswap 5 bps, so it needs more than
-  6 ticks before gas. `minSpreadBps` additionally gates V3/V3 routes at 10 ticks.
-  Nothing observed came close to either threshold.
-- Evidence that the fork result is manufactured: `ArbHookWethCanaryFork.t.sol`
-  swaps 150 WETH, roughly $450k, into the Uniswap pool to create the dislocation
-  it then captures. The 0.001606 WETH result measures execution correctness, not
-  market opportunity, which the release notes state.
-- Decision: do not fund this pair. Re-run the sampler against candidate markets
-  and require an observed spread distribution that clears fees plus gas before
-  committing a manifest. See item 61 for why liquid pairs are structurally the
-  wrong place to look.
+  The last row is the governing one. Not one swap in 1,951 moved its own pool as
+  much as 10 ticks, and the largest moved 3. A round trip owes PancakeSwap 1 bp
+  plus Uniswap 5 bps, so it needs more than 6 ticks before gas, and `minSpreadBps`
+  gates V3/V3 at 10.
+- Interpretation: the gap is not being closed by faster competitors. It never
+  opens. Trades against this pair are far too small relative to its liquidity to
+  move the price. `ArbHookWethCanaryFork.t.sol` has to swap 150 WETH, roughly
+  $450k, to manufacture the dislocation it then captures, which is why its
+  0.001606 WETH result measures execution rather than opportunity.
+- Decision: do not fund this pair. Screen candidates on per-swap tick movement,
+  not volume or liquidity. The requirement is a venue where ordinary trades
+  routinely move the price past the fee floor, which means thin liquidity
+  relative to typical trade size, the opposite of how this target was chosen.
 
-61. The trigger is uncorrelated with the opportunity
+61. Backrunning only pays if the hook can be ordered behind the dislocating swap
 - Status: `DOCUMENTED`
 - Priority: `HIGH`
-- Summary: The hook fires on swaps against its own v4 pool but never trades
+- Summary: The hook fires on swaps against its own v4 pool and never trades
   against that pool (item 26). In the WETH canary the trigger is WETH/USDC while
-  the opportunity is cbBTC/WETH, and nothing links them. The hook therefore
-  samples the external spread at times that are random with respect to the
-  spread, which is what the 238-sample distribution above approximates.
-- Consequence: capturing a dislocation needs two independent events in the same
-  block, an external dislocation and a v4 swap on the trigger pool. Competing
-  searchers watch the dislocation directly and close it within one block, so a
-  randomly timed observer loses that race by construction.
-- Implication for market selection: the design needs a venue where dislocations
-  persist across blocks rather than one that is already tightly arbitraged. That
-  points away from high-volume pairs, which is the opposite of how the current
-  target was chosen. The alternative is to change the trigger relationship so the
-  swap that fires the hook is the same event that creates the dislocation.
-- Decision: settle this before selecting any market. It determines whether the
-  strategy can work, not merely which pair to use.
+  the opportunity is cbBTC/WETH, so the two are unrelated events that must land
+  in the same block in the right order.
+- What works in the design's favour: Base does not publicly gossip its mempool,
+  so a competitor cannot reliably observe the dislocating swap before inclusion
+  and backrun it the way it could on Ethereum L1. A transaction that does land
+  directly behind the dislocating swap genuinely sees state nobody reading
+  published blocks could have acted on.
+- What does not: the hook does not choose its position. It executes wherever the
+  triggering swap happens to be ordered. Landing behind a specific transaction
+  requires bidding for placement, which is the searcher game rather than an
+  alternative to it. Under organic traffic the placement is luck.
+- Decision: settle this before selecting a market. Either accept a low capture
+  rate on genuinely large dislocations, or change the trigger so the swap that
+  fires the hook is the same event that creates the dislocation, for example by
+  attaching the hook to a pool that is itself one of the arbitrage venues.
 
 20. Independent review of release commit
 - Status: `BLOCKS DEPLOYMENT`
