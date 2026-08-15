@@ -85,6 +85,12 @@ contract ArbHook is
         keccak256("ERC3156FlashBorrower.onFlashLoan");
     bytes4 private constant ATTEMPT_ALL_INTERNAL_SELECTOR =
         bytes4(keccak256("attemptAllInternal(uint256)"));
+    bytes4 private constant EXECUTE_ITERATIVE_ARB_VIA_FLASH_SELECTOR =
+        bytes4(
+            keccak256(
+                "executeIterativeArbViaFlash(address,address,address,address,uint256,uint8,uint8)"
+            )
+        );
 
     // Trusted factories for callback validation
     IUniswapV2Factory private constant V2_FACTORY =
@@ -652,7 +658,7 @@ contract ArbHook is
                 gas: gasleft() >> 1
             }(
                 abi.encodeWithSelector(
-                    this.executeIterativeArbViaFlash.selector,
+                    EXECUTE_ITERATIVE_ARB_VIA_FLASH_SELECTOR,
                     sellPool,
                     buyPool,
                     tokenA,
@@ -791,7 +797,7 @@ contract ArbHook is
     /// @notice Execute one arbitrage attempt using flash-loaned startToken capital.
     /// @dev Preserves existing iterative execution logic by invoking executeIterativeArb
     ///      inside the flash-loan callback.
-    function executeIterativeArbViaFlash(
+    function _executeIterativeArbViaFlash(
         address poolA_addr,
         address poolB_addr,
         address startToken,
@@ -800,8 +806,7 @@ contract ArbHook is
         ArbUtils.PoolType poolAType,
         ArbUtils.PoolType poolBType
     )
-        public
-        virtual
+        internal
         returns (bool success, int256 cumulativeProfit, uint256 iterations)
     {
         if (msg.sender != address(this)) revert ArbErrors.WrapperOnlySelf();
