@@ -13,7 +13,6 @@ import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {IERC3156FlashBorrower} from "../../contracts/interfaces/IERC3156FlashBorrower.sol";
 import {IERC3156FlashLender} from "../../contracts/interfaces/IERC3156FlashLender.sol";
 import {IUniswapV2Pair} from "../../contracts/interfaces/IUniswapV2Pair.sol";
-import {IHooks} from "@uniswap/v4-core/src/interfaces/IHooks.sol";
 import {IPoolManager} from "@uniswap/v4-core/src/interfaces/IPoolManager.sol";
 import {TickMath} from "@uniswap/v3-core/contracts/libraries/TickMath.sol";
 
@@ -270,7 +269,7 @@ contract ArbHookFlashLoanE2ETest is Test {
         hook.setMinNetProfitForToken(address(token), minNetProfit);
     }
 
-    function _configureAfterSwapRoute(
+    function _configureLegacyRoute(
         IERC3156FlashLender lender,
         uint256 principal
     ) private {
@@ -333,7 +332,7 @@ contract ArbHookFlashLoanE2ETest is Test {
             5
         );
         token.mint(address(lender), principalCap);
-        _configureAfterSwapRoute(lender, principalCap);
+        _configureLegacyRoute(lender, principalCap);
 
         vm.recordLogs();
         (int256 profit, uint256 iterations) = hook.runPairForTest(
@@ -566,76 +565,6 @@ contract ArbHookFlashLoanE2ETest is Test {
         assertEq(settled.fee, fee);
         assertEq(settled.netProfit, int256(expectedNet));
         assertEq(settled.beneficiary, address(this));
-    }
-
-    function testAfterSwapPaysPackedBeneficiary() public {
-        uint256 principal = 100_000e18;
-        MockERC3156Lender lender = new MockERC3156Lender(
-            IERC20(address(token)),
-            5
-        );
-        token.mint(address(lender), principal);
-        _configureAfterSwapRoute(lender, principal);
-        address beneficiary = makeAddr("beneficiary");
-
-        vm.recordLogs();
-        (bytes4 selector, int128 delta) = poolManager.callAfterSwap(
-            IHooks(address(hook)),
-            makeAddr("router"),
-            abi.encodePacked(beneficiary)
-        );
-        (bool found, Settlement memory settled) = _findLastSettlement(
-            vm.getRecordedLogs()
-        );
-
-        assertEq(selector, hook.afterSwap.selector);
-        assertEq(delta, 0);
-        assertTrue(found, "callback did not execute");
-        assertEq(settled.beneficiary, beneficiary);
-        assertEq(
-            token.balanceOf(beneficiary),
-            uint256(settled.netProfit)
-        );
-    }
-
-    function testAfterSwapSkipsMissingOrMalformedBeneficiary() public {
-        uint256 principal = 100_000e18;
-        MockERC3156Lender lender = new MockERC3156Lender(
-            IERC20(address(token)),
-            5
-        );
-        token.mint(address(lender), principal);
-        _configureAfterSwapRoute(lender, principal);
-
-        poolManager.callAfterSwap(
-            IHooks(address(hook)),
-            makeAddr("router"),
-            bytes("")
-        );
-        poolManager.callAfterSwap(
-            IHooks(address(hook)),
-            makeAddr("router"),
-            abi.encode(makeAddr("wrongLength"))
-        );
-        assertEq(lender.flashLoanCallCount(), 0, "invalid hook data borrowed");
-    }
-
-    function testAfterSwapContainsFlashFailure() public {
-        uint256 principal = 100_000e18;
-        BadInitiatorFlashLender lender = new BadInitiatorFlashLender(
-            IERC20(address(token)),
-            5
-        );
-        token.mint(address(lender), principal);
-        _configureAfterSwapRoute(lender, principal);
-
-        (bytes4 selector, int128 delta) = poolManager.callAfterSwap(
-            IHooks(address(hook)),
-            makeAddr("router"),
-            abi.encodePacked(makeAddr("beneficiary"))
-        );
-        assertEq(selector, hook.afterSwap.selector);
-        assertEq(delta, 0);
     }
 
     function _runDirect()

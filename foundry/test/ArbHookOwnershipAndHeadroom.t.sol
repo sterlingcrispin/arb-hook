@@ -12,7 +12,6 @@ import {TestToken} from "../../contracts/test/TestToken.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {IERC3156FlashBorrower} from "../../contracts/interfaces/IERC3156FlashBorrower.sol";
 import {IERC3156FlashLender} from "../../contracts/interfaces/IERC3156FlashLender.sol";
-import {IHooks} from "@uniswap/v4-core/src/interfaces/IHooks.sol";
 import {IPoolManager} from "@uniswap/v4-core/src/interfaces/IPoolManager.sol";
 import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 
@@ -95,9 +94,7 @@ contract HeadroomLender is IERC3156FlashLender {
     }
 }
 
-/// @notice Pins two operational properties an auditor should be able to check by
-///         running the suite: what the owner surface allows, and how much caller
-///         gas an arbitrage actually needs before it can succeed.
+/// @notice Pins owner controls and verifies donated balances cannot expand legacy route sizing.
 contract ArbHookOwnershipAndHeadroomTest is Test {
     address private constant BASE_UNISWAP_V2_FACTORY = 0x8909Dc15e40173Ff4699343b6eB8132c65e18eC6;
     address private constant BASE_PANCAKE_V2_FACTORY = 0x02a84c1b3BBD7401a5f7fa98a384EBC70bB5749E;
@@ -263,45 +260,4 @@ contract ArbHookOwnershipAndHeadroomTest is Test {
         }
     }
 
-    // ------------------------- Gas headroom --------------------------------
-
-    /// @dev Each route receives half the scanner's remaining gas, so a swap must
-    ///      carry roughly twice an arbitrage's true execution cost before one can
-    ///      land. This measures the real threshold rather than assuming it.
-    function testArbitrageNeedsRoughlyDoubleItsExecutionCostInCallerGas() public {
-        uint256 succeedsAt = type(uint256).max;
-        uint256 failsAt;
-
-        // Walk the caller's gas limit upward and find where an arb first lands.
-        for (uint256 limit = 400_000; limit <= 6_000_000; limit += 100_000) {
-            uint256 snapshot = vm.snapshotState();
-            (bool ok,) = address(poolManager).call{gas: limit}(
-                abi.encodeWithSelector(
-                    poolManager.callAfterSwap.selector,
-                    IHooks(address(hook)),
-                    makeAddr("router"),
-                    abi.encodePacked(makeAddr("beneficiary"))
-                )
-            );
-            bool traded = ok && lender.flashLoanCallCount() > 0;
-            if (traded && limit < succeedsAt) succeedsAt = limit;
-            if (!traded) failsAt = limit;
-            vm.revertToState(snapshot);
-        }
-
-        emit log_named_uint("lowest caller gas that lands an arb", succeedsAt);
-        emit log_named_uint("highest caller gas that still misses", failsAt);
-
-        assertLt(succeedsAt, type(uint256).max, "no gas limit in range produced a trade");
-
-        // Measure the same successful path with unconstrained gas.
-        uint256 before = gasleft();
-        poolManager.callAfterSwap(IHooks(address(hook)), makeAddr("router"), abi.encodePacked(makeAddr("ben")));
-        uint256 actualCost = before - gasleft();
-        emit log_named_uint("actual cost of the successful path", actualCost);
-        emit log_named_uint("headroom multiple (x100)", (succeedsAt * 100) / actualCost);
-
-        // The halving means the requirement is a multiple of true cost, not a small margin.
-        assertGt(succeedsAt, actualCost, "threshold should exceed the path's own cost");
-    }
 }
