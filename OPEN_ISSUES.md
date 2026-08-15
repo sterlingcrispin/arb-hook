@@ -39,9 +39,10 @@ The initial deployment is owner-operated with a small set of manually verified, 
   liquidity provider to the swapper, funded by the LP's loss-versus-rebalancing
   and routed through the external pool's fee. On a thin pool that no external
   searcher watches, that value would otherwise have stayed with the LP, so the
-  hook makes providing liquidity strictly worse. At the measured scale a 100
-  USDC swap pays the LP about 0.30 USDC in v4 fees while the hook extracts about
-  0.81 USDC from the same position.
+  hook makes providing liquidity strictly worse. At the measured scale, the 100
+  USDC user leg pays about 0.05 USDC in v4 fees and the counter-trade pays about
+  another 0.0085 USDC, while the hook transfers about 0.81 USDC from the same
+  position to the beneficiary.
 - Decision: settle who is meant to fund the rebate before deploying. A canary in
   which the operator is LP, swapper and beneficiary cannot demonstrate profit; it
   can only demonstrate that the machinery runs.
@@ -183,6 +184,30 @@ The initial deployment is owner-operated with a small set of manually verified, 
 - Decision: implemented the second option. The triggering v4 swap is the event
   that creates the edge and the v4 pool is the first arbitrage leg, so no random
   same-block coincidence or transaction-placement race is required.
+
+66. Retired native-trigger tests made the flash-fork release gate fail
+- Status: `ADDRESSED`
+- Priority: `HIGH`
+- Summary: Two canonical-router tests still created a native-ETH/TestToken v4
+  pool and expected it to trigger the retired external/external scanner. The
+  production route correctly rejects native currencies and had no matching
+  reference venue, so both tests failed with no settlement event.
+- Resolution: removed the two stale tests and their helper. The production
+  `ArbHookWethCanaryForkTest` already covers the canonical Universal Router,
+  packed beneficiary data, Morpho, the actual WETH/USDC route, and LP removal.
+  The remaining flash-fork gate passes with seven tests and four explicit
+  calibration skips.
+
+67. Nested v4 counter-trade recursion was attributed to empty hook data
+- Status: `NOT AN ISSUE`
+- Priority: `HIGH`
+- Summary: An audit claimed the nested counter-swap re-enters `afterSwap` and
+  relies on empty `hookData` to stop recursion. In this v4 core,
+  `Hooks.afterSwap` returns without calling the hook whenever
+  `msg.sender == address(hook)`. `_executeV4Swap` is called by the hook itself,
+  so its nested swap cannot invoke `ArbHook.afterSwap`, regardless of hook data.
+- Decision: documented the core self-call rule at `_executeV4Swap`; do not add a
+  redundant onchain reentrancy flag or its bytecode and gas cost.
 
 ## Open For Canary
 
