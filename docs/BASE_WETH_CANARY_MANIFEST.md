@@ -136,6 +136,48 @@ canary profit floor instead of observing smaller positive results. Also set
 `WETH_CANARY_SWEEP_MIN_TRIGGER_AMOUNT_RAW=49000000` to replay the production
 input gate and its 48/49 USDC boundary assertion.
 
+## MEV Redistribution Comparison
+
+`testHookRedistributesExternalBackrunnerValue` replays a 100 USDC user swap from
+one snapshot with separate LP, swapper, beneficiary, and searcher accounts:
+
+1. Leave the post-swap v4 price movement open.
+2. Disable the hook and let an external searcher counter-trade v4, then exit through v3.
+3. Enable the hook and pay the same capture to the beneficiary.
+
+The external searcher uses owned WETH and exactly the hook's realized v4 input.
+Morpho charges zero in the hook case, so this isolates execution and recipient
+routing without introducing a lender-fee difference.
+
+At Base block `50018808`, valued at the same 1881.305317 USDC/WETH reference:
+
+| Case | LP value | Beneficiary gain | Searcher gain | Combined tracked value |
+|---|---:|---:|---:|---:|
+| No backrun | 424,282.414448 USDC | 0 | 0 | 426,261.083397 USDC |
+| External backrun | 424,281.600721 USDC | 0 | 0.804926 USDC | 426,261.074596 USDC |
+| Hook rebate | 424,281.600721 USDC | 0.804926 USDC | 0 | 426,261.074596 USDC |
+
+The swapper receives the same ordinary WETH output in every case. The hook and
+external backrunner leave the LP and combined tracked parties in the same state
+within 10 raw USDC units. The `0.008801 USDC` difference from no backrun is value
+paid to the external v3 venue. Gas is separate: no-backrun trigger `187,559`,
+hook trigger `609,700`, and external backrun `164,430` gas.
+
+This proves that the hook redirects a matched backrunner's capture to the named
+beneficiary. It does not prove a new thin pool would actually be backrun without
+the hook. If no backrun is the realistic baseline, the LP funds a rebate that it
+would otherwise have retained.
+
+Reproduce the deterministic comparison with:
+
+```bash
+RUN_WETH_CANARY_FORK=true \
+WETH_CANARY_FORK_BLOCK=50018808 \
+BASE_RPC_URL="$BASE_RPC_URL" \
+forge test --match-contract ArbHookWethCanaryForkTest \
+  --match-test testHookRedistributesExternalBackrunnerValue -vv
+```
+
 ## Canonical Base Contracts
 
 | Contract | Address |
@@ -164,7 +206,8 @@ Recheck these against current official deployment sources and confirm runtime co
 - bounded execution price limits on both swap legs;
 - a counter-swap against the same v4 pool that triggered the hook;
 - a Uniswap V3 WETH exit leg;
-- positive WETH beneficiary payout; and
+- positive WETH beneficiary payout;
+- exact redistribution parity against a matched external V4/V3 backrunner; and
 - zero residual WETH and USDC in the hook.
 
 At Base block `50018535`, the proof borrowed `0.008907102809547629 WETH`, paid `0.000427463494774361 WETH`, paid zero lender fee, and measured about `419546` incremental gas. The test did not manufacture an external-pool dislocation. Its own v4 swap created the captured edge.

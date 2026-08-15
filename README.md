@@ -63,6 +63,16 @@ Those values prove integration and settlement, not future yield. Profit depends 
 
 See [`docs/BASE_WETH_CANARY_MANIFEST.md`](docs/BASE_WETH_CANARY_MANIFEST.md) and [`docs/MAINNET_CANARY_RUNBOOK.md`](docs/MAINNET_CANARY_RUNBOOK.md).
 
+## Economic Interpretation
+
+The settlement event reports route profit, not value created from nothing. The hook counter-trades the v4 LP position. A pinned three-way replay separates the relevant baselines:
+
+- With no backrun, the LP keeps the swap-created price impact.
+- A matched external backrunner reduces LP value by `0.813727 USDC`, earns `0.804926 USDC`, and sends `0.008801 USDC` to the external V3 venue.
+- The hook produces the same LP and combined outcomes within 10 raw USDC units, but pays the `0.804926 USDC` to the beneficiary instead of the searcher.
+
+The swapper's ordinary output is identical in all cases; hook profit is an additional transfer. This establishes the MEV-redistribution mechanism, conditional on an external backrun being the correct counterfactual. On a thin pool nobody would otherwise backrun, the hook gives away value the LP would have retained. If the LP, swapper, and beneficiary are one wallet, the transfer cancels internally and external fees plus gas make that wallet net negative.
+
 ## Profit Recipient
 
 The router must pass exactly 20 packed bytes in v4 `hookData`:

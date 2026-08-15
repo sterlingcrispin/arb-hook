@@ -9,43 +9,40 @@ The initial deployment is owner-operated with a small set of manually verified, 
 
 ## Strategy Findings
 
-65. Self-contained canary is structurally net negative
+65. Hook profit is LP value redistribution, not new value
 - Status: `BLOCKS DEPLOYMENT`
 - Priority: `CRITICAL`
-- Summary: The counter-trade is funded by the v4 pool it trades against. In the
-  intended canary one wallet is the liquidity provider, the swapper and the
-  beneficiary, so the profit and the liquidity it comes out of are the same
-  money. `FlashLoanSettled` reports a gain while the operator's total position
-  falls.
-- Measurement: `testSelfContainedOperatorNetPosition` runs the identical add,
-  swap and remove sequence twice from one snapshot, hook disabled then enabled
-  with the operator as beneficiary, and values both token legs at the external
-  reference price. At Base block ~50020119, reference 1882.196851 USDC per WETH:
+- Summary: The counter-trade captures value from the v4 LP position. The product
+  case is valid only when an external backrunner would otherwise capture the
+  same edge; then the hook changes the recipient rather than worsening the LP's
+  counterfactual outcome.
+- Measurement: `testHookRedistributesExternalBackrunnerValue` uses distinct LP,
+  swapper, beneficiary, and searcher accounts and replays three cases from the
+  same Base block `50018808` snapshot. The external backrunner uses the hook's
+  realized `0.008916275255831863 WETH` v4 input, then exits through the same v3
+  pool. Every token balance is valued at the same 1881.305317 USDC/WETH reference:
 
-  | | WETH | USDC | Total value (raw USDC) |
-  |---|------|------|------------------------|
-  | Hook disabled | 199.999999999999999999 | 50,000.019998 | 426,439.390197 |
-  | Hook enabled | 200.009393626597696702 | 49,982.330504 | 426,439.381358 |
-  | Difference | +0.009394 | -17.689494 | **-0.008839** |
+  | Case | LP value | Captured by | Capture | Combined tracked value |
+  |---|---:|---|---:|---:|
+  | No backrun | 424,282.414448 USDC | nobody | 0 | 426,261.083397 USDC |
+  | External backrun | 424,281.600721 USDC | searcher | 0.804926 USDC | 426,261.074596 USDC |
+  | Hook rebate | 424,281.600721 USDC | beneficiary | 0.804926 USDC | 426,261.074596 USDC |
 
-  The settlement event for the same run reports 0.000430 WETH of profit, about
-  0.81 USDC. The operator is nonetheless 0.008839 USDC worse off before gas,
-  and the incremental arbitrage gas is 422,984 on top.
-- Where the loss comes from: the arbitrage routes roughly 0.009 WETH through the
-  external 0.05% pool, costing about 0.00847 USDC in fees. That accounts for
-  essentially the entire measured difference, so nothing is leaking beyond the
-  expected external fee. Every other flow is internal to the operator.
-- The general case: with distinct participants this is a transfer from the v4
-  liquidity provider to the swapper, funded by the LP's loss-versus-rebalancing
-  and routed through the external pool's fee. On a thin pool that no external
-  searcher watches, that value would otherwise have stayed with the LP, so the
-  hook makes providing liquidity strictly worse. At the measured scale, the 100
-  USDC user leg pays about 0.05 USDC in v4 fees and the counter-trade pays about
-  another 0.0085 USDC, while the hook transfers about 0.81 USDC from the same
-  position to the beneficiary.
-- Decision: settle who is meant to fund the rebate before deploying. A canary in
-  which the operator is LP, swapper and beneficiary cannot demonstrate profit; it
-  can only demonstrate that the machinery runs.
+  The swapper's normal output is identical in all three cases. Hook and external
+  backrun outcomes match within 10 raw USDC units. Both leave 0.008801 USDC less
+  among the tracked parties than no backrun because that value goes to the
+  external v3 venue. Gas is excluded: the hook trigger used 609,700 gas versus
+  187,559 with no backrun, while the separate backrun used 164,430 gas.
+- Interpretation: if nobody would backrun the thin pool, enabling the hook makes
+  the LP 0.813727 USDC worse in this sample. If a matched backrun is the real
+  baseline, the LP outcome is identical and the hook redirects the searcher's
+  0.804926 USDC to the beneficiary. With one wallet in every role, the transfer
+  cancels internally and only external fees plus gas remain.
+- Decision: do not describe `FlashLoanSettled.netProfit` as operator revenue.
+  Before deployment, decide whether the canary is an integration/rebate study or
+  assumes external backrunning as its economic baseline. The code now proves the
+  redistribution mechanism exactly; it does not prove that organic backrunning
+  would occur on this new thin pool.
 
 60. No dislocation ever opens on the selected cbBTC/WETH pair
 - Status: `RESOLVED BY ARCHITECTURE CHANGE`

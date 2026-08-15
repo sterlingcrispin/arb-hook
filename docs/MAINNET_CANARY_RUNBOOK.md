@@ -26,6 +26,7 @@ Do not broadcast until:
 6. The owner can set `hookMaxIterations` to zero.
 7. The LP wallet can simulate burning the position.
 8. The controlled swap has a current minimum WETH output and exactly 20 bytes of beneficiary hook data.
+9. The operator records whether this is an integration/rebate study or assumes an external backrun as its economic baseline.
 
 ## Release Gates
 
@@ -77,6 +78,8 @@ forge test --match-contract ArbHookWethCanaryForkTest -vv
 ```
 
 This test uses canonical Base v4 periphery, Morpho, and Uniswap v3. It initializes the hooked pool, submits an ordinary 100 USDC swap, captures the edge created by that swap, repays, pays the beneficiary, and removes liquidity. It does not force an unrelated external dislocation.
+
+It also compares no backrun, a matched external V4/V3 backrun, and the hook using distinct accounts. At pinned block `50018808`, the backrunner and hook each captured `0.804926 USDC` and left the LP at the same value; the recipient was the searcher in one case and the beneficiary in the other. With no backrun, the LP retained an additional `0.813727 USDC`. Treat this as MEV redistribution, not operator revenue, unless organic backrunning is established as the correct baseline.
 
 ## 1. Deploy Disabled
 
@@ -262,6 +265,8 @@ A successful `FlashLoanSettled` event must show:
 - beneficiary matches the 20 packed hook-data bytes.
 
 Also verify Morpho's WETH balance is unchanged after the transaction and the hook retains neither WETH nor USDC.
+
+`netProfit` is route profit transferred to the beneficiary. It is not proof that the LP/operator gained value. When the operator is also LP and beneficiary, the transfer is internal and external fees plus gas remain as net costs.
 
 No event is expected below the configured 49 USDC actual-input floor or when an eligible swap cannot clear pool fees and the minimum-profit floor. Do not deliberately create an unsafe mainnet trade merely to force a loan. Reproduce the exact intended LP and swap parameters on a current fork first.
 
