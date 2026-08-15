@@ -46,6 +46,7 @@ contract ArbitrageLogicV4RouteTest is Test {
         assertGt(route.principal, 0);
         assertEq(route.spread, 100);
         assertLt(route.sqrtPriceLimitX96, TickMath.getSqrtRatioAtTick(100));
+        assertGt(route.externalSqrtPriceLimitX96, TickMath.getSqrtRatioAtTick(0));
     }
 
     function testSizesToken1CounterSwapTowardExternalPrice() public {
@@ -54,6 +55,7 @@ contract ArbitrageLogicV4RouteTest is Test {
         assertGt(route.principal, 0);
         assertEq(route.spread, 100);
         assertGt(route.sqrtPriceLimitX96, TickMath.getSqrtRatioAtTick(-100));
+        assertLt(route.externalSqrtPriceLimitX96, TickMath.getSqrtRatioAtTick(0));
     }
 
     function testRejectsSpreadInWrongDirection() public {

@@ -357,6 +357,7 @@ contract ArbitrageLogic {
     struct V4V3RouteParams {
         uint256 principal;
         uint160 sqrtPriceLimitX96;
+        uint160 externalSqrtPriceLimitX96;
         int24 spread;
     }
 
@@ -509,6 +510,7 @@ contract ArbitrageLogic {
             int256(externalTick) + (zeroForOneExternal ? -int256(move) : int256(move));
         if (targetExternalTick < TickMath.MIN_TICK) targetExternalTick = TickMath.MIN_TICK;
         if (targetExternalTick > TickMath.MAX_TICK) targetExternalTick = TickMath.MAX_TICK;
+        route.externalSqrtPriceLimitX96 = TickMath.getSqrtRatioAtTick(int24(targetExternalTick));
 
         (uint256 startIn, uint256 intermediateOut) = ArbMath._deltaAmounts(
             zeroForOneV4,
@@ -519,7 +521,7 @@ contract ArbitrageLogic {
         (uint256 externalCapacity, ) = ArbMath._deltaAmounts(
             zeroForOneExternal,
             externalSqrtPriceX96,
-            TickMath.getSqrtRatioAtTick(int24(targetExternalTick)),
+            route.externalSqrtPriceLimitX96,
             externalLiquidity
         );
         if (startIn == 0 || intermediateOut == 0 || externalCapacity == 0) return route;
