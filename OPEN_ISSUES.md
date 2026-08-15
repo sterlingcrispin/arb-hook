@@ -58,18 +58,35 @@ The initial deployment is owner-operated with a small set of manually verified, 
   | DEGEN | UniV3 1% / UniV3 0.3% | 130 bps | 2 | 76 | 1 / 127 |
   | BRETT | UniV3 1% / CakeV3 0.25% | 125 bps | 10 | 47 | 1 / 15 |
 
-  Median spread tracks the fee floor in every case and stays below it. That is
-  the no-arbitrage band behaving exactly as theory predicts: competitors close
-  any gap that exceeds round-trip cost, so the resting spread settles just under
-  it regardless of which pair is chosen. Thin pools widen the band and the
-  hurdle together.
-- Consequence: no pair selection makes this strategy profitable on its own. Only
-  transient overshoots past the band are tradable, roughly 1% of observed
-  moments, and capturing one still requires the trigger swap to land in that
-  specific block.
-- Decision: stop screening pairs as the primary lever. The exploitable quantity
-  is not the resting spread but the dislocation a large swap creates, which
-  points at item 63.
+  Median spread tracks the fee floor in every case and stays below it.
+- CORRECTION to an earlier reading of this table. The resting spread is not a gap
+  that competitors are actively compressing. `scripts/find_realized_arbs.py`
+  groups Swap logs by transaction hash and separates genuine arbitrage, where
+  token0 enters one pool and leaves the other, from router splits, where one
+  order is divided across both pools in the same direction. Over the same 20,000
+  blocks:
+
+  | Pair | Swaps | Txs touching both pools | Genuine arbs | Router splits | Single-pool txs |
+  |------|-------|-------------------------|--------------|---------------|-----------------|
+  | cbBTC | 1,956 | 1 | **0** | 1 | 99.9% |
+  | DEGEN | 195 | 5 | **0** | 5 | 97.3% |
+  | BRETT | 29 | 0 | **0** | 0 | 100% |
+
+  Nobody arbitraged any of these pairs against itself in 11 hours. Between 97%
+  and 100% of transactions touch a single pool. Each pool is priced against the
+  wider market through aggregators, other venues and centralized exchanges, so
+  the spread between any two of them is independent tracking error rather than a
+  suppressed opportunity.
+- Why there is no pair that fixes this: liquidity providers choose a fee tier to
+  match how much the pair moves. Correlated assets sit in 0.01% to 0.05% pools
+  and diverge little; volatile assets sit in 0.3% to 1% pools and diverge a lot.
+  Spread and hurdle are therefore set by the same underlying property, which is
+  why every pair measured lands just under its own fee floor.
+- Consequence: the hook's model, comparing two registered pools and trading
+  between them, targets a flow that essentially does not exist on Base. Pair
+  selection is not the lever.
+- Decision: stop screening pairs. The exploitable quantity is the dislocation a
+  large swap creates in the pool it hits, which points at item 63.
 
 63. The hook cannot capture the dislocation its own trigger creates
 - Status: `DOCUMENTED`
