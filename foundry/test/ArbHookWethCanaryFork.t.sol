@@ -7,6 +7,7 @@ import {ArbHook} from "../../contracts/ArbHook.sol";
 import {ArbitrageLogic} from "../../contracts/ArbitrageLogic.sol";
 import {ArbUtils} from "../../contracts/ArbUtils.sol";
 import {MorphoERC3156Adapter} from "../../contracts/MorphoERC3156Adapter.sol";
+import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {IWETH9} from "../../contracts/interfaces/IWETH9.sol";
 import {ISwapRouter02} from "../../contracts/interfaces/uniswap/ISwapRouter02.sol";
@@ -167,6 +168,38 @@ contract ArbHookWethCanaryForkTest is Test {
         emit log_named_uint("disabled trigger gas", baselineGasUsed);
         emit log_named_uint("trigger transaction gas", gasUsed);
         emit log_named_uint("incremental arbitrage gas", gasUsed - baselineGasUsed);
+    }
+
+    function testEmptyHookDataAccruesProfitForOwner() public {
+        if (!forkEnabled) {
+            vm.skip(true, "set RUN_WETH_CANARY_FORK=true and BASE_RPC_URL");
+            return;
+        }
+
+        uint256 lenderBalanceBefore = IERC20(WETH).balanceOf(MORPHO_BLUE);
+        vm.recordLogs();
+        _swapTriggerPoolWithHookData(100e6, bytes(""), address(this));
+        Settlement memory settled = _extractSettlement(vm.getRecordedLogs());
+
+        assertGt(settled.netProfit, 0, "arbitrage was not profitable");
+        assertEq(settled.beneficiary, address(hook), "empty data did not select treasury");
+        assertEq(IERC20(WETH).balanceOf(address(hook)), uint256(settled.netProfit), "profit was not retained");
+        assertEq(IERC20(USDC).balanceOf(address(hook)), 0, "hook retained USDC");
+        assertEq(IERC20(WETH).balanceOf(MORPHO_BLUE), lenderBalanceBefore, "Morpho was not repaid");
+
+        address stranger = makeAddr("treasury stranger");
+        vm.prank(stranger);
+        vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, stranger));
+        hook.removeTokens(WETH);
+
+        uint256 ownerBalanceBefore = IERC20(WETH).balanceOf(address(this));
+        hook.removeTokens(WETH);
+        assertEq(
+            IERC20(WETH).balanceOf(address(this)) - ownerBalanceBefore,
+            uint256(settled.netProfit),
+            "owner withdrew wrong amount"
+        );
+        assertEq(IERC20(WETH).balanceOf(address(hook)), 0, "withdrawal left retained profit");
     }
 
     /// @notice Compares leaving the swap-created edge open, paying it to an
@@ -503,12 +536,16 @@ contract ArbHookWethCanaryForkTest is Test {
     }
 
     function _swapTriggerPoolFrom(uint128 amountIn, address beneficiary, address payer) private {
+        _swapTriggerPoolWithHookData(amountIn, abi.encodePacked(beneficiary), payer);
+    }
+
+    function _swapTriggerPoolWithHookData(uint128 amountIn, bytes memory hookData, address payer) private {
         vm.startPrank(payer);
         IERC20(USDC).approve(PERMIT2, type(uint256).max);
         IPermit2Allowance(PERMIT2).approve(USDC, UNIVERSAL_ROUTER, type(uint160).max, type(uint48).max);
 
         IV4Router.ExactInputSingleParams memory swapParams =
-            IV4Router.ExactInputSingleParams(triggerKey, false, amountIn, 1, abi.encodePacked(beneficiary));
+            IV4Router.ExactInputSingleParams(triggerKey, false, amountIn, 1, hookData);
         bytes[] memory actionParams = new bytes[](3);
         actionParams[0] = abi.encode(swapParams);
         actionParams[1] = abi.encode(triggerKey.currency1, uint256(amountIn));

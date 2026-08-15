@@ -1,6 +1,6 @@
 # Arb Hook
 
-`ArbHook` is a Uniswap v4 `afterSwap` hook that returns a swap-created arbitrage edge to the swapper who created it.
+`ArbHook` is a Uniswap v4 `afterSwap` hook that captures the arbitrage edge created by a swap. An integrated router can direct the profit to the swapper; swaps with empty hook data leave it in the hook for the owner to withdraw.
 
 The production route is not a generic background scanner. It uses the triggering v4 pool as the first arbitrage leg and one registered concentrated-liquidity pool for the same token pair as the reference and exit venue. Flash-loaned principal means the hook does not need to hold trading inventory.
 
@@ -15,7 +15,7 @@ For a USDC-to-WETH swap on the Base canary:
 5. `ArbitrageLogic` reads the post-swap v4 price, active liquidity, directional v4 fee, and the first registered matching V3 reference pool.
 6. If the directional spread clears both pool fees and `minSpreadBps`, the hook derives a bounded principal from the same liquidity-and-spread math used by the older arbitrage engine.
 7. The hook borrows WETH, swaps WETH to USDC against its own v4 pool in the direction opposite the user's swap, and swaps that USDC back to WETH on the external V3 pool.
-8. Realized balances must cover the loan, lender fee, and configured minimum profit. The loan is repaid atomically and all remaining WETH profit is transferred to the beneficiary supplied with the triggering swap.
+8. Realized balances must cover the loan, lender fee, and configured minimum profit. The loan is repaid atomically. A packed recipient receives all remaining WETH directly; with empty hook data, the WETH remains in the hook for owner withdrawal.
 9. Any discovery, loan, swap, repayment, or profitability failure reverts only the isolated arbitrage attempt. The user's original swap continues.
 
 This changes the source of the edge. The hook is no longer waiting for two unrelated external pools to disagree at the exact moment an unrelated v4 swap arrives. The triggering swap itself creates the price movement, and the hook counter-trades it in the same transaction.
@@ -75,17 +75,17 @@ The swapper's ordinary output is identical in all cases; hook profit is an addit
 
 ## Profit Recipient
 
-The router must pass exactly 20 packed bytes in v4 `hookData`:
+An integrated router can pass exactly 20 packed bytes in v4 `hookData`:
 
 ```solidity
 abi.encodePacked(beneficiary)
 ```
 
-Missing, malformed, or zero-address data disables the arbitrage attempt for that swap. The hook does not use `tx.origin` and does not pay the router-facing `sender` by default.
+Exactly 20 bytes naming a nonzero address sends all net WETH profit directly to that address. Empty data still runs the arbitrage but retains the profit in the hook; the current owner can withdraw it with `removeTokens(WETH)`. Malformed nonempty data and a packed zero address skip the attempt. The hook does not use `tx.origin` or infer a user from the router-facing `sender`.
 
-Normal swap output is delivered by the router. Arbitrage profit is a separate transfer from the hook to the beneficiary, recorded in `FlashLoanSettled`. If payer and beneficiary are the same address, their final WETH increase combines both amounts.
+Normal swap output is delivered by the router and is not changed by `afterSwap`. When a recipient is supplied, arbitrage profit is a separate transfer from the hook to that address. When data is empty, `FlashLoanSettled.beneficiary` is the hook address and the profit remains there until an owner withdrawal.
 
-A public frontend or aggregator will not automatically provide this custom hook data. Until one explicitly supports the hook, the repository's controlled Universal Router script is the validated traffic path.
+A public frontend or aggregator that provides empty hook data generates owner-withdrawable profit rather than a user rebate. The repository's controlled Universal Router script defaults the packed recipient to its payer and remains the validated direct-rebate path.
 
 ## Runtime Boundary
 
@@ -112,7 +112,7 @@ Runtime boundaries remain strict:
 - both swap legs enforce the bounded square-root price limits produced by sizing;
 - the V4 nested swap must settle all `PoolManager` deltas before returning;
 - intermediate-token balance must be restored exactly;
-- flash repayment and beneficiary profit are checked from realized balances;
+- flash repayment and paid or retained profit are checked from realized balances;
 - donated hook balances are excluded from principal sizing and cannot be consumed by the route; and
 - owner renunciation is disabled so the kill switch cannot be destroyed.
 
@@ -168,9 +168,9 @@ npm run size
 Current result:
 
 - 36 local tests pass;
-- `ArbHook` runtime is `22,042` bytes;
-- project-budget margin is `1,958` bytes; and
-- EIP-170 margin is `2,534` bytes.
+- `ArbHook` runtime is `22,070` bytes;
+- project-budget margin is `1,930` bytes; and
+- EIP-170 margin is `2,506` bytes.
 
 Current-head production path:
 

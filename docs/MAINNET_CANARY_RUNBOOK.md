@@ -11,7 +11,7 @@ The first canary contains:
 - WETH principal borrowed through the Morpho Blue adapter;
 - USDC-to-WETH trigger swaps only;
 - one bounded V4/V3 counter-trade per trigger;
-- all realized WETH profit paid to the supplied beneficiary; and
+- all realized WETH profit paid to a supplied recipient or retained for owner withdrawal when hook data is empty; and
 - no unrelated markets, V2 routes, or additional reference venues.
 
 The user's swap creates the edge by moving the hooked v4 pool. `afterSwap` counter-trades that same pool and exits through Uniswap v3 in the same transaction.
@@ -42,7 +42,7 @@ The size gate requires every production runtime below 24,000 bytes. The current 
 
 | Contract | Runtime bytes |
 |---|---:|
-| `ArbHook` | `22042` |
+| `ArbHook` | `22070` |
 | `ArbitrageLogic` | `19678` |
 | `AaveV3ERC3156Adapter` | `2590` |
 | `MorphoERC3156Adapter` | `2144` |
@@ -77,7 +77,7 @@ BASE_RPC_URL="$BASE_RPC_URL" \
 forge test --match-contract ArbHookWethCanaryForkTest -vv
 ```
 
-This test uses canonical Base v4 periphery, Morpho, and Uniswap v3. It initializes the hooked pool, submits an ordinary 100 USDC swap, captures the edge created by that swap, repays, pays the beneficiary, and removes liquidity. It does not force an unrelated external dislocation.
+This test uses canonical Base v4 periphery, Morpho, and Uniswap v3. It initializes the hooked pool, submits an ordinary 100 USDC swap, captures the edge created by that swap, repays, validates both direct-recipient and empty-data treasury settlement, and removes liquidity. It does not force an unrelated external dislocation.
 
 It also compares no backrun, a matched external V4/V3 backrun, and the hook using distinct accounts. At pinned block `50018808`, the backrunner and hook each captured `0.804926 USDC` and left the LP at the same value; the recipient was the searcher in one case and the beneficiary in the other. With no backrun, the LP retained an additional `0.813727 USDC`. Treat this as MEV redistribution, not operator revenue, unless organic backrunning is established as the correct baseline.
 
@@ -266,23 +266,23 @@ A successful `FlashLoanSettled` event must show:
 
 Also verify Morpho's WETH balance is unchanged after the transaction and the hook retains neither WETH nor USDC.
 
-`netProfit` is route profit transferred to the beneficiary. It is not proof that the LP/operator gained value. When the operator is also LP and beneficiary, the transfer is internal and external fees plus gas remain as net costs.
+`netProfit` is route profit paid to the event's beneficiary address. That address is the hook itself on the empty-data treasury path. It is not proof that the LP/operator gained value. When the operator is also LP and ultimate recipient, the transfer is internal and external fees plus gas remain as net costs.
 
 No event is expected below the configured 49 USDC actual-input floor or when an eligible swap cannot clear pool fees and the minimum-profit floor. Do not deliberately create an unsafe mainnet trade merely to force a loan. Reproduce the exact intended LP and swap parameters on a current fork first.
 
 ## Beneficiary And Router Requirement
 
-The router must pass exactly:
+For a direct user rebate, the router must pass exactly:
 
 ```solidity
 abi.encodePacked(beneficiary)
 ```
 
-Empty, zero-address, or differently encoded data skips the attempt. There is no fallback to the router or `tx.origin`.
+Empty data executes the attempt and retains any net WETH profit in the hook for the current owner. A packed zero address or malformed nonempty data skips the attempt. There is no fallback to the router or `tx.origin`.
 
-Normal swap output is returned by the router. Arbitrage profit is a separate WETH transfer from the hook, and the hook returns zero V4 delta. If payer and beneficiary are the same address, `FlashLoanSettled` identifies the profit component of their combined WETH balance increase.
+Normal swap output is returned by the router and the hook returns zero V4 delta. With a packed recipient, arbitrage profit is a separate WETH transfer from the hook. With empty data, `FlashLoanSettled.beneficiary` is the hook and the retained WETH can be withdrawn with owner-only `removeTokens(WETH)`.
 
-Do not assume the public Uniswap interface or an aggregator will route through the canary pool or encode custom hook data. The repository script is the only validated traffic path until a frontend explicitly integrates it.
+Do not assume the public Uniswap interface or an aggregator will route through the canary pool or encode custom hook data. Empty-data traffic uses the owner-treasury path; the repository script is the validated direct-user-rebate path until a frontend explicitly integrates it.
 
 ## Stop And Withdraw
 

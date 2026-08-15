@@ -6,7 +6,7 @@ uses the triggering v4 pool as its first leg; see `README.md` and
 `docs/ARB_LOGIC_DEEP_DIVE.md` before using the historical phases below.
 
 ## Goal
-Migrate `ArbHook` from inventory-funded arbitrage to flash-loan-funded arbitrage, so the hook does not need to hold principal inventory and net profits are paid to the swap initiator (or an explicit beneficiary).
+Migrate `ArbHook` from inventory-funded arbitrage to flash-loan-funded arbitrage, so the hook does not need to hold principal inventory. Net profit is paid to an explicit recipient when supplied or retained for the owner when hook data is empty.
 
 ## Context
 - Production execution is hook-triggered and best-effort via `_afterSwap -> attemptHookPoolInternal -> onFlashLoan`.
@@ -38,7 +38,7 @@ Migrate `ArbHook` from inventory-funded arbitrage to flash-loan-funded arbitrage
 ## Deployment Size
 - Live v4 state preparation lives in `ArbitrageLogic`, and legacy scanner/flash dispatch lives only in the test harness.
 - `npm run size` enforces a 24,000-byte runtime budget for every production contract, preserving margin below EIP-170.
-- `ArbHook` is currently 22,042 runtime bytes.
+- `ArbHook` is currently 22,070 runtime bytes.
 - Further gas optimization remains separate from flash-loan correctness and parity work.
 
 ## Refactor Constraints (Critical)
@@ -61,7 +61,7 @@ Migrate `ArbHook` from inventory-funded arbitrage to flash-loan-funded arbitrage
 1. `afterSwap` observes the triggering pool after the user's price movement.
 2. The user's output token is the flash principal and profit token.
 3. Route sizing compares the same v4 pair with the first registered matching V3 reference pool.
-4. The loan callback counter-trades the v4 pool, closes through V3, repays, and pays the encoded beneficiary.
+4. The loan callback counter-trades the v4 pool, closes through V3, repays, and either pays the encoded recipient or retains profit on empty hook data.
 5. Realized balance checks remain authoritative and all speculative work stays behind the self-call failure boundary.
 6. Legacy external/external traversal and iterative execution remain available through test-only harness entrypoints.
 
@@ -80,13 +80,14 @@ Production telemetry:
 - Historical inventory telemetry exists only in the legacy test harness.
 
 ## Beneficiary Resolution Strategy
-`_afterSwap` accepts a beneficiary only when `hookData` contains exactly the
-20 bytes produced by `abi.encodePacked(beneficiary)`.
+`_afterSwap` pays a beneficiary when `hookData` contains exactly the 20 bytes
+produced by `abi.encodePacked(beneficiary)`. Empty data selects the hook itself,
+so profit accrues for owner withdrawal without blocking generic router traffic.
 
 Rules:
 - Do not use `tx.origin`.
 - Do not fall back to the router-facing `sender`.
-- If hook data is malformed or resolves to zero, do not execute flash arb.
+- If nonempty hook data is malformed or resolves to zero, do not execute flash arb.
 - Emit chosen recipient in logs for observability.
 
 ## Historical Implementation Plan (Phased)
@@ -134,7 +135,7 @@ Tasks:
    - Validate context hash.
    - Execute iterative arb path.
    - Repay lender (approve or transfer based on lender behavior).
-   - Compute and transfer net profit to recipient.
+   - Compute net profit and either transfer it to the recipient or retain it when the hook is the recipient.
    - Return ERC-3156 selector hash.
 
 Acceptance:
@@ -163,9 +164,9 @@ Files:
 - `contracts/test/PoolManagerHarness.sol` (if needed to pass hook data in tests)
 
 Tasks:
-1. Parse the packed beneficiary from `hookData` in `_afterSwap`.
+1. Resolve empty `hookData` to the hook treasury or parse an exact packed recipient in `_afterSwap`.
 2. Bind resolved recipient into active execution context.
-3. Skip execution when a router does not provide valid beneficiary data.
+3. Skip execution only for malformed nonempty data or a packed zero address.
 
 Acceptance:
 - Tests cover valid packed data and safe handling of missing or malformed data.
@@ -208,7 +209,7 @@ Test categories:
    - exact principal+fee repayment
    - fee cap enforcement
 4. Profit tests:
-   - net-positive payout to recipient
+   - net-positive payout to the recipient or retention in the hook
    - net-negative no payout/no storage
 5. Failure containment:
    - arb revert inside flash path does not revert user swap path
@@ -280,7 +281,7 @@ Acceptance:
 ## Definition of Done
 - Contract can execute arb without prefunded principal inventory.
 - Successful flow always repays principal + fee atomically.
-- Net profits are transferred to resolved swap beneficiary.
+- Net profits are transferred to the resolved recipient or retained for owner withdrawal on empty hook data.
 - Unauthorized flash callbacks are rejected.
 - Flash-loan test suite is green and designated as release gate.
 - Cached fork sequence test preserves all reference routes and positive net settlement.

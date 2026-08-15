@@ -220,14 +220,14 @@ The initial deployment is owner-operated with a small set of manually verified, 
 
 ## Accepted By Design
 
-41. Net profit is paid to a swapper-controlled beneficiary
+41. Net profit recipient depends on hook data
 - Status: `ACCEPTED`
-- Summary: `hookData` names the beneficiary and receives 100% of net profit.
-  Anyone may swap a hooked pool, or initialize their own pool with this hook,
-  and direct the full proceeds to themselves. The contract has no owner fee.
-- Decision: intended. The hook returns its edge to the trader who triggered it
-  rather than collecting rent for the operator. Recorded in `README.md` so the
-  absence of operator revenue is not mistaken for a defect.
+- Summary: Exact packed recipient data sends 100% of net profit to that address.
+  Empty hook data runs the same route but retains profit in the hook for the
+  current owner to withdraw. Malformed nonempty data remains fail-closed.
+- Decision: intended hybrid policy. Integrated swaps can rebate their users;
+  generic empty-data traffic generates owner-withdrawable WETH. The triggering
+  user's ordinary swap output is unchanged in either case.
 
 ## Deferred Outside Canary Threat Model
 
@@ -496,8 +496,8 @@ The initial deployment is owner-operated with a small set of manually verified, 
 - Notes: Cold registration validation moved into the existing `ArbitrageLogic`
   dependency, live v4 state preparation moved into that stateless contract, and
   legacy scanner/flash dispatch moved to `ArbHookHarness` without deleting the
-  algorithms. `ArbHook` is 22,042 runtime bytes: 1,958 bytes below the
-  repository's 24,000-byte budget and 2,534 bytes below EIP-170.
+  algorithms. `ArbHook` is 22,070 runtime bytes: 1,930 bytes below the
+  repository's 24,000-byte budget and 2,506 bytes below EIP-170.
 
 7. Shared pool metadata removal
 - Status: `ADDRESSED`
