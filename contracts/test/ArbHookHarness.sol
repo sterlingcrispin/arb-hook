@@ -169,12 +169,11 @@ contract ArbHookHarness is ArbHook {
         ArbUtils.PoolType poolBType
     )
         public
-        override
         returns (bool success, int256 cumulativeProfit, uint256 iterations)
     {
         if (!testLegacyInventoryParityEnabled) {
             return
-                super.executeIterativeArbViaFlash(
+                _executeIterativeArbViaFlash(
                     poolA_addr,
                     poolB_addr,
                     startToken,
