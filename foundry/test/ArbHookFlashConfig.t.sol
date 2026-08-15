@@ -13,6 +13,7 @@ import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 import {Hooks} from "@uniswap/v4-core/src/libraries/Hooks.sol";
 import {IPoolManager} from "@uniswap/v4-core/src/interfaces/IPoolManager.sol";
 import {PoolKey} from "@uniswap/v4-core/src/types/PoolKey.sol";
+import {PoolId} from "@uniswap/v4-core/src/types/PoolId.sol";
 import {BalanceDelta} from "@uniswap/v4-core/src/types/BalanceDelta.sol";
 import {SwapParams} from "@uniswap/v4-core/src/types/PoolOperation.sol";
 import {HookMiner} from "@uniswap/v4-periphery/src/utils/HookMiner.sol";
@@ -55,6 +56,13 @@ contract ArbHookFlashConfigTest is Test {
     function testSetMaxFlashFeeBpsCap() public {
         vm.expectRevert(ArbErrors.FlashFeeBpsTooHigh.selector);
         hook.setMaxFlashFeeBpsForToken(TOKEN, 10001);
+    }
+
+    function testSetMinimumTriggerAmount() public {
+        PoolId poolId = PoolId.wrap(bytes32(uint256(1)));
+        hook.setMinTriggerAmount(poolId, false, 49e6);
+        assertEq(hook.getMinTriggerAmount(poolId, false), 49e6);
+        assertEq(hook.getMinTriggerAmount(poolId, true), 0);
     }
 
     function testOnFlashLoanRejectsUnknownLender() public {

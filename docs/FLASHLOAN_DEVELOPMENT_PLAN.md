@@ -38,7 +38,7 @@ Migrate `ArbHook` from inventory-funded arbitrage to flash-loan-funded arbitrage
 ## Deployment Size
 - Live v4 state preparation lives in `ArbitrageLogic`, and legacy scanner/flash dispatch lives only in the test harness.
 - `npm run size` enforces a 24,000-byte runtime budget for every production contract, preserving margin below EIP-170.
-- `ArbHook` is currently 21,621 runtime bytes.
+- `ArbHook` is currently 22,042 runtime bytes.
 - Further gas optimization remains separate from flash-loan correctness and parity work.
 
 ## Refactor Constraints (Critical)
