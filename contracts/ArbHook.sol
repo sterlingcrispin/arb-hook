@@ -17,8 +17,6 @@ import {
     BalanceDeltaLibrary
 } from "@uniswap/v4-core/src/types/BalanceDelta.sol";
 import {SwapParams} from "@uniswap/v4-core/src/types/PoolOperation.sol";
-import {StateLibrary} from "@uniswap/v4-core/src/libraries/StateLibrary.sol";
-import {ProtocolFeeLibrary} from "@uniswap/v4-core/src/libraries/ProtocolFeeLibrary.sol";
 import {TickMath as V4TickMath} from "@uniswap/v4-core/src/libraries/TickMath.sol";
 
 import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
@@ -54,9 +52,6 @@ contract ArbHook is
     using SafeERC20 for IERC20;
     using BalanceDeltaLibrary for BalanceDelta;
     using PoolIdLibrary for PoolKey;
-    using ProtocolFeeLibrary for uint16;
-    using ProtocolFeeLibrary for uint24;
-    using StateLibrary for IPoolManager;
 
     error NotPoolManager();
 
@@ -511,16 +506,6 @@ contract ArbHook is
         }
         if (externalPool.poolAddress == address(0)) return false;
 
-        (uint160 sqrtPriceX96, int24 tick, uint24 protocolFee, uint24 lpFee) =
-            poolManager.getSlot0(key.toId());
-        bool v4ZeroForOne = !triggerZeroForOne;
-        uint16 directionalProtocolFee = v4ZeroForOne
-            ? protocolFee.getZeroForOneFee()
-            : protocolFee.getOneForZeroFee();
-        uint24 v4Fee = directionalProtocolFee == 0
-            ? lpFee
-            : directionalProtocolFee.calculateSwapFee(lpFee);
-
         ArbitrageLogic.IterationConfig memory config;
         config.minSpreadBps = minSpreadBps;
         config.chunkSpreadConsumptionBps = CHUNK_SPREAD_CONSUMPTION_BPS;
@@ -530,14 +515,10 @@ contract ArbHook is
         config.currentStartTokenBalance = principalCap;
 
         ArbitrageLogic.V4V3RouteParams memory route = arbLib
-            .getV4V3RouteParams(
-                ArbitrageLogic.PoolStatesForIteration({
-                    sqrtPrice: sqrtPriceX96,
-                    tick: tick,
-                    liquidity: poolManager.getLiquidity(key.toId()),
-                    token0: Currency.unwrap(key.currency0)
-                }),
-                v4Fee,
+            .getLiveV4V3RouteParams(
+                poolManager,
+                key.toId(),
+                Currency.unwrap(key.currency0),
                 startToken,
                 intermediateToken,
                 externalPool,
