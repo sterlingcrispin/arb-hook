@@ -435,8 +435,10 @@ contract ArbitrageLogic {
             getEffectiveBuyPrice(externalRawPrice, externalPool.fee)
         ) return route;
 
-        uint256 initialSpread = uint24(config.initialAbsSpread);
-        if (initialSpread == 0 || config.maxImpactBps == 0) return route;
+        uint256 initialSpread = config.initialAbsSpread > 0
+            ? uint24(config.initialAbsSpread)
+            : uint24(route.spread);
+        if (config.maxImpactBps == 0) return route;
         uint256 move =
             (uint24(route.spread) *
                 (uint256(config.chunkSpreadConsumptionBps) +
