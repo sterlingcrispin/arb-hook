@@ -118,11 +118,19 @@ contract ArbHookWethCanaryForkTest is Test {
         _displaceUniswapCbBtcPool(150 ether);
 
         address beneficiary = makeAddr("WETH canary beneficiary");
+        uint256 snapshot = vm.snapshotState();
+        hook.setHookMaxIterations(0);
+        uint256 baselineGasBefore = gasleft();
+        _swapTriggerPool(100e6, beneficiary);
+        uint256 baselineGasUsed = baselineGasBefore - gasleft();
+        vm.revertToState(snapshot);
+
         uint256 swapOutputBefore = IERC20(WETH).balanceOf(address(this));
         vm.recordLogs();
         uint256 gasBefore = gasleft();
         _swapTriggerPool(100e6, beneficiary);
         uint256 gasUsed = gasBefore - gasleft();
+        assertGt(gasUsed, baselineGasUsed, "enabled hook used no incremental gas");
 
         Settlement memory settled = _extractSettlement(vm.getRecordedLogs());
         assertEq(settled.tokenA, WETH, "flash principal must be WETH");
@@ -144,7 +152,9 @@ contract ArbHookWethCanaryForkTest is Test {
         emit log_named_uint("Base fork block", block.number);
         emit log_named_decimal_uint("borrowed WETH", settled.principal, 18);
         emit log_named_decimal_uint("beneficiary profit WETH", uint256(settled.netProfit), 18);
+        emit log_named_uint("disabled trigger gas", baselineGasUsed);
         emit log_named_uint("trigger transaction gas", gasUsed);
+        emit log_named_uint("incremental arbitrage gas", gasUsed - baselineGasUsed);
     }
 
     function _registerCbBtcBook() private {
