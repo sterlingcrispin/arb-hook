@@ -9,6 +9,43 @@ The initial deployment is owner-operated with a small set of manually verified, 
 
 ## Strategy Findings
 
+65. Self-contained canary is structurally net negative
+- Status: `BLOCKS DEPLOYMENT`
+- Priority: `CRITICAL`
+- Summary: The counter-trade is funded by the v4 pool it trades against. In the
+  intended canary one wallet is the liquidity provider, the swapper and the
+  beneficiary, so the profit and the liquidity it comes out of are the same
+  money. `FlashLoanSettled` reports a gain while the operator's total position
+  falls.
+- Measurement: `testSelfContainedOperatorNetPosition` runs the identical add,
+  swap and remove sequence twice from one snapshot, hook disabled then enabled
+  with the operator as beneficiary, and values both token legs at the external
+  reference price. At Base block ~50020119, reference 1882.196851 USDC per WETH:
+
+  | | WETH | USDC | Total value (raw USDC) |
+  |---|------|------|------------------------|
+  | Hook disabled | 199.999999999999999999 | 50,000.019998 | 426,439.390197 |
+  | Hook enabled | 200.009393626597696702 | 49,982.330504 | 426,439.381358 |
+  | Difference | +0.009394 | -17.689494 | **-0.008839** |
+
+  The settlement event for the same run reports 0.000430 WETH of profit, about
+  0.81 USDC. The operator is nonetheless 0.008839 USDC worse off before gas,
+  and the incremental arbitrage gas is 422,984 on top.
+- Where the loss comes from: the arbitrage routes roughly 0.009 WETH through the
+  external 0.05% pool, costing about 0.00847 USDC in fees. That accounts for
+  essentially the entire measured difference, so nothing is leaking beyond the
+  expected external fee. Every other flow is internal to the operator.
+- The general case: with distinct participants this is a transfer from the v4
+  liquidity provider to the swapper, funded by the LP's loss-versus-rebalancing
+  and routed through the external pool's fee. On a thin pool that no external
+  searcher watches, that value would otherwise have stayed with the LP, so the
+  hook makes providing liquidity strictly worse. At the measured scale a 100
+  USDC swap pays the LP about 0.30 USDC in v4 fees while the hook extracts about
+  0.81 USDC from the same position.
+- Decision: settle who is meant to fund the rebate before deploying. A canary in
+  which the operator is LP, swapper and beneficiary cannot demonstrate profit; it
+  can only demonstrate that the machinery runs.
+
 60. No dislocation ever opens on the selected cbBTC/WETH pair
 - Status: `RESOLVED BY ARCHITECTURE CHANGE`
 - Priority: `CRITICAL`

@@ -24,6 +24,7 @@ import {PoolKey} from "@uniswap/v4-core/src/types/PoolKey.sol";
 import {PoolIdLibrary} from "@uniswap/v4-core/src/types/PoolId.sol";
 import {Currency} from "@uniswap/v4-core/src/types/Currency.sol";
 import {LiquidityAmounts} from "@uniswap/v4-periphery/src/libraries/LiquidityAmounts.sol";
+import {FullMath} from "@uniswap/v3-core/contracts/libraries/FullMath.sol";
 
 interface IPermit2Allowance {
     function approve(address token, address spender, uint160 amount, uint48 expiration) external;
@@ -155,6 +156,66 @@ contract ArbHookWethCanaryForkTest is Test {
         emit log_named_uint("disabled trigger gas", baselineGasUsed);
         emit log_named_uint("trigger transaction gas", gasUsed);
         emit log_named_uint("incremental arbitrage gas", gasUsed - baselineGasUsed);
+    }
+
+    /// @notice Measures whether the CANARY OPERATOR is net ahead, not just whether
+    ///         the hook settles. In the real canary one wallet is the liquidity
+    ///         provider, the swapper and the beneficiary, so the arbitrage profit
+    ///         and the liquidity it is extracted from land in the same pocket.
+    /// @dev Runs the identical add/swap/remove sequence twice from one snapshot,
+    ///      with the hook disabled and then enabled with the operator as
+    ///      beneficiary, and compares the operator's whole token position.
+    function testSelfContainedOperatorNetPosition() public {
+        if (!forkEnabled) {
+            vm.skip(true, "set RUN_WETH_CANARY_FORK=true and BASE_RPC_URL");
+            return;
+        }
+
+        uint256 snapshot = vm.snapshotState();
+
+        hook.setHookMaxIterations(0);
+        _swapTriggerPool(100e6, address(this));
+        _removeTriggerLiquidity();
+        uint256 disabledWeth = IERC20(WETH).balanceOf(address(this));
+        uint256 disabledUsdc = IERC20(USDC).balanceOf(address(this));
+
+        vm.revertToState(snapshot);
+
+        hook.setHookMaxIterations(1);
+        _swapTriggerPool(100e6, address(this));
+        _removeTriggerLiquidity();
+        uint256 enabledWeth = IERC20(WETH).balanceOf(address(this));
+        uint256 enabledUsdc = IERC20(USDC).balanceOf(address(this));
+
+        emit log("--- operator position after add, swap, remove ---");
+        emit log_named_decimal_uint("hook disabled: WETH", disabledWeth, 18);
+        emit log_named_uint("hook disabled: USDC", disabledUsdc);
+        emit log_named_decimal_uint("hook enabled : WETH", enabledWeth, 18);
+        emit log_named_uint("hook enabled : USDC", enabledUsdc);
+
+        // The counter-swap changes the pool composition returned on withdrawal, so
+        // both legs move. Value them together at the external reference price.
+        (uint160 sqrtPriceX96,,,,,,) = IUniswapV3Pool(UNISWAP_WETH_USDC_500).slot0();
+        // WETH is token0 in this pool: raw USDC per raw WETH = sqrtP^2 / 2^192.
+        uint256 usdcPerWeth = FullMath.mulDiv(
+            FullMath.mulDiv(uint256(sqrtPriceX96), uint256(sqrtPriceX96), 1 << 96),
+            1e18,
+            1 << 96
+        );
+        emit log_named_uint("reference price: raw USDC per 1e18 WETH", usdcPerWeth);
+
+        uint256 disabledValue = disabledUsdc + FullMath.mulDiv(disabledWeth, usdcPerWeth, 1e18);
+        uint256 enabledValue = enabledUsdc + FullMath.mulDiv(enabledWeth, usdcPerWeth, 1e18);
+        emit log_named_uint("hook disabled: total value (raw USDC)", disabledValue);
+        emit log_named_uint("hook enabled : total value (raw USDC)", enabledValue);
+
+        if (enabledValue >= disabledValue) {
+            emit log_named_uint("operator NET GAIN (raw USDC)", enabledValue - disabledValue);
+        } else {
+            emit log_named_uint("operator NET LOSS (raw USDC)", disabledValue - enabledValue);
+        }
+        emit log("Gas is excluded. The arbitrage is funded by the v4 pool the operator");
+        emit log("also owns, so this difference, not the settlement event, is the result.");
     }
 
     function testSweepSwapSizeAgainstLiveReference() public {
