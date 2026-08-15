@@ -63,6 +63,8 @@ contract ArbHookWethCanaryForkTest is Test {
     MorphoERC3156Adapter internal adapter;
     PoolKey internal triggerKey;
     uint256 internal triggerPositionTokenId;
+    uint256 internal v4WethDeposited;
+    uint256 internal v4UsdcDeposited;
 
     function setUp() public {
         if (!vm.envOr("RUN_WETH_CANARY_FORK", false)) return;
@@ -75,7 +77,9 @@ contract ArbHookWethCanaryForkTest is Test {
         }
         if (bytes(rpcUrl).length == 0) return;
 
-        vm.createSelectFork(rpcUrl);
+        uint256 forkBlock = vm.envOr("WETH_CANARY_FORK_BLOCK", uint256(0));
+        if (forkBlock == 0) vm.createSelectFork(rpcUrl);
+        else vm.createSelectFork(rpcUrl, forkBlock);
         forkEnabled = true;
 
         IPoolManager manager = IPoolManager(V4_POOL_MANAGER);
@@ -148,6 +152,97 @@ contract ArbHookWethCanaryForkTest is Test {
         emit log_named_uint("incremental arbitrage gas", gasUsed - baselineGasUsed);
     }
 
+    function testSweepSwapSizeAgainstLiveReference() public {
+        if (!vm.envOr("RUN_WETH_CANARY_SWEEP", false)) {
+            vm.skip(true, "set RUN_WETH_CANARY_FORK=true and RUN_WETH_CANARY_SWEEP=true");
+            return;
+        }
+        if (!forkEnabled) revert("set RUN_WETH_CANARY_FORK=true and BASE_RPC_URL");
+
+        uint256 sweepMinProfit = vm.envOr("WETH_CANARY_SWEEP_MIN_PROFIT_WEI", uint256(1));
+        hook.setMinNetProfitForToken(WETH, sweepMinProfit);
+        uint256 gasPriceWei = vm.envOr("WETH_CANARY_SIM_GAS_PRICE_WEI", uint256(0));
+        uint128[23] memory amounts = [
+            uint128(1e6),
+            2e6,
+            2_250_000,
+            2_500_000,
+            2_750_000,
+            3e6,
+            4e6,
+            5e6,
+            6e6,
+            8e6,
+            8_500_000,
+            9e6,
+            9_500_000,
+            10e6,
+            15e6,
+            20e6,
+            30e6,
+            40e6,
+            48e6,
+            49e6,
+            50e6,
+            75e6,
+            100e6
+        ];
+
+        emit log_named_uint("Base fork block", block.number);
+        emit log_named_uint("sweep minimum profit wei", sweepMinProfit);
+        emit log_named_uint("execution gas price wei", gasPriceWei);
+        emit log_named_decimal_uint("v4 WETH deposited", v4WethDeposited, 18);
+        emit log_named_decimal_uint("v4 USDC deposited", v4UsdcDeposited, 6);
+        for (uint256 i; i < amounts.length; ++i) {
+            (bool settled, Settlement memory result, uint256 disabledGas, uint256 enabledGas) =
+                _simulateTriggerSize(amounts[i]);
+            uint256 incrementalGas = enabledGas > disabledGas ? enabledGas - disabledGas : 0;
+
+            emit log_string("---");
+            emit log_named_decimal_uint("trigger USDC", amounts[i], 6);
+            emit log_named_uint("disabled gas", disabledGas);
+            emit log_named_uint("enabled gas", enabledGas);
+            emit log_named_uint("incremental gas", incrementalGas);
+            if (!settled) {
+                emit log_string("no profitable settlement");
+                continue;
+            }
+
+            uint256 profit = uint256(result.netProfit);
+            uint256 incrementalCost = incrementalGas * gasPriceWei;
+            emit log_named_decimal_uint("borrowed WETH", result.principal, 18);
+            emit log_named_decimal_uint("profit WETH", profit, 18);
+            emit log_named_decimal_uint("incremental execution cost WETH", incrementalCost, 18);
+            emit log_named_decimal_uint(
+                "profit after incremental execution cost WETH",
+                profit > incrementalCost ? profit - incrementalCost : 0,
+                18
+            );
+            emit log_named_uint("clears 0.0001 WETH canary floor", profit >= MIN_NET_PROFIT ? 1 : 0);
+        }
+    }
+
+    function _simulateTriggerSize(uint128 amountIn)
+        private
+        returns (bool settled, Settlement memory result, uint256 disabledGas, uint256 enabledGas)
+    {
+        address beneficiary = makeAddr("WETH canary sweep beneficiary");
+        uint256 disabledSnapshot = vm.snapshotState();
+        hook.setHookMaxIterations(0);
+        uint256 gasBefore = gasleft();
+        _swapTriggerPool(amountIn, beneficiary);
+        disabledGas = gasBefore - gasleft();
+        vm.revertToState(disabledSnapshot);
+
+        uint256 enabledSnapshot = vm.snapshotState();
+        vm.recordLogs();
+        gasBefore = gasleft();
+        _swapTriggerPool(amountIn, beneficiary);
+        enabledGas = gasBefore - gasleft();
+        (settled, result) = _tryExtractSettlement(vm.getRecordedLogs());
+        vm.revertToState(enabledSnapshot);
+    }
+
     function _registerExternalWethUsdcPool() private {
         address[] memory pools = new address[](1);
         pools[0] = UNISWAP_WETH_USDC_500;
@@ -213,7 +308,11 @@ contract ArbHookWethCanaryForkTest is Test {
                 block.timestamp
             )
         );
+        uint256 wethBefore = IERC20(WETH).balanceOf(address(this));
+        uint256 usdcBefore = IERC20(USDC).balanceOf(address(this));
         positionManager.multicall(calls);
+        v4WethDeposited = wethBefore - IERC20(WETH).balanceOf(address(this));
+        v4UsdcDeposited = usdcBefore - IERC20(USDC).balanceOf(address(this));
         assertEq(
             positionManager.ownerOf(triggerPositionTokenId), address(this), "canonical PositionManager mint failed"
         );
@@ -275,6 +374,16 @@ contract ArbHookWethCanaryForkTest is Test {
     }
 
     function _extractSettlement(Vm.Log[] memory entries) private pure returns (Settlement memory settled) {
+        (bool found, Settlement memory result) = _tryExtractSettlement(entries);
+        if (!found) revert("FlashLoanSettled not emitted");
+        return result;
+    }
+
+    function _tryExtractSettlement(Vm.Log[] memory entries)
+        private
+        pure
+        returns (bool found, Settlement memory settled)
+    {
         for (uint256 i = 0; i < entries.length; ++i) {
             if (entries[i].topics.length == 4 && entries[i].topics[0] == FLASH_SETTLED_TOPIC0) {
                 settled.tokenA = address(uint160(uint256(entries[i].topics[2])));
@@ -289,9 +398,8 @@ contract ArbHookWethCanaryForkTest is Test {
                     settled.iterations,
                     settled.beneficiary
                 ) = abi.decode(entries[i].data, (address, address, uint256, uint256, uint256, int256, uint256, address));
-                return settled;
+                return (true, settled);
             }
         }
-        revert("FlashLoanSettled not emitted");
     }
 }
