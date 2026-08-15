@@ -13,6 +13,10 @@ import "@openzeppelin/contracts/utils/math/Math.sol"; // Import Math
 import "./interfaces/IUniswapV2Pair.sol"; // Added for V2
 import "@uniswap/v3-core/contracts/libraries/SwapMath.sol"; // Added for SwapMath
 import "./interfaces/IPancakeV3Pool.sol"; // NEW: Add PancakeV3 Pool interface
+import {IPoolManager} from "@uniswap/v4-core/src/interfaces/IPoolManager.sol";
+import {PoolId} from "@uniswap/v4-core/src/types/PoolId.sol";
+import {StateLibrary} from "@uniswap/v4-core/src/libraries/StateLibrary.sol";
+import {ProtocolFeeLibrary} from "@uniswap/v4-core/src/libraries/ProtocolFeeLibrary.sol";
 
 /**
  * @title ArbitrageLogic
@@ -20,6 +24,9 @@ import "./interfaces/IPancakeV3Pool.sol"; // NEW: Add PancakeV3 Pool interface
  */
 contract ArbitrageLogic {
     using Math for uint256; // Add using directive for Math
+    using ProtocolFeeLibrary for uint16;
+    using ProtocolFeeLibrary for uint24;
+    using StateLibrary for IPoolManager;
 
     uint24 private constant UNISWAP_V2_FEE_PPM = 3000;
     uint24 private constant PANCAKESWAP_V2_FEE_PPM = 2500;
@@ -363,6 +370,50 @@ contract ArbitrageLogic {
         ArbUtils.PoolInfo memory externalPool,
         IterationConfig memory config
     ) external view returns (V4V3RouteParams memory route) {
+        return _getV4V3RouteParams(v4State, v4Fee, startToken, intermediateToken, externalPool, config);
+    }
+
+    /// @notice Read a live v4 pool and size its counter-swap against a registered V3 reference venue.
+    function getLiveV4V3RouteParams(
+        IPoolManager manager,
+        PoolId poolId,
+        address v4Token0,
+        address startToken,
+        address intermediateToken,
+        ArbUtils.PoolInfo memory externalPool,
+        IterationConfig memory config
+    ) external view returns (V4V3RouteParams memory route) {
+        (uint160 sqrtPriceX96, int24 tick, uint24 protocolFee, uint24 lpFee) = manager.getSlot0(poolId);
+        uint16 directionalProtocolFee = v4Token0 == startToken
+            ? protocolFee.getZeroForOneFee()
+            : protocolFee.getOneForZeroFee();
+        uint24 v4Fee = directionalProtocolFee == 0
+            ? lpFee
+            : directionalProtocolFee.calculateSwapFee(lpFee);
+
+        return _getV4V3RouteParams(
+            PoolStatesForIteration({
+                sqrtPrice: sqrtPriceX96,
+                tick: tick,
+                liquidity: manager.getLiquidity(poolId),
+                token0: v4Token0
+            }),
+            v4Fee,
+            startToken,
+            intermediateToken,
+            externalPool,
+            config
+        );
+    }
+
+    function _getV4V3RouteParams(
+        PoolStatesForIteration memory v4State,
+        uint24 v4Fee,
+        address startToken,
+        address intermediateToken,
+        ArbUtils.PoolInfo memory externalPool,
+        IterationConfig memory config
+    ) private view returns (V4V3RouteParams memory route) {
         if (
             (externalPool.poolType != ArbUtils.PoolType.V3 &&
                 externalPool.poolType != ArbUtils.PoolType.PANCAKESWAP_V3) ||
