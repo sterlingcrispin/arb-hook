@@ -33,7 +33,7 @@ contract ArbitrageLogicPriceTest is Test {
     }
 
     function testDirectPricePreservesRemainderBeforeDecimalScaling() public {
-        assertEq(_price(uint160(1 << 47), true, 6, 18), 3);
+        assertEq(_price(uint160(1 << 47), true, 18, 6), 3);
     }
 
     function testReciprocalPriceIsExactNearMinimumSqrtRatio() public {
@@ -48,6 +48,16 @@ contract ArbitrageLogicPriceTest is Test {
             _price(type(uint160).max, true, 18, 18),
             340282366920938463463374607431768211455999999999534338712
         );
+    }
+
+    function testWethPriceInCbBtcUsesHumanDecimalRatio() public {
+        uint160 sqrtPriceX96 = 136935305154961840000000;
+        assertEq(_price(sqrtPriceX96, true, 18, 8), 29872508983204182);
+    }
+
+    function testCbBtcPriceInWethUsesHumanDecimalRatio() public {
+        uint160 sqrtPriceX96 = 136935305154961840000000;
+        assertEq(_price(sqrtPriceX96, false, 18, 8), 33475594586388775216);
     }
 
     function _price(
