@@ -9,6 +9,7 @@ import {ArbUtils} from "../../contracts/ArbUtils.sol";
 import {MorphoERC3156Adapter} from "../../contracts/MorphoERC3156Adapter.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {IWETH9} from "../../contracts/interfaces/IWETH9.sol";
+import {ISwapRouter02} from "../../contracts/interfaces/uniswap/ISwapRouter02.sol";
 import {IUniswapV3Pool} from "../../contracts/interfaces/uniswap/IUniswapV3Pool.sol";
 import {IUniswapV4PositionManager} from "../../contracts/interfaces/uniswap/IUniswapV4PositionManager.sol";
 import {IUniversalRouter} from "@uniswap/universal-router/contracts/interfaces/IUniversalRouter.sol";
@@ -40,6 +41,7 @@ contract ArbHookWethCanaryForkTest is Test {
     address internal constant V4_POOL_MANAGER = 0x498581fF718922c3f8e6A244956aF099B2652b2b;
     address internal constant V4_POSITION_MANAGER = 0x7C5f5A4bBd8fD63184577525326123B519429bDc;
     address internal constant UNIVERSAL_ROUTER = 0x6fF5693b99212Da76ad316178A184AB56D299b43;
+    address internal constant SWAP_ROUTER = 0x2626664c2603336E57B271c5C0b26F421741e481;
     address internal constant PERMIT2 = 0x000000000022D473030F116dDEE9F6B43aC78BA3;
     address internal constant UNISWAP_WETH_USDC_500 = 0xd0b53D9277642d899DF5C87A3966A349A798F224;
 
@@ -61,6 +63,15 @@ contract ArbHookWethCanaryForkTest is Test {
         int256 netProfit;
         uint256 iterations;
         address beneficiary;
+    }
+
+    struct EconomicOutcome {
+        uint256 lpValue;
+        uint256 swapperValue;
+        uint256 beneficiaryValue;
+        uint256 searcherValue;
+        uint256 triggerGas;
+        uint256 backrunGas;
     }
 
     bool internal forkEnabled;
@@ -158,64 +169,91 @@ contract ArbHookWethCanaryForkTest is Test {
         emit log_named_uint("incremental arbitrage gas", gasUsed - baselineGasUsed);
     }
 
-    /// @notice Measures whether the CANARY OPERATOR is net ahead, not just whether
-    ///         the hook settles. In the real canary one wallet is the liquidity
-    ///         provider, the swapper and the beneficiary, so the arbitrage profit
-    ///         and the liquidity it is extracted from land in the same pocket.
-    /// @dev Runs the identical add/swap/remove sequence twice from one snapshot,
-    ///      with the hook disabled and then enabled with the operator as
-    ///      beneficiary, and compares the operator's whole token position.
-    function testSelfContainedOperatorNetPosition() public {
+    /// @notice Compares leaving the swap-created edge open, paying it to an
+    ///         external backrunner, and returning it through the hook.
+    /// @dev Every case starts from identical state and uses distinct LP, swapper,
+    ///      beneficiary, and searcher accounts. The external backrunner trades the
+    ///      same realized WETH amount as the hook.
+    function testHookRedistributesExternalBackrunnerValue() public {
         if (!forkEnabled) {
             vm.skip(true, "set RUN_WETH_CANARY_FORK=true and BASE_RPC_URL");
             return;
         }
 
-        uint256 snapshot = vm.snapshotState();
+        address swapper = makeAddr("economic comparison swapper");
+        address beneficiary = makeAddr("economic comparison beneficiary");
+        address searcher = makeAddr("economic comparison searcher");
+        assertTrue(IERC20(USDC).transfer(swapper, 100e6), "swapper funding failed");
+        assertTrue(IERC20(WETH).transfer(searcher, 1 ether), "searcher funding failed");
+
+        uint256 usdcPerWeth = _referenceUsdcPerWeth();
+        uint256 initialSnapshot = vm.snapshotState();
+
+        vm.recordLogs();
+        uint256 gasBefore = gasleft();
+        _swapTriggerPoolFrom(100e6, beneficiary, swapper);
+        uint256 hookGas = gasBefore - gasleft();
+        Settlement memory settled = _extractSettlement(vm.getRecordedLogs());
+        assertEq(settled.fee, 0, "matched backrun assumes zero lender fee");
+        _removeTriggerLiquidity();
+        EconomicOutcome memory hookCase =
+            _captureEconomicOutcome(swapper, beneficiary, searcher, usdcPerWeth, hookGas, 0);
+
+        vm.revertToState(initialSnapshot);
+        uint256 noBackrunSnapshot = vm.snapshotState();
 
         hook.setHookMaxIterations(0);
-        _swapTriggerPool(100e6, address(this));
+        gasBefore = gasleft();
+        _swapTriggerPoolFrom(100e6, beneficiary, swapper);
+        uint256 noBackrunGas = gasBefore - gasleft();
         _removeTriggerLiquidity();
-        uint256 disabledWeth = IERC20(WETH).balanceOf(address(this));
-        uint256 disabledUsdc = IERC20(USDC).balanceOf(address(this));
+        EconomicOutcome memory noBackrun =
+            _captureEconomicOutcome(swapper, beneficiary, searcher, usdcPerWeth, noBackrunGas, 0);
 
-        vm.revertToState(snapshot);
+        vm.revertToState(noBackrunSnapshot);
 
-        hook.setHookMaxIterations(1);
-        _swapTriggerPool(100e6, address(this));
+        hook.setHookMaxIterations(0);
+        gasBefore = gasleft();
+        _swapTriggerPoolFrom(100e6, beneficiary, swapper);
+        uint256 externalTriggerGas = gasBefore - gasleft();
+        assertLe(settled.totalAmountSwapped, type(uint128).max, "backrun size exceeds router type");
+        uint256 backrunGas = _externalBackrun(searcher, uint128(settled.totalAmountSwapped));
         _removeTriggerLiquidity();
-        uint256 enabledWeth = IERC20(WETH).balanceOf(address(this));
-        uint256 enabledUsdc = IERC20(USDC).balanceOf(address(this));
-
-        emit log("--- operator position after add, swap, remove ---");
-        emit log_named_decimal_uint("hook disabled: WETH", disabledWeth, 18);
-        emit log_named_uint("hook disabled: USDC", disabledUsdc);
-        emit log_named_decimal_uint("hook enabled : WETH", enabledWeth, 18);
-        emit log_named_uint("hook enabled : USDC", enabledUsdc);
-
-        // The counter-swap changes the pool composition returned on withdrawal, so
-        // both legs move. Value them together at the external reference price.
-        (uint160 sqrtPriceX96,,,,,,) = IUniswapV3Pool(UNISWAP_WETH_USDC_500).slot0();
-        // WETH is token0 in this pool: raw USDC per raw WETH = sqrtP^2 / 2^192.
-        uint256 usdcPerWeth = FullMath.mulDiv(
-            FullMath.mulDiv(uint256(sqrtPriceX96), uint256(sqrtPriceX96), 1 << 96),
-            1e18,
-            1 << 96
+        EconomicOutcome memory externalCase = _captureEconomicOutcome(
+            swapper, beneficiary, searcher, usdcPerWeth, externalTriggerGas, backrunGas
         );
-        emit log_named_uint("reference price: raw USDC per 1e18 WETH", usdcPerWeth);
 
-        uint256 disabledValue = disabledUsdc + FullMath.mulDiv(disabledWeth, usdcPerWeth, 1e18);
-        uint256 enabledValue = enabledUsdc + FullMath.mulDiv(enabledWeth, usdcPerWeth, 1e18);
-        emit log_named_uint("hook disabled: total value (raw USDC)", disabledValue);
-        emit log_named_uint("hook enabled : total value (raw USDC)", enabledValue);
+        uint256 rebate = hookCase.beneficiaryValue - noBackrun.beneficiaryValue;
+        uint256 searcherProfit = externalCase.searcherValue - noBackrun.searcherValue;
+        uint256 noBackrunTotal = _combinedValue(noBackrun);
+        uint256 hookTotal = _combinedValue(hookCase);
+        uint256 externalTotal = _combinedValue(externalCase);
 
-        if (enabledValue >= disabledValue) {
-            emit log_named_uint("operator NET GAIN (raw USDC)", enabledValue - disabledValue);
-        } else {
-            emit log_named_uint("operator NET LOSS (raw USDC)", disabledValue - enabledValue);
-        }
-        emit log("Gas is excluded. The arbitrage is funded by the v4 pool the operator");
-        emit log("also owns, so this difference, not the settlement event, is the result.");
+        assertEq(hookCase.swapperValue, noBackrun.swapperValue, "hook changed normal swap output");
+        assertEq(externalCase.swapperValue, noBackrun.swapperValue, "backrun changed settled swap output");
+        assertLt(hookCase.lpValue, noBackrun.lpValue, "hook did not draw value from LP");
+        assertLt(externalCase.lpValue, noBackrun.lpValue, "backrunner did not draw value from LP");
+        assertGt(rebate, 0, "hook paid no beneficiary rebate");
+        assertGt(searcherProfit, 0, "external backrunner made no profit");
+        assertApproxEqAbs(rebate, searcherProfit, 10, "hook and backrunner captured different edges");
+        assertApproxEqAbs(hookCase.lpValue, externalCase.lpValue, 10, "LP outcomes diverged");
+        assertLt(hookTotal, noBackrunTotal, "hook created value without external cost");
+        assertLt(externalTotal, noBackrunTotal, "backrun created value without external cost");
+        assertApproxEqAbs(hookTotal, externalTotal, 10, "route-level outcomes diverged");
+
+        emit log("--- no backrun vs external backrun vs hook rebate ---");
+        emit log_named_decimal_uint("reference USDC per WETH", usdcPerWeth, 6);
+        _logEconomicOutcome("no backrun", noBackrun);
+        _logEconomicOutcome("external backrun", externalCase);
+        _logEconomicOutcome("hook rebate", hookCase);
+        emit log_named_decimal_uint("beneficiary rebate USDC", rebate, 6);
+        emit log_named_decimal_uint("external searcher profit USDC", searcherProfit, 6);
+        emit log_named_decimal_uint("hook tracked-party external cost USDC", noBackrunTotal - hookTotal, 6);
+        emit log_named_decimal_uint(
+            "backrun tracked-party external cost USDC", noBackrunTotal - externalTotal, 6
+        );
+        emit log_named_decimal_uint("hook borrowed WETH", settled.principal, 18);
+        emit log_named_decimal_uint("matched V4 input WETH", settled.totalAmountSwapped, 18);
     }
 
     function testSweepSwapSizeAgainstLiveReference() public {
@@ -315,6 +353,49 @@ contract ArbHookWethCanaryForkTest is Test {
         enabledGas = gasBefore - gasleft();
         (settled, result) = _tryExtractSettlement(vm.getRecordedLogs());
         vm.revertToState(enabledSnapshot);
+    }
+
+    function _captureEconomicOutcome(
+        address swapper,
+        address beneficiary,
+        address searcher,
+        uint256 usdcPerWeth,
+        uint256 triggerGas,
+        uint256 backrunGas
+    ) private view returns (EconomicOutcome memory outcome) {
+        outcome.lpValue = _accountValue(address(this), usdcPerWeth);
+        outcome.swapperValue = _accountValue(swapper, usdcPerWeth);
+        outcome.beneficiaryValue = _accountValue(beneficiary, usdcPerWeth);
+        outcome.searcherValue = _accountValue(searcher, usdcPerWeth);
+        outcome.triggerGas = triggerGas;
+        outcome.backrunGas = backrunGas;
+    }
+
+    function _accountValue(address account, uint256 usdcPerWeth) private view returns (uint256) {
+        return IERC20(USDC).balanceOf(account)
+            + FullMath.mulDiv(IERC20(WETH).balanceOf(account), usdcPerWeth, 1e18);
+    }
+
+    function _referenceUsdcPerWeth() private view returns (uint256) {
+        (uint160 sqrtPriceX96,,,,,,) = IUniswapV3Pool(UNISWAP_WETH_USDC_500).slot0();
+        return FullMath.mulDiv(
+            FullMath.mulDiv(uint256(sqrtPriceX96), uint256(sqrtPriceX96), 1 << 96), 1e18, 1 << 96
+        );
+    }
+
+    function _combinedValue(EconomicOutcome memory outcome) private pure returns (uint256) {
+        return outcome.lpValue + outcome.swapperValue + outcome.beneficiaryValue + outcome.searcherValue;
+    }
+
+    function _logEconomicOutcome(string memory label, EconomicOutcome memory outcome) private {
+        emit log_string(label);
+        emit log_named_decimal_uint("  LP value USDC", outcome.lpValue, 6);
+        emit log_named_decimal_uint("  swapper value USDC", outcome.swapperValue, 6);
+        emit log_named_decimal_uint("  beneficiary value USDC", outcome.beneficiaryValue, 6);
+        emit log_named_decimal_uint("  searcher value USDC", outcome.searcherValue, 6);
+        emit log_named_decimal_uint("  combined tracked value USDC", _combinedValue(outcome), 6);
+        emit log_named_uint("  trigger gas", outcome.triggerGas);
+        emit log_named_uint("  backrun gas", outcome.backrunGas);
     }
 
     function _registerExternalWethUsdcPool() private {
@@ -418,6 +499,11 @@ contract ArbHookWethCanaryForkTest is Test {
     }
 
     function _swapTriggerPool(uint128 amountIn, address beneficiary) private {
+        _swapTriggerPoolFrom(amountIn, beneficiary, address(this));
+    }
+
+    function _swapTriggerPoolFrom(uint128 amountIn, address beneficiary, address payer) private {
+        vm.startPrank(payer);
         IERC20(USDC).approve(PERMIT2, type(uint256).max);
         IPermit2Allowance(PERMIT2).approve(USDC, UNIVERSAL_ROUTER, type(uint160).max, type(uint48).max);
 
@@ -439,6 +525,51 @@ contract ArbHookWethCanaryForkTest is Test {
         );
         IUniversalRouter(UNIVERSAL_ROUTER)
             .execute(abi.encodePacked(bytes1(uint8(Commands.V4_SWAP))), commandInputs, block.timestamp);
+        vm.stopPrank();
+    }
+
+    function _externalBackrun(address searcher, uint128 wethIn) private returns (uint256 gasUsed) {
+        vm.startPrank(searcher);
+        IERC20(WETH).approve(PERMIT2, type(uint256).max);
+        IPermit2Allowance(PERMIT2).approve(WETH, UNIVERSAL_ROUTER, type(uint160).max, type(uint48).max);
+        IERC20(USDC).approve(SWAP_ROUTER, type(uint256).max);
+
+        IV4Router.ExactInputSingleParams memory swapParams =
+            IV4Router.ExactInputSingleParams(triggerKey, true, wethIn, 1, bytes(""));
+        bytes[] memory actionParams = new bytes[](3);
+        actionParams[0] = abi.encode(swapParams);
+        actionParams[1] = abi.encode(triggerKey.currency0, uint256(wethIn));
+        actionParams[2] = abi.encode(triggerKey.currency1, uint256(1));
+        bytes[] memory commandInputs = new bytes[](1);
+        commandInputs[0] = abi.encode(
+            abi.encodePacked(
+                bytes1(uint8(Actions.SWAP_EXACT_IN_SINGLE)),
+                bytes1(uint8(Actions.SETTLE_ALL)),
+                bytes1(uint8(Actions.TAKE_ALL))
+            ),
+            actionParams
+        );
+
+        uint256 usdcBefore = IERC20(USDC).balanceOf(searcher);
+        uint256 gasBefore = gasleft();
+        IUniversalRouter(UNIVERSAL_ROUTER)
+            .execute(abi.encodePacked(bytes1(uint8(Commands.V4_SWAP))), commandInputs, block.timestamp);
+        uint256 usdcReceived = IERC20(USDC).balanceOf(searcher) - usdcBefore;
+        assertGt(usdcReceived, 0, "backrunner received no USDC");
+
+        ISwapRouter02(SWAP_ROUTER).exactInputSingle(
+            ISwapRouter02.ExactInputSingleParams({
+                tokenIn: USDC,
+                tokenOut: WETH,
+                fee: 500,
+                recipient: searcher,
+                amountIn: usdcReceived,
+                amountOutMinimum: 1,
+                sqrtPriceLimitX96: 0
+            })
+        );
+        gasUsed = gasBefore - gasleft();
+        vm.stopPrank();
     }
 
     function _pullUsdc(uint256 amount) private {
