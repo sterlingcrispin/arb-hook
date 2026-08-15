@@ -17,7 +17,6 @@ import {
     BalanceDeltaLibrary
 } from "@uniswap/v4-core/src/types/BalanceDelta.sol";
 import {SwapParams} from "@uniswap/v4-core/src/types/PoolOperation.sol";
-import {TickMath as V4TickMath} from "@uniswap/v4-core/src/libraries/TickMath.sol";
 
 import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 import {Ownable2Step} from "@openzeppelin/contracts/access/Ownable2Step.sol";
@@ -40,10 +39,9 @@ import {IERC3156FlashBorrower} from "./interfaces/IERC3156FlashBorrower.sol";
 import {IERC3156FlashLender} from "./interfaces/IERC3156FlashLender.sol";
 
 /// @title ArbHook
-/// @notice Uniswap v4 hook that performs bounded, on-chain arbitrage across
-///         registered external pools during swap callbacks. It owns pool
-///         registration, price discovery, sizing, execution, and callback safety
-///         checks in one contract.
+/// @notice Uniswap v4 hook that counter-trades its triggering pool against a
+///         registered concentrated-liquidity reference venue, repays flash
+///         principal, and returns realized profit to the triggering swapper.
 contract ArbHook is
     ArbUtils,
     Ownable2Step,
@@ -544,7 +542,12 @@ contract ArbHook is
             buyPoolType: externalPool.poolType,
             beneficiary: _activeProfitRecipient()
         });
-        bytes memory loanData = abi.encode(params, key, route.sqrtPriceLimitX96);
+        bytes memory loanData = abi.encode(
+            params,
+            key,
+            route.sqrtPriceLimitX96,
+            route.externalSqrtPriceLimitX96
+        );
         uint256 principal = route.principal;
         for (uint8 attempt; attempt < 3; ) {
             uint256 fee;
@@ -572,7 +575,7 @@ contract ArbHook is
     }
 
     // -------------------------- Core entrypoint ----------------------------
-    /// @notice Evaluate arbitrage opportunities across all configured base/counter pairs.
+    /// @notice Legacy parity scanner for configured external base/counter pairs.
     /// @dev Must be executed via self-call. Individual pair attempts are isolated with
     ///      low-level calls so a failing path does not revert the full cycle.
     ///      This internal execution path may still revert on invariant or auth failures.
@@ -1013,9 +1016,10 @@ contract ArbHook is
         if (params.sellPool == address(poolManager)) {
             PoolKey memory key;
             uint160 sqrtPriceLimitX96;
-            (, key, sqrtPriceLimitX96) = abi.decode(
+            uint160 externalSqrtPriceLimitX96;
+            (, key, sqrtPriceLimitX96, externalSqrtPriceLimitX96) = abi.decode(
                 data,
-                (FlashLoanExecutionParams, PoolKey, uint160)
+                (FlashLoanExecutionParams, PoolKey, uint160, uint160)
             );
             bool zeroForOne = Currency.unwrap(key.currency0) == token;
             if (
@@ -1031,17 +1035,13 @@ contract ArbHook is
                 amount,
                 sqrtPriceLimitX96
             );
-            bool externalZeroForOne = poolMetaByAddr[params.buyPool].token0 ==
-                params.tokenB;
             bool externalSuccess = _executeSwapInternal_noBalanceCheck(
                 params.buyPool,
                 params.buyPoolType,
                 params.tokenB,
                 token,
                 intermediateReceived,
-                externalZeroForOne
-                    ? V4TickMath.MIN_SQRT_PRICE + 1
-                    : V4TickMath.MAX_SQRT_PRICE - 1
+                externalSqrtPriceLimitX96
             );
             if (!externalSuccess)
                 revert ArbErrors.FlashArbitrageExecutionFailed();
