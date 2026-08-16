@@ -242,6 +242,7 @@ def configure_network(network: str) -> None:
     CHAIN_ID = 4663
     REFERENCE_POOL_KEY = "uniswap_v3_1bp"
     KNOWN_CALLERS = {
+        "0xcaf681a66d020601342297493863e78c959e5cb2": "Uniswap SwapRouter02",
         "0x8876789976decbfcbbbe364623c63652db8c0904": "Uniswap Universal Router",
     }
     POOLS = ROBINHOOD_POOLS
