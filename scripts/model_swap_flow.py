@@ -205,6 +205,11 @@ def signed_word(data: str, index: int) -> int:
     return value - (1 << 256) if value >= 1 << 255 else value
 
 
+def unsigned_word(data: str, index: int) -> int:
+    start = 2 + index * 64
+    return int(data[start : start + 64], 16)
+
+
 def topic_address(topic: str) -> str:
     return "0x" + topic[-40:].lower()
 
@@ -237,6 +242,11 @@ def normalize_log(
         "usdc": abs(amount1) / 1e6,
         "weth_raw": abs(amount0),
         "direction": "usdc_to_weth" if amount1 > 0 else "weth_to_usdc",
+        "sqrt_price_x96": unsigned_word(log["data"], 2),
+        "liquidity_raw": unsigned_word(log["data"], 3),
+        "tick": signed_word(log["data"], 4),
+        "transaction_index": int(log["transactionIndex"], 16),
+        "log_index": int(log["logIndex"], 16),
     }
 
 
@@ -274,7 +284,13 @@ def fetch_events(
             completed += 1
             if completed % 25 == 0 or completed == len(tasks):
                 print(f"Fetched {completed}/{len(tasks)} chunks; {len(events):,} swaps", flush=True)
-    events.sort(key=lambda event: (event["block"], event["tx"], event["pool"]))
+    events.sort(
+        key=lambda event: (
+            event["block"],
+            event["transaction_index"],
+            event["log_index"],
+        )
+    )
     return events
 
 
@@ -733,6 +749,7 @@ def main() -> int:
     stem = f"swap-flow-{start}-{end}"
     cache_path = args.output_dir / f"{stem}-events.jsonl.gz"
     metadata = {
+        "schema_version": 2,
         "chain_id": 8453,
         "start_block": start,
         "end_block": end,
