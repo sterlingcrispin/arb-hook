@@ -52,6 +52,7 @@ class VenueSnapshot:
 
 @dataclass(frozen=True, slots=True)
 class Order:
+    tx_hash: str
     block: int
     timestamp: int
     direction: str
@@ -267,6 +268,7 @@ def order_from_group(
         return None
 
     return Order(
+        tx_hash=chosen["tx"],
         block=chosen["block"],
         timestamp=chosen["timestamp"],
         direction=direction,
@@ -454,6 +456,7 @@ def replay(
     config: Config,
     orders: list[Order],
     *,
+    discovery_share_pct: float,
     gas_penalty_usdc: float,
     min_spread_ticks: int,
     min_profit_usdc: float,
@@ -475,8 +478,14 @@ def replay(
     wins_by_direction = Counter()
     wins_by_source = Counter()
     arb_references = Counter()
+    discovered_orders = 0
 
     for order in orders:
+        if discovery_share_pct < 100:
+            sample = int(order.tx_hash[-16:], 16) / (1 << 64) * 100
+            if sample >= discovery_share_pct:
+                continue
+        discovered_orders += 1
         zero_for_one = order.direction == "weth_to_usdc"
         quote = candidate.swap_exact_in(zero_for_one, order.amount_in, mutate=False)
         if not quote.full_fill:
@@ -521,10 +530,12 @@ def replay(
     excess = final_value - hodl_value
     return {
         **asdict(config),
+        "discovery_share_pct": discovery_share_pct,
         "gas_penalty_usdc": gas_penalty_usdc,
         "min_profit_usdc": min_profit_usdc,
         "duration_days": duration_days,
         "orders": len(orders),
+        "discovered_orders": discovered_orders,
         "initial_price_usdc": initial_price,
         "final_price_usdc": final_price,
         "initial_weth": initial_weth,
@@ -571,6 +582,7 @@ def verify_fixed_fork_calibration() -> None:
         1_097_715_714_974_944_790 / 1e12,
     )
     order = Order(
+        "0x" + "00" * 32,
         0,
         0,
         "usdc_to_weth",
@@ -633,6 +645,8 @@ def write_results(output_dir: Path, metadata: dict, arguments: dict, rows: list[
         "arguments": arguments,
         "limitations": [
             "Historical swaps are a counterfactual order proxy and include user, router, searcher, and split-route flow.",
+            "Discovery share deterministically samples transaction hashes; it is a scenario input, not an inferred routing forecast.",
+            "Uniswap's production router filters non-allowlisted hooks, so canonical-router flow requires hook allowlisting.",
             "Observed source output is the competing route; the model does not rerun every external router path.",
             "External venue state follows the historical tape and does not persist the candidate hook's market impact.",
             "The candidate position is fixed for the replay and is not automatically recentered or compounded.",
@@ -657,10 +671,11 @@ def write_results(output_dir: Path, metadata: dict, arguments: dict, rows: list[
 
 def report(rows: list[dict]) -> None:
     print("\nTop candidate pools by LP excess versus holding the deposited assets")
-    print("hook fee   LP/side range iter cap   min$  gas    routes/day arbs/day LP excess/day rebate/day")
+    print("hook share fee   LP/side range iter cap   min$  gas    routes/day arbs/day LP excess/day rebate/day")
     for row in rows[:12]:
         print(
             f"{'on' if row['hook_enabled'] else 'off':>4} "
+            f"{row['discovery_share_pct']:>5.1f}% "
             f"{row['fee_ppm'] / 100:>4.2f}bp "
             f"${row['capital_per_side']:<7,.0f} "
             f"{row['half_range_ticks']:>5}t "
@@ -680,6 +695,7 @@ def parser() -> argparse.ArgumentParser:
     command.add_argument("--cache", type=Path)
     command.add_argument("--references", default=",".join(REFERENCE_POOLS))
     command.add_argument("--flow-filter", choices=("all", "single-pool", "canonical-router"), default="all")
+    command.add_argument("--discovery-shares", default="100")
     command.add_argument("--capitals", default="100,500,1000,2000,4000,10000")
     command.add_argument("--ranges", default="50,100,250,500,1000")
     command.add_argument("--fees", default="1,10,100")
@@ -709,8 +725,11 @@ def main() -> int:
     if any(not 0 < cap <= 10_000 for cap in principal_caps) or any(value <= 0 for value in max_iterations):
         raise SystemExit("principal caps and max iterations must be positive")
     gas_penalties = parse_numbers(args.gas_penalties, float)
+    discovery_shares = parse_numbers(args.discovery_shares, float)
     if any(penalty < 0 for penalty in gas_penalties) or any(value < 0 for value in min_profits):
         raise SystemExit("gas penalty and minimum profit cannot be negative")
+    if any(not 0 < share <= 100 for share in discovery_shares):
+        raise SystemExit("discovery shares must be greater than zero and at most 100")
     if args.start_day < 0 or (args.duration_days is not None and args.duration_days <= 0):
         raise SystemExit("replay window must be positive")
 
@@ -740,30 +759,33 @@ def main() -> int:
     fees = parse_numbers(args.fees, int)
     hook_modes = [True, False] if args.hook_modes == "both" else [args.hook_modes == "on"]
     scenarios = [
-        (Config(capital, half_range, fee, enabled, principal_cap, iterations), gas_penalty, min_profit)
+        (Config(capital, half_range, fee, enabled, principal_cap, iterations), discovery_share, gas_penalty, min_profit)
         for capital in capitals
         for half_range in ranges
         for fee in fees
         for enabled in hook_modes
         for principal_cap in principal_caps
         for iterations in max_iterations
+        for discovery_share in discovery_shares
         for gas_penalty in gas_penalties
         for min_profit in min_profits
     ]
 
     rows = []
-    for index, (config, gas_penalty, min_profit) in enumerate(scenarios, start=1):
+    for index, (config, discovery_share, gas_penalty, min_profit) in enumerate(scenarios, start=1):
         print(
             f"[{index}/{len(scenarios)}] ${config.capital_per_side:,.0f}/side, "
             f"{config.half_range_ticks} ticks, {config.fee_ppm / 100:.2f} bp, "
             f"hook={'on' if config.hook_enabled else 'off'}, iterations={config.max_iterations}, "
-            f"cap={config.principal_cap_bps} bps, min=${min_profit:g}, gas=${gas_penalty:g}",
+            f"cap={config.principal_cap_bps} bps, share={discovery_share:g}%, "
+            f"min=${min_profit:g}, gas=${gas_penalty:g}",
             flush=True,
         )
         rows.append(
             replay(
                 config,
                 orders,
+                discovery_share_pct=discovery_share,
                 gas_penalty_usdc=gas_penalty,
                 min_spread_ticks=args.min_spread_ticks,
                 min_profit_usdc=min_profit,
@@ -775,6 +797,7 @@ def main() -> int:
         "cache": str(cache),
         "references": sorted(references),
         "flow_filter": args.flow_filter,
+        "discovery_shares_pct": discovery_shares,
         "capitals": capitals,
         "ranges": ranges,
         "fees_ppm": fees,
