@@ -91,9 +91,10 @@ export AUTO_DISABLE=true
   >> artifacts/base-canary-monitor.log 2>&1
 ```
 
-The monitor treats a swap without settlement as a normal economic no-op. It
-uses the kill switch only for owner/config drift, retained WETH/USDC, or a
-settlement outside the configured profit and iteration bounds.
+The monitor treats a swap without settlement as a normal economic no-op. Hook
+WETH/USDC balances are expected owner-withdrawable revenue. It uses the kill
+switch only for owner/config drift, adapter residue, or a settlement outside
+the configured profit and iteration bounds.
 
 ## Stop And Exit
 

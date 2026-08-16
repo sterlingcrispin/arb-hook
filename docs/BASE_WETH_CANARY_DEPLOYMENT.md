@@ -1,11 +1,28 @@
 # Base WETH Canary Deployment
 
-> **HISTORICAL DEPLOYMENT RECORD.** These contracts contain the retired
-> one-round self-pool route. Current source uses a new multi-round executor and
-> is not represented by these addresses. Do not use the settings or measured
-> economics below as a current launch plan.
+> **HISTORICAL DEPLOYMENT RECORD.** No address in this document is an active
+> canary. Do not use these settings or measured economics as a current launch
+> plan.
 
-## Current Status
+## Latest Closed Canary
+
+The multi-round hook `0x431380080801E04D5D886390E40c84323E37c040`
+is disabled (`hookMaxIterations = 0`) and holds no WETH or USDC. Its WETH/USDC
+pool ID is `0x75082c78b2212356872e0f4f7856e97b32e77adabe0401c6c6e82893f28c7a13`.
+Position NFT `2912936` was burned and `ownerOf` now reverts.
+
+| Closure action | Transaction |
+|---|---|
+| Disable hook | `0x5e9cf4f0b854757741d265cdfd9c10bcedd04800905220e7654c0281fc887bd4` |
+| Burn position and withdraw liquidity | `0x1a49a491ad847232ee21b96ba2753e5ac62ffb094b7a3587233dafab1d331fe5` |
+| Revoke Permit2 router/PositionManager allowances | `0x3afe5a10504beee33d1b10dd939539a73a2a786b64343457587dab4b7afeac6d` |
+| Revoke residual WETH-to-Permit2 approval | `0x6211e7ff5b1256f6eccf05d6fc3df7891913754566eed5f58603c0c15255b44e` |
+
+The burn returned `0.140536465569262201 WETH` and `231.046985 USDC` to the
+operator wallet. ERC20-to-Permit2 and Permit2-to-PositionManager/Universal
+Router allowances are zero for both WETH and USDC.
+
+## Earlier One-Round Canaries
 
 The replacement research canary has been retired. Hook
 `0x7e8d44E0eAfB387a91a630536d934bbb1Ca34040` is disabled, its WETH flash

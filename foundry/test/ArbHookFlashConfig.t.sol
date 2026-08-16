@@ -78,7 +78,7 @@ contract ArbHookFlashConfigTest is Test {
         );
     }
 
-    function testEligibleSwapRejectsInsufficientAttemptGas() public {
+    function testEnabledSwapRejectsInsufficientAttemptGas() public {
         hook.setHookMaxIterations(1);
 
         (bool success, bytes memory reason) = address(poolManager).call{gas: 500_000}(

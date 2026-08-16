@@ -75,6 +75,6 @@ contract SwapBaseCanary is Script {
 
         amountReceived = IERC20(tokenOut).balanceOf(payer) - beforeBalance;
         console2.log("Token received", tokenOut);
-        console2.log("Total received (swap output plus any rebate)", amountReceived);
+        console2.log("Swap output received", amountReceived);
     }
 }

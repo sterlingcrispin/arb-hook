@@ -5,9 +5,47 @@ This tracker records the audit findings list and current disposition.
 
 ## Canary Threat Model
 
-The initial deployment is owner-operated with a small set of manually verified, canonical Base tokens, pools, and lenders. Malicious owner-supplied assets and permissionless registry inputs are not part of the current threat model. External callbacks, atomic repayment, economic correctness, and recipient routing remain in scope.
+The initial deployment is owner-operated with a small set of manually verified, canonical Base tokens, pools, and lenders. Malicious owner-supplied assets and permissionless registry inputs are not part of the current threat model. External callbacks, atomic repayment, economic correctness, and owner-revenue accounting remain in scope.
 
 ## Strategy Findings
+
+73. Creator-retained revenue supersedes swapper rebates
+- Status: `ADDRESSED IN NEXT-DEPLOYMENT SOURCE`
+- Priority: `HIGH`
+- Summary: Production no longer resolves or accepts a swap beneficiary. Every
+  enabled `afterSwap` attempt selects `address(this)`, realized net profit stays
+  in the hook, and the current owner withdraws it with `removeTokens`.
+- Rationale: the intended product is creator revenue, not a swapper rebate.
+  Ignoring router identity and hook data also prevents unsupported intermediary
+  routers from silently suppressing arbitrage through failed caller resolution.
+- Constraint: retained balances must remain excluded from flash-principal
+  sizing. The protected-balance executor invariant remains authoritative.
+- Live disposition: the prior rebate canary was disabled in Base transaction
+  `0x5e9cf4f0b854757741d265cdfd9c10bcedd04800905220e7654c0281fc887bd4`,
+  then position `2912936` was burned in transaction
+  `0x1a49a491ad847232ee21b96ba2753e5ac62ffb094b7a3587233dafab1d331fe5`.
+  Permit2 allowances to PositionManager and Universal Router were zeroed in
+  `0x3afe5a10504beee33d1b10dd939539a73a2a786b64343457587dab4b7afeac6d`;
+  the remaining WETH approval to Permit2 was zeroed in
+  `0x6211e7ff5b1256f6eccf05d6fc3df7891913754566eed5f58603c0c15255b44e`.
+
+74. Always-on creator revenue changes the gas-floor routing tradeoff
+- Status: `BLOCKS NEXT DEPLOYMENT CONFIGURATION`
+- Priority: `CRITICAL`
+- Summary: With recipient lookup removed, every enabled callback reaches
+  `_attemptGasBudget`. The current nonzero `3,000,000` attempt limit is also a
+  hard floor, so a swap must enter the callback with more than `3,200,000` gas.
+  Four small external canary swaps used transaction gas limits between roughly
+  `804,000` and `1,146,000`; they completed only because the retired recipient
+  lookup skipped their arbitrage attempts.
+- Consequence: those exact routes would now revert during estimation or
+  execution. Estimators may raise the limit, but routers with fixed gas policy
+  may exclude the pool. This is independent of the hook's permission bitmap and
+  separate from Uniswap's exact-address allowlist in item 71.
+- Decision required: do not redeploy with the current gas configuration until a
+  same-path router fork test establishes whether ordinary routes will supply the
+  required envelope. Preserve the floor unless evidence supports changing it;
+  removing it can restore the fail-open behavior documented in item 70.
 
 69. Temporary one-round self-pool route bypassed the original iterative engine
 - Status: `ADDRESSED BY ITERATIVE SELF-POOL EXECUTION`
@@ -25,18 +63,19 @@ The initial deployment is owner-operated with a small set of manually verified, 
   marginal profit on every round. The original external scanner and its
   V2/V3/mixed iterative engine remain intact as regression and research code.
 - Regression evidence:
-  `ArbHookV4LoopForkTest` compares identical state and a 100 USDC trigger at Base
-  block `50018808`. One round earned `0.000427855387719440 WETH` and left 434
-  ticks; ten rounds earned `0.001247055334869567 WETH` and left 134 ticks. It
-  also asserts exact Morpho repayment and zero hook residue. Exact inventory
-  parity and the fixed-block legacy flash sequence remain independent gates.
+  `ArbHookV4LoopForkTest` compares identical state and a 50 USDC trigger at Base
+  block `50058863`. One round earned `0.000012668624087717 WETH` and left 54
+  ticks; ten rounds earned `0.000053328188113127 WETH` and left 18 ticks. It
+  also asserts exact Morpho repayment, owner-revenue retention and withdrawal,
+  and immunity to a hook-data recipient override. Exact inventory parity and
+  the fixed-block legacy flash sequence remain independent gates.
 - Constraint: do not replace the live-repriced loop with a fixed one-shot route,
   nor remove the preserved scanner, fallback selection, route-specific sizing,
   or legacy iterative executor without explicit design approval and a
   callback-level before/after comparison.
 
 68. Universal Router caller resolution is one hop, not recursive
-- Status: `DOCUMENTED`
+- Status: `SUPERSEDED BY OWNER-RETAINED REVENUE`
 - Priority: `MEDIUM`
 - Summary: Empty hook data resolves the recipient through
   `IMsgSender.msgSender()` on the address that called `PoolManager.swap`. That
@@ -51,20 +90,17 @@ The initial deployment is owner-operated with a small set of manually verified, 
   20 bytes of hook data, so trusting `msgSender()` grants no new capability. The
   lookup is gas-capped at 10,000 and a router without the interface reverts into
   the catch, which skips the attempt rather than misdirecting funds.
-- Decision: treat direct Universal Router calls as the supported rebate path and
-  document the one-hop boundary. Intermediaries should either forward their full
-  WETH output or pass the end user as packed hook data. There is no safe generic
-  onchain mechanism for the hook to discover a user hidden behind arbitrary
-  contracts.
+- Decision: production no longer resolves a caller or accepts a packed override.
+  The one-hop limitation remains historical context for the retired rebate model.
 
 65. Hook profit is LP value redistribution, not new value
 - Status: `ACCEPTED PRODUCT ECONOMICS`
 - Priority: `HIGH`
 - Summary: The counter-trade captures value from the v4 LP position. The product
   case is valid only when an external backrunner would otherwise capture the
-  same edge; then the hook changes the recipient rather than worsening the LP's
-  counterfactual outcome.
-- Measurement: `testHookRedistributesExternalBackrunnerValue` uses distinct LP,
+  same edge; then the hook redirects the searcher's capture to the owner rather
+  than worsening the LP's counterfactual outcome.
+- Historical measurement: `testHookRedistributesExternalBackrunnerValue` uses distinct LP,
   swapper, beneficiary, and searcher accounts and replays three cases from the
   same Base block `50018808` snapshot. The external backrunner uses the hook's
   realized `0.008916275255831863 WETH` v4 input, then exits through the same v3
@@ -84,7 +120,8 @@ The initial deployment is owner-operated with a small set of manually verified, 
 - Interpretation: if nobody would backrun the thin pool, enabling the hook makes
   the LP 0.813727 USDC worse in this sample. If a matched backrun is the real
   baseline, the LP outcome is identical and the hook redirects the searcher's
-  0.804926 USDC to the beneficiary. With one wallet in every role, the transfer
+  0.804926 USDC. The historical test paid a beneficiary; current production
+  retains the same capture for the owner. With one wallet in every role, the transfer
   cancels internally and only external fees plus gas remain.
 - Live result: the controlled replacement-canary swap paid
   `0.000153175872232624 WETH` from the hook route. The next transaction in the
@@ -96,11 +133,11 @@ The initial deployment is owner-operated with a small set of manually verified, 
 - Decision: the operator disabled the one-round hook, zeroed its WETH principal
   ceiling, and burned that LP position. The current strategy deliberately uses
   the triggering v4 pool again, so this economic property applies: the hook
-  redirects LP loss-versus-rebalancing to the beneficiary. That is intended
+  redirects LP loss-versus-rebalancing to the owner. That is intended
   when the alternative is an external backrunner, but on an unwatched thin pool
   it creates a transfer that otherwise might not occur. The multi-round loop
   reduces value left for a following backrunner; it does not change who funds
-  the counter-trade. Treat LP depth, fee income, beneficiary policy, and external
+  the counter-trade. Treat LP depth, fee income, owner revenue, and external
   backrunner activity as deployment economics rather than a solvency bug.
 
 60. No dislocation ever opens on the selected cbBTC/WETH pair
@@ -216,7 +253,7 @@ The initial deployment is owner-operated with a small set of manually verified, 
   block `50018808`, 48 USDC fell below the `0.0001 WETH` floor while 49 USDC
   cleared it for the tested v4 liquidity.
 - Current behavior: there is no PoolId-specific magic threshold. Every enabled
-  callback with a valid beneficiary cheaply screens the live directional spread,
+  callback cheaply screens the live directional spread,
   both fees, active liquidity, price limits, minimum chunk, lender availability,
   and principal cap before borrowing. Realized `minNetProfit` remains the final
   atomic gate because the exact output is not knowable before execution. A
@@ -242,7 +279,7 @@ The initial deployment is owner-operated with a small set of manually verified, 
 - Current implication: the production route trades the pool that invoked
   `afterSwap`, so the dislocating swap and counter-trade are in the same
   transaction and ordering is deterministic. This resolves the random observer
-  problem. It does not resolve item 65's LP-versus-beneficiary economics.
+  problem. It does not resolve item 65's LP-versus-revenue-recipient economics.
 
 66. Retired native-trigger tests made the flash-fork release gate fail
 - Status: `ADDRESSED`
@@ -253,8 +290,8 @@ The initial deployment is owner-operated with a small set of manually verified, 
   reference venue, so both tests failed with no settlement event.
 - Resolution: stale native-trigger assumptions remain removed. The current
   ERC20/ERC20 route is covered by `ArbHookV4LoopForkTest`; it executes the actual
-  callback, nested v4 settlement, V3 callback, Morpho loan, recipient payout,
-  exact repayment, and residue checks. Local tests separately assert that
+  callback, nested v4 settlement, V3 callback, Morpho loan, retained owner
+  revenue and withdrawal, and exact repayment. Local tests separately assert that
   production no longer scans unrelated registered pairs.
 
 67. Nested v4 counter-trade recursion was attributed to empty hook data
@@ -277,12 +314,12 @@ The initial deployment is owner-operated with a small set of manually verified, 
 - Status: `REQUIRED BEFORE ROBINHOOD DEPLOYMENT`
 - Priority: `CRITICAL`
 - Summary: Three days of WETH/USDG flow support a small Robinhood canary, but
-  current deployment/configuration scripts, caller-resolution proof, and fork
+  current deployment/configuration scripts and fork
   gates are Base-specific. Morpho held about `$39.1m` USDG but only `0.01235`
   WETH at block `38206281`, so the initial route must enable USDG borrowing only.
 - Action: add a chain-attested Robinhood deployment path, deploy a USDG Morpho
   adapter, register the Uniswap v3 `1 bp` WETH/USDG reference, and prove the
-  real v4/v3/Morpho/caller path at a fixed Robinhood block. Calibrate gas and
+  real v4/v3/Morpho/owner-revenue path at a fixed Robinhood block. Calibrate gas and
   economics at current head, then complete exact-hook allowlisting and verify
   production quote selection before adding liquidity.
 - Economics: the optimized three-day ceiling was `$10.40/day` of LP excess at
@@ -324,14 +361,13 @@ The initial deployment is owner-operated with a small set of manually verified, 
 ## Accepted By Design
 
 41. Net profit recipient resolution
-- Status: `ACCEPTED`
-- Summary: Empty hook data resolves the original execution caller through
+- Status: `SUPERSEDED BY OWNER-RETAINED REVENUE`
+- Historical behavior: empty hook data resolved the original execution caller through
   `IMsgSender.msgSender()` on the callback sender. Base's canonical Universal
-  Router supports this interface. Exact packed recipient data remains an
-  optional override, while failed lookups and malformed data remain fail-closed.
-- Decision: ordinary canonical-router swaps rebate their initiator without a
-  custom frontend. Unsupported routers skip arbitrage rather than misdirecting
-  profit. Intermediary semantics are documented in item 68. The triggering
+  Router supports this interface. Exact packed recipient data was an optional
+  override, while failed lookups and malformed data were fail-closed.
+- Decision: the hook itself is always the production recipient. Router identity
+  and hook data no longer redirect profit or suppress execution. The triggering
   user's ordinary swap output remains unchanged.
 
 ## Deferred Outside Research Threat Model
@@ -372,7 +408,7 @@ The initial deployment is owner-operated with a small set of manually verified, 
   `0xcf849ad5ccc4a845217ca2bd0eefd42a8e75dcedb9704d0d81ce2a3ff2f39a42`
   therefore completed without `FlashLoanSettled`. A nonzero `hookGasLimit` is
   now both the required attempt budget and its ceiling. With the trigger floor
-  removed, every enabled callback with a valid recipient reaches this check;
+  removed, every enabled callback reaches this check;
   under-gassed swaps revert so `eth_estimateGas` must raise the limit.
 - Live proof: replacement hook
   `0x7e8d44E0eAfB387a91a630536d934bbb1Ca34040` received a Base RPC estimate of
@@ -396,9 +432,10 @@ The initial deployment is owner-operated with a small set of manually verified, 
   the beneficiary. The same-snapshot disabled/enabled replay measured about
   `419546` incremental gas.
 - Current evidence: `ArbHookV4LoopForkTest` now exercises the iterative successor
-  at pinned Base block `50018808`. Ten rounds repay Morpho exactly, leave no
-  hook residue, earn `0.001247055334869567 WETH`, and leave 134 ticks versus the
-  one-round baseline's 434 ticks after the same 100 USDC trigger.
+  at pinned Base block `50058863`. Ten rounds repay Morpho exactly, retain
+  `0.000053328188113127 WETH` for owner withdrawal, and leave 18 ticks versus
+  the one-round baseline's 54 ticks after the same 50 USDC trigger. The reverse
+  direction retains `0.095317 USDC` under the release profit floor.
 - Calibration sweep: 20 rounds settled under the default 3,000,000-gas attempt
   budget and earned `0.001313458837594588 WETH`; 25 rounds exhausted that budget
   and settled nothing. At an 8,000,000-gas diagnostic budget, the route stopped
@@ -586,7 +623,7 @@ The initial deployment is owner-operated with a small set of manually verified, 
 - Notes: The swap context, profit recipient, active loan fields and last-result
   fields are single-transaction values and now use EIP-1153 transient storage.
   Revert semantics are unchanged. Measured saving is roughly 75,000-90,000 gas
-  per attempt (`testProfitableLoanPaysBeneficiaryAndEmitsSettlement` 794,418 to
+  per attempt (`testProfitableDirectLoanPaysHarnessOwnerAndEmitsSettlement` 794,418 to
   717,666).
 
 46. Swap-callback context was reusable within one swap
@@ -642,9 +679,9 @@ The initial deployment is owner-operated with a small set of manually verified, 
 
 1. ArbHook EIP-170 deployability
 - Status: `ADDRESSED; RE-MEASURED AFTER ITERATIVE SELF-POOL RESTORATION`
-- Notes: `npm run size` reports `ArbHook` at 23,818 runtime bytes. That leaves
-  758 bytes below EIP-170 and 182 bytes below the repository's 24,000-byte
-  budget. The immutable delegate-called `V4ArbExecutor` is 5,429 bytes. Size
+- Notes: `npm run size` reports `ArbHook` at 23,644 runtime bytes. That leaves
+  932 bytes below EIP-170 and 356 bytes below the repository's 24,000-byte
+  budget. The immutable delegate-called `V4ArbExecutor` is 5,624 bytes. Size
   optimization must not remove core route logic; the narrow project margin means
   every new onchain branch needs explicit execution value.
 
@@ -701,12 +738,12 @@ The initial deployment is owner-operated with a small set of manually verified, 
 - Notes: V3 sizing now caps each leg's adaptive tick movement before deriving the pool-enforced `sqrtPriceLimit`. This reuses the existing sizing path, removes a redundant impact read and write-only field, and preserves both exact inventory parity and the flash-loan ten-round route sequence.
 
 4. Production router recipient integration
-- Status: `ADDRESSED`
-- Notes: The callback-level flash regression uses empty hook data, resolves the
-  original caller through `IMsgSender`, and pays that beneficiary. The fixed
-  Base test executes the current self-pool loop and Morpho settlement, while the
-  retired live canary separately proved Base's canonical Universal Router
-  implementation. An exact 20-byte recipient remains an optional override.
+- Status: `SUPERSEDED BY OWNER-RETAINED REVENUE`
+- Notes: The retired callback path resolved the Universal Router caller or an
+  exact packed recipient. Production now ignores both fields, executes the
+  self-pool loop for every enabled callback, and retains profit for the current
+  owner. The fixed Base test proves empty and nonempty hook data cannot redirect
+  settlement revenue.
 
 5. CREATE2 deployment workflow
 - Status: `ADDRESSED`

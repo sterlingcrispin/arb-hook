@@ -126,9 +126,9 @@ def read_state() -> tuple[int, list[str]]:
             expected_profit,
         ):
             problems.append(f"{token_label(token)[0]} flash config drift")
-        balance = call(token, "0x70a08231" + address_word(HOOK))[0]
-        if balance:
-            problems.append(f"hook retained {balance} raw {token_label(token)[0]}")
+        adapter_balance = call(token, "0x70a08231" + address_word(adapter))[0]
+        if adapter_balance:
+            problems.append(f"adapter retained {adapter_balance} raw {token_label(token)[0]}")
     return iterations, problems
 
 
@@ -184,13 +184,14 @@ def report_events(start: int, end: int) -> None:
         token = "0x" + str(topics[2])[-40:].lower()
         label, decimals = token_label(token)
         net_profit = signed(words[5])
+        beneficiary = word_address(words[7])
         stamp(
             f"SETTLED tx={entry['transactionHash']} token={label} principal={words[2] / 10**decimals:.9f} "
-            f"profit={net_profit / 10**decimals:.9f} iterations={words[6]} beneficiary={word_address(words[7])}"
+            f"profit={net_profit / 10**decimals:.9f} iterations={words[6]} beneficiary={beneficiary}"
         )
         expected_profit = EXPECTED[token][2]
-        if net_profit < expected_profit or words[6] > 10:
-            if emergency_disable("settlement violated profit or iteration bound"):
+        if net_profit < expected_profit or words[6] > 10 or beneficiary != HOOK:
+            if emergency_disable("settlement violated profit, iteration, or revenue-recipient invariant"):
                 raise SystemExit("canary disabled")
 
     for entry in swap_logs:

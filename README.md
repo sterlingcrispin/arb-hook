@@ -1,6 +1,6 @@
 # Arb Hook
 
-`ArbHook` is a Uniswap v4 `afterSwap` hook that counter-trades the pool that just moved. A triggering swap can dislocate the v4 pool from a registered V3-compatible reference venue; the hook borrows the triggering swap's output token, sells it back into v4, buys it back externally, repays atomically, and pays realized net profit to the resolved swap initiator.
+`ArbHook` is a Uniswap v4 `afterSwap` hook that counter-trades the pool that just moved. A triggering swap can dislocate the v4 pool from a registered V3-compatible reference venue; the hook borrows the triggering swap's output token, sells it back into v4, buys it back externally, repays atomically, and retains realized net profit for the current owner.
 
 The production callback uses the triggering pool and one external reference for the same token pair. It does not wait for an unrelated opportunity in two external pools. The original multi-pool scanner and V2/V3 iterative executor remain in the codebase as the historical parity engine, but `afterSwap` no longer dispatches that scanner.
 
@@ -9,7 +9,7 @@ The production callback uses the triggering pool and one external reference for 
 When `hookMaxIterations` is nonzero, an eligible `afterSwap` callback follows this path:
 
 1. Require the immutable Uniswap v4 `PoolManager` as caller.
-2. Resolve the profit recipient from the router or exact packed hook data.
+2. Set the hook itself as the profit recipient, independent of router or hook data.
 3. Enter a gas-bounded self-call so a failed arbitrage attempt does not revert the user's swap.
 4. Derive `startToken` from the triggering swap's output and `intermediateToken` from its input.
 5. Reject native-currency pairs. The current route supports ERC20/ERC20 v4 pools only.
@@ -21,9 +21,9 @@ When `hookMaxIterations` is nonzero, an eligible `afterSwap` callback follows th
 11. Inside the callback, repeatedly reread both pools and recompute the next chunk before each round.
 12. For each profitable round, sell `startToken` into the triggering v4 pool and buy it back in the external reference pool.
 13. Stop at `hookMaxIterations` or earlier when spread, liquidity, minimum chunk, swap success, or marginal profit says to stop.
-14. Require exact intermediate-token restoration, deduct the lender fee, enforce `minNetProfit`, pay the beneficiary, and approve exact repayment.
+14. Require exact intermediate-token restoration, deduct the lender fee, enforce `minNetProfit`, retain the profit, and approve exact repayment.
 
-The user's ordinary v4 swap output is not modified. A successful arbitrage produces a separate transfer in the triggering swap's output token.
+The user's ordinary v4 swap output is not modified. Successful arbitrage profit accumulates in `ArbHook` until the current owner withdraws it with `removeTokens`.
 
 A nested v4 counter-swap does not recursively invoke this hook. Uniswap v4 skips hook callbacks when the hook itself calls `PoolManager.swap` for that pool.
 
@@ -84,25 +84,11 @@ With defaults, early rounds move each venue by up to roughly 17.5% of the initia
 
 This is intentionally a bounded profitable-step solver, not an exact tick-by-tick optimum. Exact optimization would require substantially more onchain traversal. Repricing after every round is what safely captures more edge than the retired one-shot implementation.
 
-## Profit Recipient
+## Owner Revenue
 
-With empty `hookData`, the hook calls `IMsgSender.msgSender()` on the callback's router address. Base's canonical Universal Router exposes the caller holding its execution lock:
+Every enabled callback uses `address(this)` as the flash-profit recipient. Router identity and `hookData` do not affect execution or ownership of profit. This keeps generic router and aggregator behavior deterministic and avoids trusting caller-provided recipient data.
 
-- a wallet calling Universal Router directly receives the profit;
-- a user-owned smart account receives the profit;
-- an intermediary calling Universal Router is the immediate recipient and is responsible for forwarding any extra token balance.
-
-The lookup is capped at 10,000 gas. If the router does not support `IMsgSender`, returns zero, or reverts, the hook skips arbitrage rather than using `tx.origin` or guessing.
-
-Exactly 20 packed bytes remain an optional explicit-recipient override:
-
-```solidity
-abi.encodePacked(beneficiary)
-```
-
-Malformed nonempty data and a packed zero address skip execution.
-
-The selected recipient is held in transaction-scoped transient storage through the synchronous flash callback. It is not redundantly serialized into the loan payload.
+Realized profit remains in its start token inside `ArbHook`. The current owner can withdraw accumulated balances with `removeTokens(token)`. Retained balances are excluded from later flash-principal sizing, so revenue does not silently increase trade size.
 
 ## Flash Accounting
 
@@ -119,9 +105,9 @@ A successful callback requires:
 - the registered external pool and triggering v4 key to match the encoded route;
 - the intermediate-token balance to return exactly to its entry value;
 - realized `startToken` profit to be positive and at least `minNetProfit` after the lender fee; and
-- enough remaining `startToken` for exact principal-plus-fee repayment after beneficiary payment.
+- enough remaining `startToken` for exact principal-plus-fee repayment while retaining net profit.
 
-Any failure reverts the loan, both arbitrage legs, and payout atomically. The outer self-call contains that failure so the original user swap can still settle.
+Any failure reverts the loan and both arbitrage legs atomically. The outer self-call contains that failure so the original user swap can still settle.
 
 ## Gas Boundary
 
@@ -130,9 +116,9 @@ Any failure reverts the loan, both arbitrage legs, and payout atomically. The ou
 - A nonzero limit is also a floor: an eligible swap without more than `reserve + limit` gas reverts with `InsufficientHookGas` instead of silently estimating a cheaper no-arbitrage branch.
 - A zero limit uses all gas above the reserve and does not enforce that floor.
 
-At Base block `50018808`, the fixed fork test completed ten adaptive rounds under the default attempt budget. Router estimation and realistic pool liquidity must still be tested for each deployment configuration.
+At Base block `50058863`, the fixed fork test completed ten adaptive rounds under the default attempt budget. Router estimation and realistic pool liquidity must still be tested for each deployment configuration.
 
-Diagnostic sweeps at that same snapshot show why iteration and gas settings must
+Earlier diagnostic sweeps at Base block `50018808` show why iteration and gas settings must
 be calibrated together. Twenty rounds settled under the default attempt budget
 and captured `0.001313458837594588 WETH`; 25 exhausted that budget and the
 contained attempt produced no settlement. With an 8,000,000-gas diagnostic
@@ -158,7 +144,7 @@ Execution starts disabled.
 - `setHookGasBounds(reserve, limit)`
   - Defaults to `200000` and `3000000`.
 
-There is no hardcoded trigger-size threshold. Every callback with a valid recipient enters route screening; no loan is requested when the live spread, fee-adjusted edge, or minimum chunk is insufficient.
+There is no hardcoded trigger-size threshold. Every enabled callback enters route screening; no loan is requested when the live spread, fee-adjusted edge, or minimum chunk is insufficient.
 
 ## Safety Model
 
@@ -192,18 +178,15 @@ RUN_V4_LOOP_FORK=true BASE_RPC_URL="$BASE_RPC_URL" \
 forge test --match-contract ArbHookV4LoopForkTest -vv
 ```
 
-At Base block `50018808`, the identical 100 USDC trigger produced:
+At Base block `50058863`, the identical 50 USDC trigger produced:
 
 | Bound | Completed rounds | WETH traded | Net WETH profit | Residual gap |
 |---:|---:|---:|---:|---:|
-| 1 | 1 | `0.008916275255831863` | `0.000427855387719440` | 434 ticks |
-| 10 | 10 | `0.038512027703384331` | `0.001247055334869567` | 134 ticks |
+| 1 | 1 | `0.002700000000000000` | `0.000012668624087717` | 54 ticks |
+| 10 | 10 | `0.018703796146752592` | `0.000053328188113127` | 18 ticks |
 
-The test also proves exact Morpho repayment and zero WETH/USDC residue in the hook.
-
-The ten-round result captures roughly 94% of the 31-round high-gas diagnostic's
-profit at this one snapshot. That percentage is not portable to another pool,
-liquidity profile, trigger size, or block.
+The test also proves exact Morpho repayment, exact retained profit in the hook,
+and current-owner withdrawal of that profit.
 
 Pinned v4 liquidity, fee, trigger-size, iteration, and principal-cap sweeps:
 
@@ -212,7 +195,9 @@ BASE_RPC_URL="$BASE_RPC_URL" python3 scripts/sweep_v4_pool.py \
   --fork-block 50052773
 ```
 
-The standard 140-scenario grid and a 144-scenario low-fee/depth frontier showed:
+The following sweep results predate creator-retained revenue and model the
+retired swapper-rebate policy. Their pool and execution comparisons remain
+useful, but their participant-level economics are not current behavior:
 
 - the deep Uniswap v3 WETH/USDC pool was consistently a better reference and execution venue than the shallow pool;
 - with ordinary `1 bp` and `5 bp` v4 fees, no tested route beat the deep `5 bp` v3 route after execution gas, even after paying the hook profit to the swapper;
@@ -277,7 +262,8 @@ Robinhood Chain WETH/USDG research used a separate three-day, 693,667-event
 sample and USDG-only Morpho execution. The optimized full-discovery ceiling was
 about `$10.40/day` at `$500` per side, `+/-50` ticks, and `10 bp`; the known-router
 subset was `$4.31/day`. Most of that result is LP fee income, while modeled hook
-profit of about `$1.03/day` is paid to swap callers. Base remains the stronger
+profit of about `$1.03/day` was modeled as paid to swap callers under the now
+retired rebate policy. Base remains the stronger
 modeled first target, but Robinhood has enough positive evidence for a separate
 `$250..$500`-per-side canary after its deployment path, fixed-block integration
 test, hook allowlisting, and live quote verification are complete. See
@@ -309,7 +295,7 @@ The former Base WETH/USDC canary was retired because its temporary one-round imp
 
 The current source fixes that specific implementation failure by performing repeated live-repriced rounds. It has not redeployed the retired canary. A new deployment still needs current-head simulation, a reviewed reference venue and lender configuration for each enabled direction, gas calibration, a calibrated `minNetProfit`, and a new runbook from the reviewed release commit.
 
-Current optimized runtime sizes are enforced by `npm run size`. `ArbHook` is `23,818` bytes, below the repository's `24,000`-byte budget and EIP-170; `V4ArbExecutor` is a separate immutable delegate-called execution module so the original route logic does not have to be deleted for deployability.
+Current optimized runtime sizes are enforced by `npm run size`. `ArbHook` is `23,644` bytes, leaving 356 bytes below the repository's `24,000`-byte budget and 932 bytes below EIP-170. `V4ArbExecutor` is `5,624` bytes and remains a separate immutable delegate-called execution module so the original route logic does not have to be deleted for deployability.
 
 `script/DeployArbHook.s.sol` deploys the pricing logic, lender adapters, CREATE2-mined hook, and its immutable executor. `script/ConfigureArbHook.s.sol` configures flash economics for one token but does not register reference pools, initialize v4 liquidity, or enable execution.
 

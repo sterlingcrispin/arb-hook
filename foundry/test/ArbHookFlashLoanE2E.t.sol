@@ -15,7 +15,6 @@ import {IERC3156FlashLender} from "../../contracts/interfaces/IERC3156FlashLende
 import {IUniswapV2Pair} from "../../contracts/interfaces/IUniswapV2Pair.sol";
 import {IHooks} from "@uniswap/v4-core/src/interfaces/IHooks.sol";
 import {IPoolManager} from "@uniswap/v4-core/src/interfaces/IPoolManager.sol";
-import {IMsgSender} from "@uniswap/v4-periphery/src/interfaces/IMsgSender.sol";
 import {TickMath} from "@uniswap/v3-core/contracts/libraries/TickMath.sol";
 
 contract MockERC3156Lender is IERC3156FlashLender {
@@ -367,12 +366,7 @@ contract ArbHookFlashLoanE2ETest is Test {
         hook.setHookMaxIterations(2);
 
         address router = makeAddr("router");
-        vm.mockCall(
-            router,
-            abi.encodeWithSelector(IMsgSender.msgSender.selector),
-            abi.encode(address(this))
-        );
-        uint256 beneficiaryBefore = token.balanceOf(address(this));
+        uint256 ownerBalanceBefore = token.balanceOf(address(this));
         poolManager.callAfterSwap(
             IHooks(address(hook)),
             router,
@@ -382,7 +376,7 @@ contract ArbHookFlashLoanE2ETest is Test {
         assertEq(lender.flashLoanCallCount(), 0, "unrelated callback requested flash loan");
         assertEq(
             token.balanceOf(address(this)),
-            beneficiaryBefore,
+            ownerBalanceBefore,
             "unrelated callback paid profit"
         );
     }
@@ -567,7 +561,7 @@ contract ArbHookFlashLoanE2ETest is Test {
         assertEq(token.balanceOf(address(this)), 20, "wrong route profit paid");
     }
 
-    function testProfitableLoanPaysBeneficiaryAndEmitsSettlement() public {
+    function testProfitableDirectLoanPaysHarnessOwnerAndEmitsSettlement() public {
         uint256 principal = 100_000e18;
         MockERC3156Lender lender = new MockERC3156Lender(
             IERC20(address(token)),
@@ -579,7 +573,7 @@ contract ArbHookFlashLoanE2ETest is Test {
 
         uint256 fee = lender.flashFee(address(token), principal);
         uint256 expectedNet = principal / 100 - fee;
-        uint256 beneficiaryBefore = token.balanceOf(address(this));
+        uint256 ownerBalanceBefore = token.balanceOf(address(this));
         vm.recordLogs();
         (bool success, int256 profit, uint256 iterations) = _runDirect();
         (bool found, Settlement memory settled) = _findLastSettlement(
@@ -591,7 +585,7 @@ contract ArbHookFlashLoanE2ETest is Test {
         assertEq(iterations, 1);
         assertEq(
             token.balanceOf(address(this)),
-            beneficiaryBefore + expectedNet
+            ownerBalanceBefore + expectedNet
         );
         assertTrue(found, "settlement missing");
         assertEq(settled.principal, principal);

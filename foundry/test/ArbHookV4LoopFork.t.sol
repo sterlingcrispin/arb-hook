@@ -119,15 +119,16 @@ contract ArbHookV4LoopForkTest is Test {
 
         hook.setHookMaxIterations(1);
         vm.recordLogs();
-        _swapTriggerPool(false, USDC_TRIGGER_AMOUNT, makeAddr("one-round beneficiary"));
+        _swapTriggerPool(false, USDC_TRIGGER_AMOUNT, makeAddr("ignored one-round recipient"));
         Settlement memory oneRound = _extractSettlement(vm.getRecordedLogs());
         uint256 oneRoundSpread = _remainingSpread();
 
         assertTrue(vm.revertToState(snapshot), "snapshot restore failed");
 
         hook.setHookMaxIterations(MULTI_ROUND_LIMIT);
+        address ignoredRecipient = makeAddr("ignored multi-round recipient");
         vm.recordLogs();
-        _swapTriggerPool(false, USDC_TRIGGER_AMOUNT, makeAddr("multi-round beneficiary"));
+        _swapTriggerPool(false, USDC_TRIGGER_AMOUNT, ignoredRecipient);
         Settlement memory multiRound = _extractSettlement(vm.getRecordedLogs());
         uint256 multiRoundSpread = _remainingSpread();
 
@@ -138,8 +139,13 @@ contract ArbHookV4LoopForkTest is Test {
         assertGt(multiRound.totalAmountSwapped, oneRound.totalAmountSwapped, "loop did not counter-trade more WETH");
         assertGt(multiRound.netProfit, oneRound.netProfit, "loop left profitable rounds unused");
         assertLt(multiRoundSpread, oneRoundSpread, "loop did not close more of the price gap");
+        assertEq(oneRound.beneficiary, address(hook), "one-round profit was redirected");
+        assertEq(multiRound.beneficiary, address(hook), "hook data redirected profit");
+        assertEq(IERC20(WETH).balanceOf(ignoredRecipient), 0, "hook-data address received profit");
         assertEq(IERC20(WETH).balanceOf(MORPHO_BLUE), lenderBalanceBefore, "Morpho was not repaid");
-        assertEq(IERC20(WETH).balanceOf(address(hook)), 0, "hook retained WETH");
+        assertEq(
+            IERC20(WETH).balanceOf(address(hook)), uint256(multiRound.netProfit), "wrong retained WETH revenue"
+        );
         assertEq(IERC20(USDC).balanceOf(address(hook)), 0, "hook retained USDC");
 
         emit log_named_uint("Base fork block", block.number);
@@ -153,7 +159,7 @@ contract ArbHookV4LoopForkTest is Test {
         emit log_named_uint("multi-round residual ticks", multiRoundSpread);
     }
 
-    function testReleaseEconomicsSettleBothLoanDirectionsToCanonicalCaller() public {
+    function testReleaseEconomicsRetainBothLoanDirectionsForOwner() public {
         if (!forkEnabled) {
             vm.skip(true, "set RUN_V4_LOOP_FORK=true and BASE_RPC_URL");
             return;
@@ -168,20 +174,22 @@ contract ArbHookV4LoopForkTest is Test {
         _swapTriggerPool(false, USDC_TRIGGER_AMOUNT, address(0));
         Settlement memory wethSettlement = _extractSettlement(vm.getRecordedLogs());
         assertEq(wethSettlement.tokenA, WETH, "USDC input did not borrow WETH");
-        assertEq(wethSettlement.beneficiary, address(this), "empty hookData did not resolve canonical caller");
+        assertEq(wethSettlement.beneficiary, address(hook), "empty hook data redirected WETH profit");
         assertGe(uint256(wethSettlement.netProfit), WETH_MIN_NET_PROFIT, "WETH profit floor not met");
         assertGt(wethSettlement.iterations, 1, "WETH route did not loop");
-        _assertNoResidue();
+        _assertAndWithdrawRevenue(WETH, uint256(wethSettlement.netProfit));
 
         assertTrue(vm.revertToState(initialState), "direction snapshot restore failed");
+        address ignoredRecipient = makeAddr("ignored release recipient");
         vm.recordLogs();
-        _swapTriggerPool(true, WETH_TRIGGER_AMOUNT, address(0));
+        _swapTriggerPool(true, WETH_TRIGGER_AMOUNT, ignoredRecipient);
         Settlement memory usdcSettlement = _extractSettlement(vm.getRecordedLogs());
         assertEq(usdcSettlement.tokenA, USDC, "WETH input did not borrow USDC");
-        assertEq(usdcSettlement.beneficiary, address(this), "empty hookData did not resolve canonical caller");
+        assertEq(usdcSettlement.beneficiary, address(hook), "hook data redirected USDC profit");
+        assertEq(IERC20(USDC).balanceOf(ignoredRecipient), 0, "hook-data address received profit");
         assertGe(uint256(usdcSettlement.netProfit), USDC_MIN_NET_PROFIT, "USDC profit floor not met");
         assertGt(usdcSettlement.iterations, 1, "USDC route did not loop");
-        _assertNoResidue();
+        _assertAndWithdrawRevenue(USDC, uint256(usdcSettlement.netProfit));
 
         emit log_named_decimal_uint("release WETH profit", uint256(wethSettlement.netProfit), 18);
         emit log_named_uint("release WETH iterations", wethSettlement.iterations);
@@ -313,9 +321,15 @@ contract ArbHookV4LoopForkTest is Test {
         revert("FlashLoanSettled not emitted");
     }
 
-    function _assertNoResidue() private view {
-        assertEq(IERC20(WETH).balanceOf(address(hook)), 0, "hook retained WETH");
-        assertEq(IERC20(USDC).balanceOf(address(hook)), 0, "hook retained USDC");
+    function _assertAndWithdrawRevenue(address token, uint256 expectedRevenue) private {
+        address otherToken = token == WETH ? USDC : WETH;
+        assertEq(IERC20(token).balanceOf(address(hook)), expectedRevenue, "wrong retained revenue");
+        assertEq(IERC20(otherToken).balanceOf(address(hook)), 0, "hook retained intermediate token");
+
+        uint256 ownerBalanceBefore = IERC20(token).balanceOf(address(this));
+        hook.removeTokens(token);
+        assertEq(IERC20(token).balanceOf(address(hook)), 0, "owner withdrawal left revenue");
+        assertEq(IERC20(token).balanceOf(address(this)), ownerBalanceBefore + expectedRevenue, "wrong owner withdrawal");
     }
 
     function _floorToSpacing(int24 tick, int24 spacing) private pure returns (int24 aligned) {
