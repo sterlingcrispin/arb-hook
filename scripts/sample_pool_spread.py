@@ -2,8 +2,9 @@
 
 The hook gates V3/V3 routes on the absolute tick difference between the two
 pools (minSpreadBps, currently 10). One tick is approximately one basis point.
-This is retained as evidence for why the production route now counter-trades its
-own v4 pool. It is not the current canary market sampler.
+This samples the external/external spread model used by the current scanner.
+Historical results remain evidence that a liquid pair can have no executable
+edge even when both venues have substantial volume and liquidity.
 
 A round trip must also clear both pool fees: Pancake 0.01% + Uniswap 0.05% =
 6 bps, plus gas. So a spread only represents a real opportunity when it exceeds
