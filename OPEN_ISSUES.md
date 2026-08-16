@@ -273,6 +273,23 @@ The initial deployment is owner-operated with a small set of manually verified, 
 
 ## Open Before Any Deployment
 
+72. Robinhood deployment path is not implemented or release-gated
+- Status: `REQUIRED BEFORE ROBINHOOD DEPLOYMENT`
+- Priority: `CRITICAL`
+- Summary: Three days of WETH/USDG flow support a small Robinhood canary, but
+  current deployment/configuration scripts, caller-resolution proof, and fork
+  gates are Base-specific. Morpho held about `$39.1m` USDG but only `0.01235`
+  WETH at block `38206281`, so the initial route must enable USDG borrowing only.
+- Action: add a chain-attested Robinhood deployment path, deploy a USDG Morpho
+  adapter, register the Uniswap v3 `1 bp` WETH/USDG reference, and prove the
+  real v4/v3/Morpho/caller path at a fixed Robinhood block. Calibrate gas and
+  economics at current head, then complete exact-hook allowlisting and verify
+  production quote selection before adding liquidity.
+- Economics: the optimized three-day ceiling was `$10.40/day` of LP excess at
+  `$500` per side, but the known-router subset was `$4.31/day` and neither is a
+  route-share forecast. Base remains the stronger modeled first deployment.
+- Detail: [`docs/ROBINHOOD_WETH_USDG_STRATEGY_REPLAY.md`](docs/ROBINHOOD_WETH_USDG_STRATEGY_REPLAY.md).
+
 71. Organic Uniswap routing requires hook allowlisting
 - Status: `REQUIRED BEFORE ROUTING-DEPENDENT DEPLOYMENT`
 - Priority: `CRITICAL`

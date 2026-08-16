@@ -273,6 +273,16 @@ See [`docs/BASE_WETH_USDC_STRATEGY_REPLAY.md`](docs/BASE_WETH_USDC_STRATEGY_REPL
 for methodology, reference-pool results, sensitivity tables, and the canary
 decision sequence.
 
+Robinhood Chain WETH/USDG research used a separate three-day, 693,667-event
+sample and USDG-only Morpho execution. The optimized full-discovery ceiling was
+about `$10.40/day` at `$500` per side, `+/-50` ticks, and `10 bp`; the known-router
+subset was `$4.31/day`. Most of that result is LP fee income, while modeled hook
+profit of about `$1.03/day` is paid to swap callers. Base remains the stronger
+modeled first target, but Robinhood has enough positive evidence for a separate
+`$250..$500`-per-side canary after its deployment path, fixed-block integration
+test, hook allowlisting, and live quote verification are complete. See
+[`docs/ROBINHOOD_WETH_USDG_STRATEGY_REPLAY.md`](docs/ROBINHOOD_WETH_USDG_STRATEGY_REPLAY.md).
+
 Historical exact inventory oracle:
 
 ```bash

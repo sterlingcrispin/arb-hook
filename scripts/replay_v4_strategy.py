@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Replay historical Base WETH/USDC flow through persistent candidate v4 pools.
+"""Replay historical WETH/quote-token flow through persistent candidate v4 pools.
 
 The replay uses observed swap output as the competing route, mutates candidate
 concentrated liquidity across transactions, and mirrors the production v4/v3
@@ -647,6 +647,7 @@ def write_results(output_dir: Path, metadata: dict, arguments: dict, rows: list[
     )
     json_path = output_dir / f"{stem}.json"
     csv_path = output_dir / f"{stem}.csv"
+    quote_symbol = metadata.get("quote_symbol", "USDC")
     payload = {
         "metadata": metadata,
         "arguments": arguments,
@@ -657,7 +658,7 @@ def write_results(output_dir: Path, metadata: dict, arguments: dict, rows: list[
             "Observed source output is the competing route; the model does not rerun every external router path.",
             "External venue state follows the historical tape and does not persist the candidate hook's market impact.",
             "The candidate position is fixed for the replay and is not automatically recentered or compounded.",
-            "Gas is a configurable USDC routing penalty; Base L1 and priority costs are not reconstructed per transaction.",
+            f"Gas is a configurable {quote_symbol} routing penalty; per-transaction L1 data and priority costs are not reconstructed.",
             "Arbitrage profit is paid to the swap beneficiary and is not LP revenue.",
         ],
         "results": rows,
