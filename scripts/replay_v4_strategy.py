@@ -30,10 +30,12 @@ REFERENCE_POOLS = {
     "uniswap_v3_5bp": 500,
     "uniswap_v3_30bp": 3_000,
     "pancake_v3_1bp": 100,
+    "pancake_v3_5bp": 500,
 }
 KNOWN_ROUTERS = {
     "0x2626664c2603336e57b271c5c0b26f421741e481",
     "0x6ff5693b99212da76ad316178a184ab56d299b43",
+    "0x8876789976decbfcbbbe364623c63652db8c0904",
 }
 
 
@@ -457,6 +459,7 @@ def replay(
     orders: list[Order],
     *,
     discovery_share_pct: float,
+    hook_direction: str,
     gas_penalty_usdc: float,
     min_spread_ticks: int,
     min_profit_usdc: float,
@@ -503,7 +506,9 @@ def replay(
         wins_by_direction[order.direction] += 1
         wins_by_source[order.source_pool] += 1
 
-        if config.hook_enabled:
+        if config.hook_enabled and (
+            hook_direction == "all" or order.direction == hook_direction
+        ):
             outcome = execute_hook(
                 candidate,
                 order,
@@ -531,6 +536,7 @@ def replay(
     return {
         **asdict(config),
         "discovery_share_pct": discovery_share_pct,
+        "hook_direction": hook_direction,
         "gas_penalty_usdc": gas_penalty_usdc,
         "min_profit_usdc": min_profit_usdc,
         "duration_days": duration_days,
@@ -626,7 +632,7 @@ def parse_numbers(value: str, cast) -> list:
 def discover_cache(path: Path | None) -> Path:
     if path is not None:
         return path
-    candidates = sorted((ROOT / "artifacts" / "flow-model").glob("swap-flow-*-events.jsonl.gz"))
+    candidates = sorted((ROOT / "artifacts" / "flow-model").glob("*swap-flow-*-events.jsonl.gz"))
     if not candidates:
         raise RuntimeError("no swap-flow event cache found")
     return candidates[-1]
@@ -693,13 +699,18 @@ def report(rows: list[dict]) -> None:
 def parser() -> argparse.ArgumentParser:
     command = argparse.ArgumentParser(description=__doc__)
     command.add_argument("--cache", type=Path)
-    command.add_argument("--references", default=",".join(REFERENCE_POOLS))
+    command.add_argument("--references")
     command.add_argument("--flow-filter", choices=("all", "single-pool", "canonical-router"), default="all")
     command.add_argument("--discovery-shares", default="100")
     command.add_argument("--capitals", default="100,500,1000,2000,4000,10000")
     command.add_argument("--ranges", default="50,100,250,500,1000")
     command.add_argument("--fees", default="1,10,100")
     command.add_argument("--hook-modes", choices=("on", "off", "both"), default="both")
+    command.add_argument(
+        "--hook-direction",
+        choices=("all", "usdc_to_weth", "weth_to_usdc"),
+        default="all",
+    )
     command.add_argument("--principal-cap-bps", "--principal-caps", dest="principal_caps", default="1000")
     command.add_argument("--max-iterations", dest="max_iterations", default="10")
     command.add_argument("--min-spread-ticks", type=int, default=10)
@@ -715,7 +726,15 @@ def parser() -> argparse.ArgumentParser:
 def main() -> int:
     args = parser().parse_args()
     verify_fixed_fork_calibration()
-    references = {item.strip() for item in args.references.split(",") if item.strip()}
+    cache = discover_cache(args.cache)
+    with gzip.open(cache, "rt") as handle:
+        cache_metadata = json.loads(next(handle))["metadata"]
+    available_pools = {pool["key"] for pool in cache_metadata["pools"]}
+    references = (
+        {item.strip() for item in args.references.split(",") if item.strip()}
+        if args.references
+        else available_pools & REFERENCE_POOLS.keys()
+    )
     unknown = references - REFERENCE_POOLS.keys()
     if not references or unknown:
         raise SystemExit(f"invalid references: {sorted(unknown)}")
@@ -733,7 +752,6 @@ def main() -> int:
     if args.start_day < 0 or (args.duration_days is not None and args.duration_days <= 0):
         raise SystemExit("replay window must be positive")
 
-    cache = discover_cache(args.cache)
     print(f"Building transaction tape from {cache}...", flush=True)
     metadata, orders = build_order_tape(cache, references, args.flow_filter)
     window_start = metadata["start_timestamp"] + round(args.start_day * 86_400)
@@ -786,6 +804,7 @@ def main() -> int:
                 config,
                 orders,
                 discovery_share_pct=discovery_share,
+                hook_direction=args.hook_direction,
                 gas_penalty_usdc=gas_penalty,
                 min_spread_ticks=args.min_spread_ticks,
                 min_profit_usdc=min_profit,
@@ -802,6 +821,7 @@ def main() -> int:
         "ranges": ranges,
         "fees_ppm": fees,
         "hook_modes": args.hook_modes,
+        "hook_direction": args.hook_direction,
         "principal_caps_bps": principal_caps,
         "max_iterations": max_iterations,
         "min_spread_ticks": args.min_spread_ticks,
