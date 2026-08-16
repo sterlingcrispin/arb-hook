@@ -234,6 +234,31 @@ The initial deployment is owner-operated with a small set of manually verified, 
 
 ## Open For Canary
 
+69. Fail-open execution can make automatic gas estimation suppress arbitrage
+- Status: `ACTIVE CANARY LIMITATION`
+- Priority: `HIGH`
+- Summary: The hook reserves gas and contains a failed arbitrage self-call so a
+  failed attempt cannot revert the triggering swap. That also gives transaction
+  gas estimators a cheaper successful branch: provide too little gas for the
+  arbitrage, let the self-call fail, and complete the ordinary swap.
+- Live evidence: Base transaction
+  `0xcf849ad5ccc4a845217ca2bd0eefd42a8e75dcedb9704d0d81ce2a3ff2f39a42`
+  had a `628,423` gas limit. Its hook self-call received `297,092` gas and ran
+  out of gas. The 10 USDC swap settled normally but emitted no
+  `FlashLoanSettled` event. Repeating from current state with a four-times Forge
+  gas-estimate multiplier produced a `1,817,320` gas limit and settled the
+  flash route in transaction
+  `0x34f3564ddab4bd7e3f742e5c4b83d866362009e18a81343ab9f61e463efdd2fd`.
+- Consequence: the controlled canary works with an explicit gas envelope, but a
+  generic router or wallet using its own low estimate can complete an eligible
+  swap without paying a rebate. No funds become stuck and the ordinary swap is
+  unaffected; organic execution reliability is not yet proven.
+- Decision: leave this accepted for the small research canary and require the
+  explicit runbook multiplier for controlled swaps. Resolve before claiming
+  reliable rebates for generic organic flow. A robust fix likely requires a
+  contract-level minimum-gas policy or materially cheaper execution, followed
+  by a new hook and pool deployment.
+
 20. Independent review of release commit
 - Status: `ACCEPTED FOR RESEARCH CANARY`
 - Priority: `CRITICAL`

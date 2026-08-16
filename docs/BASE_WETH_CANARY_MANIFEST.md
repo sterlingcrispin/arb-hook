@@ -260,3 +260,6 @@ Recheck these against current official deployment sources and confirm runtime co
 At Base block `50029886`, the shallow-profile proof borrowed `0.000812887664977685 WETH`, paid `0.000153429487453379 WETH`, paid zero lender fee, and measured about `420105` incremental gas for a 10 USDC trigger. The test did not manufacture an external-pool dislocation. Its own v4 swap created the captured edge.
 
 These values are a settlement proof, not expected production yield.
+
+The live deployment and controlled transaction receipts are recorded in
+`docs/BASE_WETH_CANARY_DEPLOYMENT.md`.
