@@ -9,7 +9,7 @@ uses the triggering v4 pool as its first leg; see `README.md` and
 Migrate `ArbHook` from inventory-funded arbitrage to flash-loan-funded arbitrage, so the hook does not need to hold principal inventory. The current production route resolves empty hook data through the canonical router's original caller and retains an exact packed recipient as an optional override.
 
 ## Context
-- Production execution is hook-triggered and best-effort via `_afterSwap -> attemptHookPoolInternal -> onFlashLoan`.
+- Production execution is hook-triggered via `_afterSwap -> attemptHookPoolInternal -> onFlashLoan`; route failure is isolated after an eligible caller supplies the configured gas budget.
 - The triggering v4 pool is counter-traded against the first registered matching concentrated-liquidity reference venue.
 - The older `_attemptAllInternal -> _runPair -> executeIterativeArb` path remains in `ArbHookHarness` for exact parity and flash-migration regression tests.
 - The pre-migration implementation used contract balances as principal in iterative sizing and callback repayment logic.
