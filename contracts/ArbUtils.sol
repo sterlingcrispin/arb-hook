@@ -39,6 +39,16 @@ abstract contract ArbUtils {
         int24 tickSpacing; // Only for V3 pools, 0 for V2
     }
 
+    struct FlashLoanExecutionParams {
+        address sellPool;
+        address buyPool;
+        address tokenA;
+        address tokenB;
+        uint256 maxIterations;
+        PoolType sellPoolType;
+        PoolType buyPoolType;
+    }
+
     // Base token -> all pools registered under that base token.
     mapping(address => PoolInfo[]) internal tokenPools;
     // Distinct base tokens in insertion order for the production scanner.

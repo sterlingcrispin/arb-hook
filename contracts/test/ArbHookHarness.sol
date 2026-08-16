@@ -41,9 +41,11 @@ contract ArbHookHarness is ArbHook {
 
     function attemptAllForTest(uint256 iterations) external onlyOwner returns (bool) {
         _setActiveProfitRecipient(owner());
-        bool success = _attemptAllViaSelfCall(iterations);
+        (bool callOk, bytes memory returndata) = address(this).call(
+            abi.encodeCall(this.attemptAllInternal, (iterations))
+        );
         _setActiveProfitRecipient(address(0));
-        return success;
+        return callOk && abi.decode(returndata, (bool));
     }
 
     function getPoolsForToken(

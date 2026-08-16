@@ -356,7 +356,7 @@ contract ArbHookFlashLoanE2ETest is Test {
         assertEq(iterations, 1, "expected one iteration");
     }
 
-    function testAfterSwapRunsRegisteredScannerWithConfiguredIterationLimit() public {
+    function testAfterSwapDoesNotScanUnrelatedRegisteredPools() public {
         uint256 principalCap = 100_000e18;
         MockERC3156Lender lender = new MockERC3156Lender(
             IERC20(address(token)),
@@ -379,9 +379,12 @@ contract ArbHookFlashLoanE2ETest is Test {
             bytes("")
         );
 
-        assertEq(lender.flashLoanCallCount(), 1, "callback did not request flash loan");
-        assertEq(hook.testLastMaxIterations(), 2, "callback replaced iterative bound");
-        assertGt(token.balanceOf(address(this)), beneficiaryBefore, "callback profit not paid");
+        assertEq(lender.flashLoanCallCount(), 0, "unrelated callback requested flash loan");
+        assertEq(
+            token.balanceOf(address(this)),
+            beneficiaryBefore,
+            "unrelated callback paid profit"
+        );
     }
 
     function testFeeAboveCapSkipsLoan() public {
