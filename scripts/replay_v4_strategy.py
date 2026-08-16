@@ -521,6 +521,7 @@ def replay(
     excess = final_value - hodl_value
     return {
         **asdict(config),
+        "gas_penalty_usdc": gas_penalty_usdc,
         "duration_days": duration_days,
         "orders": len(orders),
         "initial_price_usdc": initial_price,
@@ -620,7 +621,10 @@ def discover_cache(path: Path | None) -> Path:
 
 def write_results(output_dir: Path, metadata: dict, arguments: dict, rows: list[dict]) -> tuple[Path, Path]:
     output_dir.mkdir(parents=True, exist_ok=True)
-    stem = f"v4-strategy-replay-{metadata['start_block']}-{metadata['end_block']}"
+    stem = (
+        f"v4-strategy-replay-{metadata['start_block']}-{metadata['end_block']}-"
+        f"{metadata['replay_start_timestamp']}-{metadata['replay_end_timestamp']}"
+    )
     json_path = output_dir / f"{stem}.json"
     csv_path = output_dir / f"{stem}.csv"
     payload = {
@@ -652,13 +656,14 @@ def write_results(output_dir: Path, metadata: dict, arguments: dict, rows: list[
 
 def report(rows: list[dict]) -> None:
     print("\nTop candidate pools by LP excess versus holding the deposited assets")
-    print("hook fee   LP/side range routes/day arbs/day LP excess/day rebate/day")
+    print("hook fee   LP/side range gas    routes/day arbs/day LP excess/day rebate/day")
     for row in rows[:12]:
         print(
             f"{'on' if row['hook_enabled'] else 'off':>4} "
             f"{row['fee_ppm'] / 100:>4.2f}bp "
             f"${row['capital_per_side']:<7,.0f} "
             f"{row['half_range_ticks']:>5}t "
+            f"${row['gas_penalty_usdc']:<6,.3f} "
             f"{row['route_wins_per_day']:>10,.1f} "
             f"{row['arb_count_per_day']:>8,.1f} "
             f"${row['lp_excess_per_day_usdc']:>12,.3f} "
@@ -679,7 +684,9 @@ def parser() -> argparse.ArgumentParser:
     command.add_argument("--max-iterations", type=int, default=10)
     command.add_argument("--min-spread-ticks", type=int, default=10)
     command.add_argument("--min-profit-usdc", type=float, default=0.0)
-    command.add_argument("--gas-penalty-usdc", type=float, default=0.005)
+    command.add_argument("--gas-penalty-usdc", "--gas-penalties", dest="gas_penalties", default="0.005")
+    command.add_argument("--start-day", type=float, default=0.0)
+    command.add_argument("--duration-days", type=float)
     command.add_argument("--max-orders", type=int)
     command.add_argument("--output-dir", type=Path, default=ROOT / "artifacts" / "strategy-replay")
     return command
@@ -694,41 +701,59 @@ def main() -> int:
         raise SystemExit(f"invalid references: {sorted(unknown)}")
     if not 0 < args.principal_cap_bps <= 10_000 or args.max_iterations <= 0:
         raise SystemExit("principal cap and max iterations must be positive")
-    if args.gas_penalty_usdc < 0 or args.min_profit_usdc < 0:
+    gas_penalties = parse_numbers(args.gas_penalties, float)
+    if any(penalty < 0 for penalty in gas_penalties) or args.min_profit_usdc < 0:
         raise SystemExit("gas penalty and minimum profit cannot be negative")
+    if args.start_day < 0 or (args.duration_days is not None and args.duration_days <= 0):
+        raise SystemExit("replay window must be positive")
 
     cache = discover_cache(args.cache)
     print(f"Building transaction tape from {cache}...", flush=True)
     metadata, orders = build_order_tape(cache, references, args.flow_filter)
+    window_start = metadata["start_timestamp"] + round(args.start_day * 86_400)
+    window_end = (
+        window_start + round(args.duration_days * 86_400)
+        if args.duration_days is not None
+        else metadata["end_timestamp"] + 1
+    )
+    orders = [order for order in orders if window_start <= order.timestamp < window_end]
     if args.max_orders:
         orders = orders[: args.max_orders]
+    if len(orders) < 2:
+        raise RuntimeError("replay window contains fewer than two orders")
+    metadata = {
+        **metadata,
+        "replay_start_timestamp": orders[0].timestamp,
+        "replay_end_timestamp": orders[-1].timestamp,
+    }
     print(f"Replaying {len(orders):,} transaction-level orders...", flush=True)
 
     capitals = parse_numbers(args.capitals, float)
     ranges = parse_numbers(args.ranges, int)
     fees = parse_numbers(args.fees, int)
     hook_modes = [True, False] if args.hook_modes == "both" else [args.hook_modes == "on"]
-    configs = [
-        Config(capital, half_range, fee, enabled, args.principal_cap_bps, args.max_iterations)
+    scenarios = [
+        (Config(capital, half_range, fee, enabled, args.principal_cap_bps, args.max_iterations), gas_penalty)
         for capital in capitals
         for half_range in ranges
         for fee in fees
         for enabled in hook_modes
+        for gas_penalty in gas_penalties
     ]
 
     rows = []
-    for index, config in enumerate(configs, start=1):
+    for index, (config, gas_penalty) in enumerate(scenarios, start=1):
         print(
-            f"[{index}/{len(configs)}] ${config.capital_per_side:,.0f}/side, "
+            f"[{index}/{len(scenarios)}] ${config.capital_per_side:,.0f}/side, "
             f"{config.half_range_ticks} ticks, {config.fee_ppm / 100:.2f} bp, "
-            f"hook={'on' if config.hook_enabled else 'off'}",
+            f"hook={'on' if config.hook_enabled else 'off'}, gas=${gas_penalty:g}",
             flush=True,
         )
         rows.append(
             replay(
                 config,
                 orders,
-                gas_penalty_usdc=args.gas_penalty_usdc,
+                gas_penalty_usdc=gas_penalty,
                 min_spread_ticks=args.min_spread_ticks,
                 min_profit_usdc=args.min_profit_usdc,
             )
@@ -747,7 +772,9 @@ def main() -> int:
         "max_iterations": args.max_iterations,
         "min_spread_ticks": args.min_spread_ticks,
         "min_profit_usdc": args.min_profit_usdc,
-        "gas_penalty_usdc": args.gas_penalty_usdc,
+        "gas_penalties_usdc": gas_penalties,
+        "start_day": args.start_day,
+        "duration_days": args.duration_days,
         "orders": len(orders),
     }
     json_path, csv_path = write_results(args.output_dir, metadata, arguments, rows)
