@@ -17,6 +17,7 @@ import {
     BalanceDeltaLibrary
 } from "@uniswap/v4-core/src/types/BalanceDelta.sol";
 import {SwapParams} from "@uniswap/v4-core/src/types/PoolOperation.sol";
+import {IMsgSender} from "@uniswap/v4-periphery/src/interfaces/IMsgSender.sol";
 
 import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 import {Ownable2Step} from "@openzeppelin/contracts/access/Ownable2Step.sol";
@@ -41,7 +42,7 @@ import {IERC3156FlashLender} from "./interfaces/IERC3156FlashLender.sol";
 /// @title ArbHook
 /// @notice Uniswap v4 hook that counter-trades its triggering pool against a
 ///         registered concentrated-liquidity reference venue, repays flash
-///         principal, and pays or retains the realized profit.
+///         principal, and pays the realized profit to the swap initiator.
 contract ArbHook is
     ArbUtils,
     Ownable2Step,
@@ -79,6 +80,7 @@ contract ArbHook is
     uint32 internal hookGasLimit = 3_000_000;
 
     uint256 private constant FEE_BPS_DIVISOR = 10_000;
+    uint256 private constant CALLER_LOOKUP_GAS = 10_000;
     bytes32 private constant ERC3156_CALLBACK_SUCCESS =
         keccak256("ERC3156FlashBorrower.onFlashLoan");
     bytes4 private constant ATTEMPT_ALL_INTERNAL_SELECTOR =
@@ -164,16 +166,17 @@ contract ArbHook is
     }
 
     function afterSwap(
-        address,
+        address sender,
         PoolKey calldata key,
         SwapParams calldata params,
         BalanceDelta delta,
         bytes calldata hookData
     ) external onlyPoolManager returns (bytes4, int128) {
-        return _afterSwap(key, params, delta, hookData);
+        return _afterSwap(sender, key, params, delta, hookData);
     }
 
     function _afterSwap(
+        address sender,
         PoolKey calldata key,
         SwapParams calldata params,
         BalanceDelta delta,
@@ -196,9 +199,7 @@ contract ArbHook is
                 ) return (IHooks.afterSwap.selector, 0);
             }
 
-            address beneficiary = hookData.length == 0
-                ? address(this)
-                : _resolveProfitRecipient(hookData);
+            address beneficiary = _resolveProfitRecipient(sender, hookData);
             if (beneficiary != address(0)) {
                 _setActiveProfitRecipient(beneficiary);
                 _attemptHookPoolViaSelfCall(key, params.zeroForOne);
@@ -1123,8 +1124,6 @@ contract ArbHook is
         _tstore(_T_LAST_PROFIT, uint256(netProfit));
         _tstore(_T_LAST_ITERATIONS, iters);
 
-        // Empty hook data selects this contract, leaving profit available to
-        // the owner through removeTokens instead of paying a router recipient.
         if (params.beneficiary != address(this)) {
             IERC20(token).safeTransfer(params.beneficiary, uint256(netProfit));
         }
@@ -1997,8 +1996,19 @@ contract ArbHook is
     }
 
     function _resolveProfitRecipient(
+        address sender,
         bytes calldata hookData
-    ) internal pure returns (address recipient) {
+    ) internal view returns (address recipient) {
+        if (hookData.length == 0) {
+            // Canonical v4 routers expose the caller held in their execution lock.
+            try IMsgSender(sender).msgSender{gas: CALLER_LOOKUP_GAS}() returns (
+                address caller
+            ) {
+                return caller;
+            } catch {
+                return address(0);
+            }
+        }
         if (hookData.length != 20) return address(0);
         assembly ("memory-safe") {
             recipient := shr(96, calldataload(hookData.offset))

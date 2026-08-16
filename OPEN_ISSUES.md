@@ -140,7 +140,7 @@ The initial deployment is owner-operated with a small set of manually verified, 
 - Resolution: `afterSwap` now reads the post-swap v4 state, sizes a directional
   counter-trade, borrows the user's output token, trades the same v4 pool while
   PoolManager is unlocked, settles every v4 delta, closes through a registered
-  V3 reference, repays, and transfers realized profit to the packed beneficiary.
+  V3 reference, repays, and transfers realized profit to the resolved swap initiator.
   The older external/external scanner remains only in the parity harness.
 - Evidence: the current-head Base test performs an ordinary 100 USDC-to-WETH
   swap with no external displacement. At block `50018535` it borrowed
@@ -191,7 +191,7 @@ The initial deployment is owner-operated with a small set of manually verified, 
   reference venue, so both tests failed with no settlement event.
 - Resolution: removed the two stale tests and their helper. The production
   `ArbHookWethCanaryForkTest` already covers the canonical Universal Router,
-  packed beneficiary data, Morpho, the actual WETH/USDC route, and LP removal.
+  recipient resolution, Morpho, the actual WETH/USDC route, and LP removal.
   The remaining flash-fork gate passes with seven tests and four explicit
   calibration skips.
 
@@ -220,14 +220,15 @@ The initial deployment is owner-operated with a small set of manually verified, 
 
 ## Accepted By Design
 
-41. Net profit recipient depends on hook data
+41. Net profit recipient resolution
 - Status: `ACCEPTED`
-- Summary: Exact packed recipient data sends 100% of net profit to that address.
-  Empty hook data runs the same route but retains profit in the hook for the
-  current owner to withdraw. Malformed nonempty data remains fail-closed.
-- Decision: intended hybrid policy. Integrated swaps can rebate their users;
-  generic empty-data traffic generates owner-withdrawable WETH. The triggering
-  user's ordinary swap output is unchanged in either case.
+- Summary: Empty hook data resolves the original execution caller through
+  `IMsgSender.msgSender()` on the callback sender. Base's canonical Universal
+  Router supports this interface. Exact packed recipient data remains an
+  optional override, while failed lookups and malformed data remain fail-closed.
+- Decision: ordinary canonical-router swaps rebate their initiator without a
+  custom frontend. Unsupported routers skip arbitrage rather than misdirecting
+  profit. The triggering user's ordinary swap output remains unchanged.
 
 ## Deferred Outside Canary Threat Model
 
@@ -265,7 +266,7 @@ The initial deployment is owner-operated with a small set of manually verified, 
 - Priority: `CRITICAL`
 - Notes: `ArbHookWethCanaryForkTest` now runs against an unpinned Base head with
   canonical WETH/USDC V3 reference, WETH-bound Morpho adapter, canonical V4
-  PoolManager, PositionManager, Permit2, Universal Router, packed beneficiary,
+  PoolManager, PositionManager, Permit2, Universal Router caller resolution,
   LP mint, and LP burn. At Base block `50018535`, an ordinary 100 USDC swap
   created the edge itself. The route borrowed `0.008907102809547629 WETH`, paid
   zero lender fee, returned no residue, and paid `0.000427463494774361 WETH` to
@@ -496,8 +497,8 @@ The initial deployment is owner-operated with a small set of manually verified, 
 - Notes: Cold registration validation moved into the existing `ArbitrageLogic`
   dependency, live v4 state preparation moved into that stateless contract, and
   legacy scanner/flash dispatch moved to `ArbHookHarness` without deleting the
-  algorithms. `ArbHook` is 22,070 runtime bytes: 1,930 bytes below the
-  repository's 24,000-byte budget and 2,506 bytes below EIP-170.
+  algorithms. `ArbHook` is 22,202 runtime bytes: 1,798 bytes below the
+  repository's 24,000-byte budget and 2,374 bytes below EIP-170.
 
 7. Shared pool metadata removal
 - Status: `ADDRESSED`
@@ -554,9 +555,10 @@ The initial deployment is owner-operated with a small set of manually verified, 
 4. Production router recipient integration
 - Status: `ADDRESSED`
 - Notes: Fork tests send a real v4 swap through Base's canonical Universal Router
-  and PoolManager, then verify that the arb pays the beneficiary encoded as
-  exactly 20 packed bytes. The current-head WETH/USDC counter-trade passed
-  through the intended Morpho adapter with zero lender fee at block `50018535`.
+  and PoolManager with empty hook data, then verify that the arb pays the
+  router's original caller. The current-head WETH/USDC counter-trade passed
+  through the intended Morpho adapter with zero lender fee. An exact 20-byte
+  recipient remains covered as an optional override.
 
 5. CREATE2 deployment workflow
 - Status: `ADDRESSED`

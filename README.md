@@ -1,6 +1,6 @@
 # Arb Hook
 
-`ArbHook` is a Uniswap v4 `afterSwap` hook that captures the arbitrage edge created by a swap. An integrated router can direct the profit to the swapper; swaps with empty hook data leave it in the hook for the owner to withdraw.
+`ArbHook` is a Uniswap v4 `afterSwap` hook that captures the arbitrage edge created by a swap and sends the realized WETH profit to the swap initiator exposed by the router.
 
 The production route is not a generic background scanner. It uses the triggering v4 pool as the first arbitrage leg and one registered concentrated-liquidity pool for the same token pair as the reference and exit venue. Flash-loaned principal means the hook does not need to hold trading inventory.
 
@@ -15,7 +15,7 @@ For a USDC-to-WETH swap on the Base canary:
 5. `ArbitrageLogic` reads the post-swap v4 price, active liquidity, directional v4 fee, and the first registered matching V3 reference pool.
 6. If the directional spread clears both pool fees and `minSpreadBps`, the hook derives a bounded principal from the same liquidity-and-spread math used by the older arbitrage engine.
 7. The hook borrows WETH, swaps WETH to USDC against its own v4 pool in the direction opposite the user's swap, and swaps that USDC back to WETH on the external V3 pool.
-8. Realized balances must cover the loan, lender fee, and configured minimum profit. The loan is repaid atomically. A packed recipient receives all remaining WETH directly; with empty hook data, the WETH remains in the hook for owner withdrawal.
+8. Realized balances must cover the loan, lender fee, and configured minimum profit. The loan is repaid atomically, then the original router caller receives all remaining WETH directly. An exact 20-byte recipient remains available as an optional override.
 9. Any discovery, loan, swap, repayment, or profitability failure reverts only the isolated arbitrage attempt. The user's original swap continues.
 
 This changes the source of the edge. The hook is no longer waiting for two unrelated external pools to disagree at the exact moment an unrelated v4 swap arrives. The triggering swap itself creates the price movement, and the hook counter-trades it in the same transaction.
@@ -75,17 +75,19 @@ The swapper's ordinary output is identical in all cases; hook profit is an addit
 
 ## Profit Recipient
 
-An integrated router can pass exactly 20 packed bytes in v4 `hookData`:
+Normal swaps require no custom hook data. The `afterSwap` callback identifies the router through its `sender` argument, then calls the standard v4 periphery `IMsgSender.msgSender()` interface. Base's canonical Universal Router returns the address that initiated its active execution lock. For a wallet calling the router directly, that is the wallet; for a smart account, it is the smart account.
+
+The hook caps this external lookup at 10,000 gas. If empty hook data arrives from a custom router that does not implement `IMsgSender`, returns zero, or fails the lookup, the hook skips arbitrage rather than guessing with `tx.origin` or paying the wrong address. An aggregator that calls the Universal Router from its own contract is the router initiator and must forward any received rebate itself.
+
+Exactly 20 packed bytes remain an optional explicit-recipient override:
 
 ```solidity
 abi.encodePacked(beneficiary)
 ```
 
-Exactly 20 bytes naming a nonzero address sends all net WETH profit directly to that address. Empty data still runs the arbitrage but retains the profit in the hook; the current owner can withdraw it with `removeTokens(WETH)`. Malformed nonempty data and a packed zero address skip the attempt. The hook does not use `tx.origin` or infer a user from the router-facing `sender`.
+Malformed nonempty data and a packed zero address skip the attempt.
 
-Normal swap output is delivered by the router and is not changed by `afterSwap`. When a recipient is supplied, arbitrage profit is a separate transfer from the hook to that address. When data is empty, `FlashLoanSettled.beneficiary` is the hook address and the profit remains there until an owner withdrawal.
-
-A public frontend or aggregator that provides empty hook data generates owner-withdrawable profit rather than a user rebate. The repository's controlled Universal Router script defaults the packed recipient to its payer and remains the validated direct-rebate path.
+Normal swap output is delivered by the router and is not changed by `afterSwap`. Arbitrage profit is an additional WETH transfer to the resolved recipient. The repository's controlled Universal Router script deliberately sends empty hook data, and the Base fork gate proves that the canonical router resolves its caller without a custom frontend.
 
 ## Runtime Boundary
 
@@ -112,7 +114,7 @@ Runtime boundaries remain strict:
 - both swap legs enforce the bounded square-root price limits produced by sizing;
 - the V4 nested swap must settle all `PoolManager` deltas before returning;
 - intermediate-token balance must be restored exactly;
-- flash repayment and paid or retained profit are checked from realized balances;
+- flash repayment and profit payout are checked from realized balances;
 - donated hook balances are excluded from principal sizing and cannot be consumed by the route; and
 - owner renunciation is disabled so the kill switch cannot be destroyed.
 
@@ -168,9 +170,9 @@ npm run size
 Current result:
 
 - 36 local tests pass;
-- `ArbHook` runtime is `22,070` bytes;
-- project-budget margin is `1,930` bytes; and
-- EIP-170 margin is `2,506` bytes.
+- `ArbHook` runtime is `22,202` bytes;
+- project-budget margin is `1,798` bytes; and
+- EIP-170 margin is `2,374` bytes.
 
 Current-head production path:
 

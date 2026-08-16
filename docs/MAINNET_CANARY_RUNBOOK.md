@@ -11,7 +11,7 @@ The first canary contains:
 - WETH principal borrowed through the Morpho Blue adapter;
 - USDC-to-WETH trigger swaps only;
 - one bounded V4/V3 counter-trade per trigger;
-- all realized WETH profit paid to a supplied recipient or retained for owner withdrawal when hook data is empty; and
+- all realized WETH profit paid to the original caller reported by the canonical Universal Router; and
 - no unrelated markets, V2 routes, or additional reference venues.
 
 The user's swap creates the edge by moving the hooked v4 pool. `afterSwap` counter-trades that same pool and exits through Uniswap v3 in the same transaction.
@@ -25,7 +25,7 @@ Do not broadcast until:
 5. LP caps, swap size, 49 USDC trigger floor, 1 WETH principal ceiling, and WETH profit floor are recorded.
 6. The owner can set `hookMaxIterations` to zero.
 7. The LP wallet can simulate burning the position.
-8. The controlled swap has a current minimum WETH output and exactly 20 bytes of beneficiary hook data.
+8. The controlled swap has a current minimum WETH output and uses the canonical Universal Router with empty hook data.
 9. The operator records whether this is an integration/rebate study or assumes an external backrun as its economic baseline.
 
 ## Release Gates
@@ -42,7 +42,7 @@ The size gate requires every production runtime below 24,000 bytes. The current 
 
 | Contract | Runtime bytes |
 |---|---:|
-| `ArbHook` | `22070` |
+| `ArbHook` | `22202` |
 | `ArbitrageLogic` | `19678` |
 | `AaveV3ERC3156Adapter` | `2590` |
 | `MorphoERC3156Adapter` | `2144` |
@@ -77,7 +77,7 @@ BASE_RPC_URL="$BASE_RPC_URL" \
 forge test --match-contract ArbHookWethCanaryForkTest -vv
 ```
 
-This test uses canonical Base v4 periphery, Morpho, and Uniswap v3. It initializes the hooked pool, submits an ordinary 100 USDC swap, captures the edge created by that swap, repays, validates both direct-recipient and empty-data treasury settlement, and removes liquidity. It does not force an unrelated external dislocation.
+This test uses canonical Base v4 periphery, Morpho, and Uniswap v3. It initializes the hooked pool, submits an ordinary 100 USDC swap, captures the edge created by that swap, repays, proves that empty hook data pays the Universal Router's original caller, validates the optional explicit-recipient override, and removes liquidity. It does not force an unrelated external dislocation.
 
 It also compares no backrun, a matched external V4/V3 backrun, and the hook using distinct accounts. At pinned block `50018808`, the backrunner and hook each captured `0.804926 USDC` and left the LP at the same value; the recipient was the searcher in one case and the beneficiary in the other. With no backrun, the LP retained an additional `0.813727 USDC`. Treat this as MEV redistribution, not operator revenue, unless organic backrunning is established as the correct baseline.
 
@@ -229,7 +229,6 @@ Use a small protected USDC-to-WETH swap. Obtain a current quote and choose an ex
 ```bash
 PRIVATE_KEY="$SWAP_KEY" \
 HOOK="$HOOK" \
-BENEFICIARY="$SWAP_BENEFICIARY" \
 USDC_SWAP_AMOUNT_RAW="$USDC_SWAP_AMOUNT_RAW" \
 MIN_WETH_OUT_WEI="$MIN_WETH_OUT_WEI" \
 forge script script/SwapArbHookCanary.s.sol:SwapArbHookCanary \
@@ -262,27 +261,29 @@ A successful `FlashLoanSettled` event must show:
 - fee is zero;
 - iterations equals `1`;
 - net profit meets the configured WETH floor; and
-- beneficiary matches the 20 packed hook-data bytes.
+- beneficiary matches the wallet derived from `$SWAP_KEY`.
 
 Also verify Morpho's WETH balance is unchanged after the transaction and the hook retains neither WETH nor USDC.
 
-`netProfit` is route profit paid to the event's beneficiary address. That address is the hook itself on the empty-data treasury path. It is not proof that the LP/operator gained value. When the operator is also LP and ultimate recipient, the transfer is internal and external fees plus gas remain as net costs.
+`netProfit` is route profit paid to the event's beneficiary address. On the controlled empty-data path, that address is the Universal Router's original caller. It is not proof that the LP/operator gained value. When the operator is also LP and recipient, the transfer is internal and external fees plus gas remain as net costs.
 
 No event is expected below the configured 49 USDC actual-input floor or when an eligible swap cannot clear pool fees and the minimum-profit floor. Do not deliberately create an unsafe mainnet trade merely to force a loan. Reproduce the exact intended LP and swap parameters on a current fork first.
 
-## Beneficiary And Router Requirement
+## Profit Recipient
 
-For a direct user rebate, the router must pass exactly:
+No custom frontend or hook data is required for a direct caller using Base's canonical Universal Router. During `afterSwap`, the hook calls `IMsgSender.msgSender()` on the callback's router address and pays the returned execution initiator.
+
+An exact packed address remains an optional override for controlled integrations:
 
 ```solidity
 abi.encodePacked(beneficiary)
 ```
 
-Empty data executes the attempt and retains any net WETH profit in the hook for the current owner. A packed zero address or malformed nonempty data skips the attempt. There is no fallback to the router or `tx.origin`.
+If an empty-data swap uses a custom router that does not implement `IMsgSender`, fails the lookup, or returns zero, the hook skips the attempt. A packed zero address or malformed nonempty data also skips. There is no `tx.origin` fallback.
 
-Normal swap output is returned by the router and the hook returns zero V4 delta. With a packed recipient, arbitrage profit is a separate WETH transfer from the hook. With empty data, `FlashLoanSettled.beneficiary` is the hook and the retained WETH can be withdrawn with owner-only `removeTokens(WETH)`.
+Normal swap output is returned by the router and the hook returns zero V4 delta. Arbitrage profit is a separate WETH transfer from the hook to the resolved recipient.
 
-Do not assume the public Uniswap interface or an aggregator will route through the canary pool or encode custom hook data. Empty-data traffic uses the owner-treasury path; the repository script is the validated direct-user-rebate path until a frontend explicitly integrates it.
+The caller lookup does not guarantee that the public Uniswap interface or an aggregator will discover and route through the canary pool. It only removes the need for recipient-specific calldata once a canonical Universal Router swap reaches the pool. An aggregator contract that initiates the Universal Router execution receives the rebate and is responsible for forwarding it to its user.
 
 ## Stop And Withdraw
 

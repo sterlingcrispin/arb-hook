@@ -36,14 +36,13 @@ contract SwapArbHookCanary is Script {
 
         uint256 privateKey = vm.envUint("PRIVATE_KEY");
         address payer = vm.addr(privateKey);
-        address beneficiary = vm.envOr("BENEFICIARY", payer);
         ArbHook hook = ArbHook(payable(vm.envAddress("HOOK")));
         uint256 amountIn = vm.envUint("USDC_SWAP_AMOUNT_RAW");
         uint256 amountOutMinimum = vm.envUint("MIN_WETH_OUT_WEI");
 
         if (address(hook).code.length == 0 || address(hook.poolManager()) != POOL_MANAGER) revert InvalidHook();
         if (
-            beneficiary == address(0) || amountIn == 0 || amountIn > type(uint128).max || amountOutMinimum == 0
+            amountIn == 0 || amountIn > type(uint128).max || amountOutMinimum == 0
                 || amountOutMinimum > type(uint128).max || IERC20(USDC).balanceOf(payer) < amountIn
         ) revert InvalidSwap();
 
@@ -59,7 +58,7 @@ contract SwapArbHookCanary is Script {
             zeroForOne: false,
             amountIn: uint128(amountIn),
             amountOutMinimum: uint128(amountOutMinimum),
-            hookData: abi.encodePacked(beneficiary)
+            hookData: bytes("")
         });
 
         bytes[] memory actionParams = new bytes[](3);
@@ -77,7 +76,6 @@ contract SwapArbHookCanary is Script {
         );
 
         uint256 payerWethBefore = IERC20(WETH).balanceOf(payer);
-        uint256 beneficiaryWethBefore = IERC20(WETH).balanceOf(beneficiary);
         vm.startBroadcast(privateKey);
         if (!IERC20(USDC).approve(PERMIT2, amountIn)) revert ApprovalFailed();
         IPermit2SwapAllowance(PERMIT2).approve(USDC, UNIVERSAL_ROUTER, uint160(amountIn), type(uint48).max);
@@ -86,6 +84,5 @@ contract SwapArbHookCanary is Script {
         vm.stopBroadcast();
 
         console2.log("Payer WETH increase", IERC20(WETH).balanceOf(payer) - payerWethBefore);
-        console2.log("Beneficiary WETH increase", IERC20(WETH).balanceOf(beneficiary) - beneficiaryWethBefore);
     }
 }

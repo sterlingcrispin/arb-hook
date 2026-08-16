@@ -10,7 +10,7 @@ The two venues have different roles in one WETH/USDC round trip:
 2. That swap raises the WETH price in the v4 pool relative to the external reference.
 3. `afterSwap` borrows WETH and counter-trades the same v4 pool from WETH to USDC.
 4. The hook trades the received USDC back to WETH in canonical Uniswap v3.
-5. The hook repays WETH. Packed recipient data sends net profit directly to that address; empty data retains it for the hook owner.
+5. The hook repays WETH and sends net profit to the original caller reported by the canonical Universal Router. No custom hook data is required.
 
 The v4 pool is therefore both the trigger and the first arbitrage leg. The external V3 pool supplies the comparison price and second leg. No unrelated market and no pre-existing external/external spread is required.
 
@@ -200,17 +200,16 @@ Recheck these against current official deployment sources and confirm runtime co
 - canonical WETH/USDC V3 reference registration;
 - WETH-bound Morpho borrowing and exact zero-fee repayment;
 - full-range v4 LP mint and withdrawal;
-- a normal 100 USDC-to-WETH trigger with packed beneficiary data;
-- a normal 100 USDC-to-WETH trigger with empty data that retains WETH in the hook;
+- a normal 100 USDC-to-WETH trigger with an optional packed recipient override;
+- a normal 100 USDC-to-WETH trigger with empty data that pays the Universal Router's original caller;
 - a pool-and-direction-specific 49 USDC actual-input gate before discovery;
 - adaptive direction and principal selection without a supplied hint;
 - bounded execution price limits on both swap legs;
 - a counter-swap against the same v4 pool that triggered the hook;
 - a Uniswap V3 WETH exit leg;
 - positive WETH beneficiary payout;
-- owner-only withdrawal of empty-data profit;
 - exact redistribution parity against a matched external V4/V3 backrunner; and
-- zero residual WETH and USDC after direct payout or owner treasury withdrawal.
+- zero residual WETH and USDC after payout.
 
 At Base block `50018535`, the proof borrowed `0.008907102809547629 WETH`, paid `0.000427463494774361 WETH`, paid zero lender fee, and measured about `419546` incremental gas. The test did not manufacture an external-pool dislocation. Its own v4 swap created the captured edge.
 
