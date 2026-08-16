@@ -205,6 +205,23 @@ The ten-round result captures roughly 94% of the 31-round high-gas diagnostic's
 profit at this one snapshot. That percentage is not portable to another pool,
 liquidity profile, trigger size, or block.
 
+Pinned v4 liquidity, fee, trigger-size, iteration, and principal-cap sweeps:
+
+```bash
+BASE_RPC_URL="$BASE_RPC_URL" python3 scripts/sweep_v4_pool.py \
+  --fork-block 50052773
+```
+
+The standard 140-scenario grid and a 144-scenario low-fee/depth frontier showed:
+
+- the deep Uniswap v3 WETH/USDC pool was consistently a better reference and execution venue than the shallow pool;
+- with ordinary `1 bp` and `5 bp` v4 fees, no tested route beat the deep `5 bp` v3 route after execution gas, even after paying the hook profit to the swapper;
+- the closest standard row used roughly `$2,000` per side in a `+/-2.5%` range, a `1 bp` fee, and a `$100` trigger; it completed three rounds and remained `1.31 bp` worse after the rebate;
+- a frontier row with roughly `$4,000` per side, a `+/-2.5%` range, a `0.01 bp` fee, and a `$150` trigger beat the benchmark by `0.08 bp` before and `0.60 bp` after its rebate, but captured only `52.3%` of the backrun opportunity; and
+- increasing the tested principal cap above `5%` did not change tuned results. Ten rounds generally balanced capture and gas better than fifteen.
+
+The frontier margin is small enough that costs omitted by the harness, including Base L1 data and priority fees, may erase it, so it is not a deployment recommendation. Results are per triggering swap, not a daily-profit forecast. The ignored JSON and CSV artifacts preserve every measured balance, gas value, backrun, and derived metric locally.
+
 Historical exact inventory oracle:
 
 ```bash
