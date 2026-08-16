@@ -113,16 +113,21 @@ contract V4ArbExecutor {
     }
 
     function _execute(ExecutionParams memory execution) private returns (bool, int256, uint256, uint256) {
+        IERC20 start = IERC20(execution.startToken);
         IERC20 intermediate = IERC20(execution.intermediateToken);
+        uint256 startAtEntry = start.balanceOf(address(this));
+        if (startAtEntry < execution.config.currentStartTokenBalance) {
+            revert ArbErrors.FlashArbitrageExecutionFailed();
+        }
+        uint256 protectedStartBalance = startAtEntry - execution.config.currentStartTokenBalance;
         uint256 intermediateAtEntry = intermediate.balanceOf(address(this));
         ArbitrageLogic.IterationConfig memory config = execution.config;
         LoopState memory state;
 
         for (uint256 i; i < execution.maxIterations;) {
-            config.currentStartTokenBalance = execution.config.currentStartTokenBalance;
-            if (state.profit > 0) {
-                config.currentStartTokenBalance += uint256(state.profit);
-            }
+            uint256 currentBalance = start.balanceOf(address(this));
+            if (currentBalance <= protectedStartBalance) break;
+            config.currentStartTokenBalance = currentBalance - protectedStartBalance;
 
             (bool completed, int256 profit, uint256 paid) = _executeIteration(execution, config);
             state.amountSwapped += paid;
