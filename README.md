@@ -222,6 +222,32 @@ The standard 140-scenario grid and a 144-scenario low-fee/depth frontier showed:
 
 The frontier margin is small enough that costs omitted by the harness, including Base L1 data and priority fees, may erase it, so it is not a deployment recommendation. Results are per triggering swap, not a daily-profit forecast. The ignored JSON and CSV artifacts preserve every measured balance, gas value, backrun, and derived metric locally.
 
+Observed Base WETH/USDC swap-flow model:
+
+```bash
+BASE_RPC_URL="$BASE_RPC_URL" python3 scripts/model_swap_flow.py \
+  --days 7 --end-block 50054168 \
+  --sweep-results artifacts/flow-frontier-low
+```
+
+The fixed sample covers Base blocks `49751768..50054168`, or exactly seven days from `2026-08-09 16:28:03 UTC` through `2026-08-16 16:28:03 UTC`. The script decodes the exact USDC leg from `654,320` swap events across seven WETH/USDC pools:
+
+| Pool | Swaps/day | USDC volume/day | Median | p90 | p99 | Swaps >= $100/day |
+|---|---:|---:|---:|---:|---:|---:|
+| Uniswap v3 1 bp | 31,645 | $2.09m | $8.25 | $218 | $583 | 6,668 |
+| Uniswap v3 5 bp | 10,841 | $5.49m | $9.31 | $1,428 | $5,707 | 3,990 |
+| Uniswap v3 30 bp | 3,756 | $23.24m | $37.09 | $11,826 | $123,665 | 1,684 |
+| Pancake v3 1 bp | 28,368 | $23.91m | $355 | $2,322 | $5,462 | 19,257 |
+| Aerodrome Slipstream 5 bp A | 8,482 | $40.77m | $2,422 | $10,679 | $37,401 | 7,831 |
+| Aerodrome Slipstream 5 bp B | 8,316 | $17.24m | $749 | $5,414 | $17,301 | 6,445 |
+| Uniswap v4 5 bp comparison pool | 2,067 | $46,418 | $2.37 | $58.46 | $137 | 52.4 |
+
+The model uses empirical size quantiles and threshold rates rather than forcing the multimodal flow into one distribution. It records descriptive log-space moments and a Pareto tail above each pool's p90, but those fits are secondary. Hourly arrivals are modeled by a method-of-moments negative binomial when variance exceeds the mean. The deep Uniswap v3 5 bp pool has a Fano factor of `91.06`, so swaps arrive in bursts; a constant-rate or Poisson simulation would materially understate quiet and busy periods.
+
+The deep 5 bp pool is an upper-flow reference, not a forecast for a new pool. Randomly receiving `0.1%`, `1%`, or `5%` of its observed flow would imply about `10.8`, `108.4`, or `542.0` swaps/day, with `4.0`, `39.9`, or `199.5` swaps of at least `$100`. The live v4 comparison is a more conservative empirical reference: it saw `52.4` swaps of at least `$100` per day, `5.4` of at least `$250`, `0.9` of at least `$500`, and none of at least `$1,000` during the sample.
+
+Coupling the observed USDC-to-WETH flow to the `$10..$1,000` fork sweep exposes the routing bottleneck. At a hypothetical `1%` share, the best tested LP-PnL row (`$10,000` per side, `+/-500` ticks, `0.10 bp`) covers `19.6` sampled trades/day, is quote-and-gas competitive for `8.6`, and both wins the route and executes an arb for only about `1.4`. Its reset-per-trigger estimate is roughly `$0.11/day` of LP PnL and `$0.014/day` of user rebate. Those values are not a deployment forecast: routing share is unknown, historical events mix user flow with routers and searchers, LP inventory does not reset after each real swap, and the current sweep models only USDC-to-WETH.
+
 Historical exact inventory oracle:
 
 ```bash
