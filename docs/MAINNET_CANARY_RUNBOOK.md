@@ -238,7 +238,7 @@ forge test --match-contract ArbHookWethCanaryForkTest \
   --match-test testSweepSwapSizeAgainstLiveReference -vv
 ```
 
-## 6. Prove Normal Settlement While Disabled
+## 6. Simulate Normal Settlement While Disabled
 
 Use a small protected USDC-to-WETH swap. Obtain a current quote and choose an explicit minimum WETH output. Never use `1` as production slippage protection.
 
@@ -251,7 +251,11 @@ forge script script/SwapArbHookCanary.s.sol:SwapArbHookCanary \
   --rpc-url "$BASE_RPC_URL"
 ```
 
-Simulate first, then broadcast. Confirm exact USDC spend, normal WETH output, and no `FlashLoanSettled` event while disabled.
+Review the simulation and confirm exact USDC spend, normal WETH output, and no
+`FlashLoanSettled` event while disabled. Do not broadcast this preliminary swap:
+on a $100-per-side pool, even a small real swap changes the starting state used
+to calibrate the enabled canary. If any organic or operator swap reaches the pool
+after the sweep, rerun the sweep from that current state before enabling.
 
 ## 7. Enable And Run One Canary Swap
 
@@ -264,7 +268,12 @@ cast send "$HOOK" "setHookMaxIterations(uint256)" 1 \
 
 `1` is an enable value. The production route performs one bounded V4/V3 counter-trade; it does not execute one legacy scanner iteration.
 
-Read back `getExecutionConfig()`, then simulate the intended protected USDC-to-WETH swap with the same script. Supply enough gas for the 3,000,000-gas attempt ceiling plus normal router settlement. A low-gas attempt may be skipped while the user swap still settles.
+Read back `getExecutionConfig()`, then simulate the intended protected
+USDC-to-WETH swap with the same script. If that simulation still matches the
+calibrated route, broadcast the same protected 10 USDC swap. This should be the
+pool's first real swap. Supply enough gas for the 3,000,000-gas attempt ceiling
+plus normal router settlement. A low-gas attempt may be skipped while the user
+swap still settles.
 
 A successful `FlashLoanSettled` event must show:
 

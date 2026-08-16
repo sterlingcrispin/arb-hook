@@ -212,9 +212,11 @@ The canary sequence is:
 2. Register the canonical Uniswap V3 WETH/USDC reference with `script/RegisterArbHookCanaryPools.s.sol`.
 3. Configure the WETH Morpho adapter, economic ceilings, and 10 USDC trigger floor with `script/ConfigureArbHookCanary.s.sol`.
 4. Initialize and fund the hooked v4 WETH/USDC pool with `script/InitializeArbHookCanaryPool.s.sol`.
-5. Prove a protected swap while disabled.
+5. Simulate a protected swap while disabled, but do not broadcast it and move the freshly initialized pool before the calibrated canary.
 6. Set `hookMaxIterations` to `1` and run a protected USDC-to-WETH canary swap.
 7. Disable execution and burn the LP position if settlement or economics are not acceptable.
+
+If any swap reaches the new pool between initialization and the controlled canary, rerun the current-state sweep before enabling. The trigger math depends on the pool state left by every prior swap.
 
 Disable execution before adding capital to an existing position. Use `script/AddArbHookCanaryLiquidity.s.sol`, rerun the current-state sweep at the proposed total depth, and recalibrate the trigger, principal, and profit limits before enabling again.
 
