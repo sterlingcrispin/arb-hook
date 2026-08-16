@@ -38,7 +38,7 @@ Migrate `ArbHook` from inventory-funded arbitrage to flash-loan-funded arbitrage
 ## Deployment Size
 - Live v4 state preparation lives in `ArbitrageLogic`, and legacy scanner/flash dispatch lives only in the test harness.
 - `npm run size` enforces a 24,000-byte runtime budget for every production contract, preserving margin below EIP-170.
-- `ArbHook` is currently 22,070 runtime bytes.
+- `ArbHook` is currently 22,202 runtime bytes.
 - Further gas optimization remains separate from flash-loan correctness and parity work.
 
 ## Refactor Constraints (Critical)
@@ -61,7 +61,7 @@ Migrate `ArbHook` from inventory-funded arbitrage to flash-loan-funded arbitrage
 1. `afterSwap` observes the triggering pool after the user's price movement.
 2. The user's output token is the flash principal and profit token.
 3. Route sizing compares the same v4 pair with the first registered matching V3 reference pool.
-4. The loan callback counter-trades the v4 pool, closes through V3, repays, and either pays the encoded recipient or retains profit on empty hook data.
+4. The loan callback counter-trades the v4 pool, closes through V3, repays, and pays the router-reported initiator or an optional encoded recipient.
 5. Realized balance checks remain authoritative and all speculative work stays behind the self-call failure boundary.
 6. Legacy external/external traversal and iterative execution remain available through test-only harness entrypoints.
 
@@ -80,13 +80,15 @@ Production telemetry:
 - Historical inventory telemetry exists only in the legacy test harness.
 
 ## Beneficiary Resolution Strategy
-`_afterSwap` pays a beneficiary when `hookData` contains exactly the 20 bytes
-produced by `abi.encodePacked(beneficiary)`. Empty data selects the hook itself,
-so profit accrues for owner withdrawal without blocking generic router traffic.
+For empty `hookData`, `_afterSwap` asks the callback sender for its original
+caller through `IMsgSender.msgSender()`. Canonical Universal Router swaps
+therefore pay their execution initiator without custom calldata. Exactly 20
+bytes produced by `abi.encodePacked(beneficiary)` remain an optional override.
 
 Rules:
 - Do not use `tx.origin`.
-- Do not fall back to the router-facing `sender`.
+- Do not pay the router-facing `sender` itself when caller lookup fails.
+- If empty hook data cannot resolve a nonzero original caller, do not execute flash arb.
 - If nonempty hook data is malformed or resolves to zero, do not execute flash arb.
 - Emit chosen recipient in logs for observability.
 
@@ -234,7 +236,7 @@ Acceptance:
 - Mitigation: start with one known ERC-3156-compliant lender and strict integration tests.
 
 2. Beneficiary misattribution with routers
-- Mitigation: hookData override support + clear integration contract expectations.
+- Mitigation: canonical `IMsgSender` lookup, optional hook-data override, and fail-closed behavior for unsupported routers.
 
 3. Profit accounting mismatch (gross vs net)
 - Mitigation: explicit dual accounting and assertions in tests.
@@ -281,7 +283,7 @@ Acceptance:
 ## Definition of Done
 - Contract can execute arb without prefunded principal inventory.
 - Successful flow always repays principal + fee atomically.
-- Net profits are transferred to the resolved recipient or retained for owner withdrawal on empty hook data.
+- Net profits are transferred to the resolved recipient; unresolved empty-data swaps skip the attempt.
 - Unauthorized flash callbacks are rejected.
 - Flash-loan test suite is green and designated as release gate.
 - Cached fork sequence test preserves all reference routes and positive net settlement.

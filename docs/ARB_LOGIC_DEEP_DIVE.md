@@ -38,12 +38,12 @@ The production path does not traverse `supportedTokens` or compare unrelated ext
 1. Require the immutable PoolManager as caller.
 2. Require `hookMaxIterations != 0`.
 3. Read the configured minimum input for the triggering PoolId and direction. If the actual negative input leg in `BalanceDelta` is smaller, return immediately.
-4. Resolve empty hook data to the hook treasury, or decode an exact 20-byte recipient. Malformed nonempty data returns immediately.
-5. Store the payout or retention address in transient storage.
+4. For empty hook data, ask the callback sender for its original caller through `IMsgSender.msgSender()`. An exact 20-byte recipient remains an optional override. A failed caller lookup, malformed nonempty data, or zero recipient returns immediately.
+5. Store the payout address in transient storage.
 6. Call `attemptHookPoolInternal` with an explicit gas budget.
 7. Clear the transient beneficiary and return zero hook delta.
 
-The input gate is pool- and direction-specific because the useful threshold depends on that pool's liquidity and state. For `zeroForOne`, it compares the magnitude of `amount0`; otherwise it compares `amount1`. Values are therefore raw units of the input currency. Zero disables the gate. This check deliberately uses PoolManager's realized delta rather than trusting router calldata or `amountSpecified`, and it runs before beneficiary decoding, reference reads, lender quoting, or a self-call.
+The input gate is pool- and direction-specific because the useful threshold depends on that pool's liquidity and state. For `zeroForOne`, it compares the magnitude of `amount0`; otherwise it compares `amount1`. Values are therefore raw units of the input currency. Zero disables the gate. This check deliberately uses PoolManager's realized delta rather than trusting router calldata or `amountSpecified`, and it runs before recipient resolution, reference reads, lender quoting, or a self-call.
 
 The self-call is important. Any deep revert from pool lookup, lender quoting, V4 settlement, V3 execution, repayment, or profit enforcement is caught by the low-level call and does not bubble into the user's swap.
 
