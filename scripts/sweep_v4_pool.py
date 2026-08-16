@@ -38,7 +38,7 @@ REFERENCES = {
     "deep": (DEEP_REFERENCE, 500),
     "shallow": (SHALLOW_REFERENCE, 200),
 }
-BATCH_SIZE = 24
+DEFAULT_BATCH_SIZE = 24
 
 RAW_FIELDS = [
     "success",
@@ -213,10 +213,12 @@ def run_chunk(rows: list[Scenario], rpc_url: str, block_number: int) -> list[dic
     return parsed
 
 
-def run_batch(rows: list[Scenario], rpc_url: str, block_number: int) -> list[dict[str, int | str]]:
+def run_batch(
+    rows: list[Scenario], rpc_url: str, block_number: int, batch_size: int
+) -> list[dict[str, int | str]]:
     if not rows:
         return []
-    chunks = [rows[offset : offset + BATCH_SIZE] for offset in range(0, len(rows), BATCH_SIZE)]
+    chunks = [rows[offset : offset + batch_size] for offset in range(0, len(rows), batch_size)]
     parsed = []
     for index, chunk in enumerate(chunks, start=1):
         print(
@@ -561,6 +563,7 @@ def parser() -> argparse.ArgumentParser:
     command.add_argument("--trades", default="10,50,100", help="trigger sizes in USDC")
     command.add_argument("--base-iterations", type=int, default=10)
     command.add_argument("--base-cap-bps", type=int, default=1000)
+    command.add_argument("--batch-size", type=int, default=DEFAULT_BATCH_SIZE)
     command.add_argument("--max-quote-gap-bps", type=float, default=30.0)
     command.add_argument("--tune-top", type=int, default=4)
     command.add_argument("--tune-iterations", default="5,10,15")
@@ -576,6 +579,9 @@ def main() -> int:
     if not args.rpc_url:
         print("BASE_RPC_URL or --rpc-url is required", file=sys.stderr)
         return 2
+    if args.batch_size <= 0:
+        print("--batch-size must be positive", file=sys.stderr)
+        return 2
     if args.quick:
         args.capitals = "100,2000"
         args.ranges = "0,250"
@@ -585,13 +591,13 @@ def main() -> int:
     block_number = resolve_block(args.rpc_url, args.fork_block)
     base_fee_wei = block_base_fee(args.rpc_url, block_number)
     structural = make_structural_rows(args)
-    raw_results = run_batch(structural, args.rpc_url, block_number)
+    raw_results = run_batch(structural, args.rpc_url, block_number, args.batch_size)
     results = [derive(row, base_fee_wei) for row in raw_results]
 
     if not args.no_tune and args.tune_top > 0:
         tuning = tuning_rows(results, args, start_id=len(structural) + 1)
         if tuning:
-            raw_tuning = run_batch(tuning, args.rpc_url, block_number)
+            raw_tuning = run_batch(tuning, args.rpc_url, block_number, args.batch_size)
             results.extend(derive(row, base_fee_wei) for row in raw_tuning)
 
     report(results, args.max_quote_gap_bps)

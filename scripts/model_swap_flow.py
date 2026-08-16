@@ -426,7 +426,7 @@ def flow_stats(events: list[dict], start_time: int, end_time: int) -> dict:
         ],
         "arrival_model": count_model(hourly),
         "size_model": {
-            "body": "lognormal",
+            "body": "descriptive_log_space_moments",
             "log_mu": statistics.fmean(log_sizes) if log_sizes else 0.0,
             "log_sigma": statistics.stdev(log_sizes) if len(log_sizes) > 1 else 0.0,
             "tail": "pareto",
@@ -488,7 +488,10 @@ def interpolate(points: list[dict], size: float, field: str) -> float | None:
 def weight_sweep(path: Path, source_events: list[dict], duration_days: float) -> list[dict]:
     if not path.exists():
         return []
-    rows = json.loads(path.read_text())["results"]
+    paths = [path] if path.is_file() else sorted(path.rglob("v4-parameter-sweep-*.json"))
+    rows = []
+    for result_path in paths:
+        rows.extend(json.loads(result_path.read_text())["results"])
     groups = defaultdict(list)
     for row in rows:
         if not row.get("success") or row.get("reference_name") != "deep":
@@ -511,6 +514,7 @@ def weight_sweep(path: Path, source_events: list[dict], duration_days: float) ->
         modeled = 0
         route_winners = 0
         arb_events = 0
+        route_arb_events = 0
         totals = defaultdict(float)
         competitive = defaultdict(float)
         for event in source_events:
@@ -531,6 +535,8 @@ def weight_sweep(path: Path, source_events: list[dict], duration_days: float) ->
                 arb_events += 1
             if route_gap <= 0:
                 route_winners += 1
+                if metrics["rebate_usdc"] > 0:
+                    route_arb_events += 1
                 for field, value in metrics.items():
                     competitive[field] += value
         pool_fee, tick_spacing, capital, half_range = key
@@ -547,6 +553,7 @@ def weight_sweep(path: Path, source_events: list[dict], duration_days: float) ->
                 "modeled_events_per_day": modeled / duration_days,
                 "arb_events_per_day": arb_events / duration_days,
                 "route_winner_events_per_day": route_winners / duration_days,
+                "route_arb_events_per_day": route_arb_events / duration_days,
                 "route_winner_fraction_of_modeled": route_winners / modeled if modeled else 0.0,
                 **{f"unconstrained_{field}_per_day": value / duration_days for field, value in totals.items()},
                 **{f"route_winner_{field}_per_day": value / duration_days for field, value in competitive.items()},
@@ -649,14 +656,22 @@ def print_report(payload: dict) -> None:
 
     weighted = payload.get("sweep_weighting", [])
     if weighted:
-        print("\nExisting frontier sweep weighted by deep-pool USDC->WETH trades in its $50-$150 modeled slice")
-        print("fee   LP/side range  covered/day route-win/day LP PnL/day at 1% observed share")
+        share = 0.01
+        minimum = min(row["modeled_trade_min_usdc"] for row in weighted)
+        maximum = max(row["modeled_trade_max_usdc"] for row in weighted)
+        print(
+            "\nFrontier sweep weighted by deep-pool USDC->WETH trades "
+            f"from ${minimum:,.0f}-${maximum:,.0f} at 1% share"
+        )
+        print("fee   LP/side range  covered/day route-win/day LP PnL/day")
         for row in weighted[:8]:
-            pnl = row.get("route_winner_lp_pnl_usdc_per_day", 0) * 0.01
+            covered = row["modeled_events_per_day"] * share
+            route_winners = row["route_winner_events_per_day"] * share
+            pnl = row.get("route_winner_lp_pnl_usdc_per_day", 0) * share
             print(
                 f"{row['pool_fee_bps']:>4.2f}bp ${row['lp_usdc_per_side']:<7,.0f} "
-                f"{row['half_range_ticks']:>5}t {row['modeled_events_per_day']:>11,.0f} "
-                f"{row['route_winner_events_per_day']:>13,.0f} ${pnl:>10,.2f}"
+                f"{row['half_range_ticks']:>5}t {covered:>11,.1f} "
+                f"{route_winners:>13,.1f} ${pnl:>10,.2f}"
             )
         executing = sorted(
             (row for row in weighted if row["arb_events_per_day"] > 0),
@@ -664,13 +679,15 @@ def print_report(payload: dict) -> None:
             reverse=True,
         )
         print("\nRoute-competitive rows that also execute the hook")
-        print("fee   LP/side range  arb/day route-win/day rebate/day at 1% observed share")
+        print("fee   LP/side range  arb/day route+arb/day rebate/day at 1% share")
         for row in executing[:8]:
-            rebate = row.get("route_winner_rebate_usdc_per_day", 0) * 0.01
+            arb_events = row["arb_events_per_day"] * share
+            route_arb_events = row["route_arb_events_per_day"] * share
+            rebate = row.get("route_winner_rebate_usdc_per_day", 0) * share
             print(
                 f"{row['pool_fee_bps']:>4.2f}bp ${row['lp_usdc_per_side']:<7,.0f} "
-                f"{row['half_range_ticks']:>5}t {row['arb_events_per_day']:>8,.0f} "
-                f"{row['route_winner_events_per_day']:>13,.0f} ${rebate:>10,.3f}"
+                f"{row['half_range_ticks']:>5}t {arb_events:>8,.1f} "
+                f"{route_arb_events:>13,.1f} ${rebate:>10,.3f}"
             )
 
 
@@ -695,6 +712,7 @@ def parser() -> argparse.ArgumentParser:
         "--sweep-results",
         type=Path,
         default=ROOT / "artifacts" / "frontier" / "v4-parameter-sweep-50052773.json",
+        help="sweep JSON file or directory containing sweep JSON files",
     )
     return command
 
@@ -796,6 +814,7 @@ def main() -> int:
             "Observed swaps include organic routing, split routes, arbitrage, and bot flow; event logs do not identify user intent.",
             "Market-order proxy takes the largest observed WETH/USDC leg per transaction and is not a perfect de-duplication.",
             "A new pool's routing share is not inferred; projections use explicit hypothetical shares.",
+            "Swap sizes are multimodal; empirical quantiles and thresholds should be preferred over the descriptive log-space moments.",
             "Sweep weighting linearly interpolates isolated reset-per-trigger fork scenarios and does not model evolving LP inventory.",
             "Sweep economics cover only trade sizes present in the selected result file; larger and smaller swaps are excluded.",
             "Sweep weighting uses only USDC-to-WETH events because the selected sweep does not model the reverse direction.",
