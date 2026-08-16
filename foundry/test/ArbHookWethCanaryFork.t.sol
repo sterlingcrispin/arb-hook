@@ -31,6 +31,24 @@ interface IPermit2Allowance {
     function approve(address token, address spender, uint160 amount, uint48 expiration) external;
 }
 
+
+/// @notice The shape an aggregator or relayer takes: a contract that forwards a
+///         user's swap to Universal Router. Universal Router's msgSender() reports
+///         its immediate caller, which is this contract rather than the end user.
+contract ForwardingRouter {
+    function forward(
+        address universalRouter,
+        address usdc,
+        address permit2,
+        bytes calldata commands,
+        bytes[] calldata inputs
+    ) external {
+        IERC20(usdc).approve(permit2, type(uint256).max);
+        IPermit2Allowance(permit2).approve(usdc, universalRouter, type(uint160).max, type(uint48).max);
+        IUniversalRouter(universalRouter).execute(commands, inputs, block.timestamp);
+    }
+}
+
 contract ArbHookWethCanaryForkTest is Test {
     using PoolIdLibrary for PoolKey;
 
@@ -274,6 +292,69 @@ contract ArbHookWethCanaryForkTest is Test {
         );
         emit log_named_decimal_uint("hook borrowed WETH", settled.principal, 18);
         emit log_named_decimal_uint("matched V4 input WETH", settled.totalAmountSwapped, 18);
+    }
+
+    /// @notice Shows where profit lands when the swap arrives through an
+    ///         intermediate contract rather than directly from the end user.
+    /// @dev Universal Router's msgSender() reports its immediate caller. With an
+    ///      aggregator, relayer or smart-account router in between, that is the
+    ///      intermediate contract, not the person who initiated the trade.
+    function testEmptyHookDataPaysIntermediateRouterNotEndUser() public {
+        if (!forkEnabled) {
+            vm.skip(true, "set RUN_WETH_CANARY_FORK=true and BASE_RPC_URL");
+            return;
+        }
+
+        address endUser = makeAddr("end user behind an aggregator");
+        ForwardingRouter forwarder = new ForwardingRouter();
+        assertTrue(IERC20(USDC).transfer(address(forwarder), 100e6), "forwarder funding failed");
+
+        IV4Router.ExactInputSingleParams memory swapParams =
+            IV4Router.ExactInputSingleParams(triggerKey, false, 100e6, 1, bytes(""));
+        bytes[] memory actionParams = new bytes[](3);
+        actionParams[0] = abi.encode(swapParams);
+        actionParams[1] = abi.encode(triggerKey.currency1, uint256(100e6));
+        actionParams[2] = abi.encode(triggerKey.currency0, uint256(1));
+        bytes[] memory commandInputs = new bytes[](1);
+        commandInputs[0] = abi.encode(
+            abi.encodePacked(
+                bytes1(uint8(Actions.SWAP_EXACT_IN_SINGLE)),
+                bytes1(uint8(Actions.SETTLE_ALL)),
+                bytes1(uint8(Actions.TAKE_ALL))
+            ),
+            actionParams
+        );
+
+        vm.recordLogs();
+        vm.prank(endUser);
+        forwarder.forward(
+            UNIVERSAL_ROUTER,
+            USDC,
+            PERMIT2,
+            abi.encodePacked(bytes1(uint8(Commands.V4_SWAP))),
+            commandInputs
+        );
+        Settlement memory settled = _extractSettlement(vm.getRecordedLogs());
+
+        emit log_named_address("end user who initiated the swap", endUser);
+        emit log_named_address("address actually paid", settled.beneficiary);
+        emit log_named_decimal_uint("profit paid (WETH)", uint256(settled.netProfit), 18);
+        emit log_named_decimal_uint("end user WETH received", IERC20(WETH).balanceOf(endUser), 18);
+        emit log_named_decimal_uint(
+            "forwarder WETH held", IERC20(WETH).balanceOf(address(forwarder)), 18
+        );
+
+        assertGt(settled.netProfit, 0, "arbitrage was not profitable");
+        assertEq(settled.beneficiary, address(forwarder), "profit did not follow msgSender()");
+        assertEq(IERC20(WETH).balanceOf(endUser), 0, "end user unexpectedly received profit");
+        // The forwarder holds the swap output, which an aggregator would normally
+        // pass on, plus the arbitrage profit, which it has no reason to expect.
+        // ForwardingRouter has no sweep, so both are unrecoverable here.
+        assertGe(
+            IERC20(WETH).balanceOf(address(forwarder)),
+            uint256(settled.netProfit),
+            "profit is stranded in the intermediate contract"
+        );
     }
 
     function testSweepSwapSizeAgainstLiveReference() public {
