@@ -24,7 +24,7 @@ import math
 import os
 import subprocess
 import sys
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass
 from decimal import Decimal, getcontext
 from pathlib import Path
 from typing import Iterable
@@ -38,6 +38,7 @@ REFERENCES = {
     "deep": (DEEP_REFERENCE, 500),
     "shallow": (SHALLOW_REFERENCE, 200),
 }
+BATCH_SIZE = 24
 
 RAW_FIELDS = [
     "success",
@@ -57,6 +58,7 @@ RAW_FIELDS = [
     "initial_lp_weth",
     "initial_lp_usdc",
     "benchmark_weth_out",
+    "benchmark_swap_gas",
     "user_weth_out",
     "baseline_swap_gas",
     "hook_swap_gas",
@@ -172,10 +174,9 @@ def scenario_env(rows: list[Scenario], rpc_url: str, block_number: int) -> dict[
     return env
 
 
-def run_batch(rows: list[Scenario], rpc_url: str, block_number: int) -> list[dict[str, int | str]]:
+def run_chunk(rows: list[Scenario], rpc_url: str, block_number: int) -> list[dict[str, int | str]]:
     if not rows:
         return []
-    print(f"Running {len(rows)} fork scenarios at Base block {block_number}...", flush=True)
     output = run_command(
         [
             "forge",
@@ -209,6 +210,21 @@ def run_batch(rows: list[Scenario], rpc_url: str, block_number: int) -> list[dic
         parsed.append(row)
     if len(parsed) != len(rows):
         raise RuntimeError(f"expected {len(rows)} results, received {len(parsed)}")
+    return parsed
+
+
+def run_batch(rows: list[Scenario], rpc_url: str, block_number: int) -> list[dict[str, int | str]]:
+    if not rows:
+        return []
+    chunks = [rows[offset : offset + BATCH_SIZE] for offset in range(0, len(rows), BATCH_SIZE)]
+    parsed = []
+    for index, chunk in enumerate(chunks, start=1):
+        print(
+            f"Running fork batch {index}/{len(chunks)} ({len(chunk)} scenarios) "
+            f"at Base block {block_number}...",
+            flush=True,
+        )
+        parsed.extend(run_chunk(chunk, rpc_url, block_number))
     return parsed
 
 
@@ -248,10 +264,27 @@ def derive(row: dict[str, int | str], base_fee_wei: int) -> dict[str, int | floa
     user_output_usdc = int(row["user_weth_out"]) * int(row["hook_final_price_x18"]) // 10**30
     gas_overhead = max(0, int(row["hook_swap_gas"]) - int(row["baseline_swap_gas"]))
     gas_overhead_usdc = gas_overhead * base_fee_wei * int(row["hook_final_price_x18"]) // 10**30
+    route_gas_delta = int(row["hook_swap_gas"]) - int(row["benchmark_swap_gas"])
+    route_gas_delta_usdc = (
+        route_gas_delta * base_fee_wei * int(row["hook_final_price_x18"]) // 10**30
+    )
     quote_gap_bps = (
         (int(row["benchmark_weth_out"]) - int(row["user_weth_out"]))
         * 10_000
         / int(row["benchmark_weth_out"])
+    )
+    quote_gap_usdc = (
+        (int(row["benchmark_weth_out"]) - int(row["user_weth_out"]))
+        * int(row["hook_final_price_x18"])
+        // 10**30
+    )
+    effective_quote_gap_bps = (quote_gap_usdc + route_gas_delta_usdc) * 10_000 / int(
+        row["trade_usdc"]
+    )
+    user_all_in_gap_bps = (
+        (quote_gap_usdc + route_gas_delta_usdc - hook_profit_usdc)
+        * 10_000
+        / int(row["trade_usdc"])
     )
     opportunity = int(row["hook_profit"]) + int(row["residual_backrun_profit"])
 
@@ -265,6 +298,8 @@ def derive(row: dict[str, int | str], base_fee_wei: int) -> dict[str, int | floa
             "hook_vs_baseline_lp_usdc_raw": hook_value - baseline_value,
             "hook_lp_return_bps": (hook_value - initial_value) * 10_000 / initial_value,
             "quote_gap_bps": quote_gap_bps,
+            "effective_quote_gap_bps": effective_quote_gap_bps,
+            "user_all_in_gap_bps": user_all_in_gap_bps,
             "hook_profit_usdc_raw": hook_profit_usdc,
             "residual_profit_usdc_raw": residual_profit_usdc,
             "baseline_backrun_profit_usdc_raw": baseline_profit_usdc,
@@ -278,6 +313,8 @@ def derive(row: dict[str, int | str], base_fee_wei: int) -> dict[str, int | floa
             ),
             "gas_overhead": gas_overhead,
             "gas_overhead_usdc_raw": gas_overhead_usdc,
+            "route_gas_delta": route_gas_delta,
+            "route_gas_delta_usdc_raw": route_gas_delta_usdc,
             "rebate_after_incremental_gas_usdc_raw": hook_profit_usdc - gas_overhead_usdc,
             "user_effective_loss_usdc_raw": (
                 int(row["trade_usdc"]) - user_output_usdc - hook_profit_usdc
@@ -330,7 +367,7 @@ def tuning_rows(
         row
         for row in ranked
         if row.get("success")
-        and float(row["quote_gap_bps"]) <= args.max_quote_gap_bps
+        and float(row["effective_quote_gap_bps"]) <= args.max_quote_gap_bps
         and int(row["hook_profit"]) > 0
     ]
     candidates.sort(key=lambda row: int(row["hook_profit_usdc_raw"]), reverse=True)
@@ -356,7 +393,20 @@ def tuning_rows(
     iterations = parse_numbers(args.tune_iterations)
     caps = parse_numbers(args.tune_cap_bps)
     rows = []
-    existing = set()
+    existing = {
+        (
+            row["reference_pool"],
+            row["reference_fee"],
+            row["pool_fee"],
+            row["tick_spacing"],
+            row["lp_usdc_per_side"],
+            row["half_range_ticks"],
+            row["trade_usdc"],
+            row["max_iterations"],
+            row["principal_cap_bps"],
+        )
+        for row in ranked
+    }
     for candidate, max_iterations, cap_bps in itertools.product(selected, iterations, caps):
         scenario = Scenario(
             id=start_id + len(rows),
@@ -370,9 +420,17 @@ def tuning_rows(
             max_iterations=max_iterations,
             principal_cap_bps=cap_bps,
         )
-        key = asdict(scenario)
-        key.pop("id")
-        frozen = tuple(key.values())
+        frozen = (
+            scenario.reference_pool,
+            scenario.reference_fee,
+            scenario.pool_fee,
+            scenario.tick_spacing,
+            scenario.lp_usdc_per_side,
+            scenario.half_range_ticks,
+            scenario.trade_usdc,
+            scenario.max_iterations,
+            scenario.principal_cap_bps,
+        )
         if frozen not in existing:
             existing.add(frozen)
             rows.append(scenario)
@@ -392,20 +450,20 @@ def print_table(title: str, rows: Iterable[dict[str, int | float | str]], limit:
     rows = list(rows)[:limit]
     print(f"\n{title}")
     print(
-        "ref      LP/side range    fee trade iter/cap quote    LP PnL  rebate     net residual capture gas+"
+        "ref      LP/side range      fee trade iter/cap route all-in   LP PnL  rebate residual capture gas+"
     )
     for row in rows:
         print(
             f"{str(row['reference_name']):8} "
             f"${int(row['lp_usdc_per_side']) / 1e6:<7.0f} "
             f"{range_name(row):8} "
-            f"{int(row['pool_fee']) / 10000:>4.2f}% "
+            f"{int(row['pool_fee']) / 100:>6.2f}bp "
             f"${int(row['trade_usdc']) / 1e6:<5.0f} "
             f"{int(row['max_iterations']):>2}/{int(row['principal_cap_bps']) / 100:>2.0f}% "
-            f"{float(row['quote_gap_bps']):>6.1f}bp "
+            f"{float(row['effective_quote_gap_bps']):>5.1f} "
+            f"{float(row['user_all_in_gap_bps']):>6.1f}bp "
             f"${money(row['hook_lp_pnl_usdc_raw']):>7} "
             f"${money(row['hook_profit_usdc_raw']):>6} "
-            f"${money(row['rebate_after_incremental_gas_usdc_raw']):>6} "
             f"${money(row['residual_profit_usdc_raw']):>7} "
             f"{float(row['capture_pct']):>6.1f}% "
             f"{int(row['gas_overhead']) / 1e6:>4.2f}M"
@@ -415,25 +473,31 @@ def print_table(title: str, rows: Iterable[dict[str, int | float | str]], limit:
 def report(results: list[dict[str, int | float | str]], max_quote_gap_bps: float) -> None:
     failures = [row for row in results if not row.get("success")]
     successful = [row for row in results if row.get("success")]
-    eligible = [row for row in successful if float(row["quote_gap_bps"]) <= max_quote_gap_bps]
+    eligible = [
+        row for row in successful if float(row["effective_quote_gap_bps"]) <= max_quote_gap_bps
+    ]
     eligible_arbs = [row for row in eligible if int(row["hook_profit"]) > 0]
+    route_winners = [row for row in eligible_arbs if float(row["effective_quote_gap_bps"]) <= 0]
+    user_winners = [row for row in eligible_arbs if float(row["user_all_in_gap_bps"]) <= 0]
 
     print(
         f"\nCompleted {len(successful)}/{len(results)} scenarios; {len(eligible)} are within "
-        f"{max_quote_gap_bps:g} bps of the deep-pool quote and {len(eligible_arbs)} of those execute an arb."
+        f"{max_quote_gap_bps:g} bps of the deep-pool route after execution gas and {len(eligible_arbs)} "
+        f"of those execute an arb. {len(route_winners)} beat the benchmark before rebate; "
+        f"{len(user_winners)} beat it after rebate."
     )
     if failures:
         print(f"Invalid/reverted scenarios: {len(failures)}")
 
     print_table(
-        "Best quote-competitive LP return per triggering trade",
+        "Best near-benchmark LP return per triggering trade",
         sorted(eligible_arbs, key=lambda row: float(row["hook_lp_return_bps"]), reverse=True),
     )
     print_table(
-        "Largest quote-competitive user rebate after incremental execution gas",
+        "Largest near-benchmark user rebate",
         sorted(
             eligible_arbs,
-            key=lambda row: int(row["rebate_after_incremental_gas_usdc_raw"]),
+            key=lambda row: int(row["hook_profit_usdc_raw"]),
             reverse=True,
         ),
     )
@@ -444,6 +508,10 @@ def report(results: list[dict[str, int | float | str]], max_quote_gap_bps: float
             key=lambda row: float(row["capture_pct"]),
             reverse=True,
         ),
+    )
+    print_table(
+        "Closest all-in user execution to the deep-pool benchmark",
+        sorted(eligible_arbs, key=lambda row: float(row["user_all_in_gap_bps"])),
     )
 
 
@@ -466,9 +534,10 @@ def write_results(
         },
         "limitations": [
             "Per-trigger economics only; no trade-frequency or daily-volume model.",
-            "Quote competitiveness compares direct output with the deep Uniswap V3 5 bp pool.",
+            "Route competitiveness compares output and execution gas with the deep Uniswap V3 5 bp pool.",
             "Backruns optimize across the configured reference and deep benchmark, not every Base venue.",
             "Gas conversion uses Base execution base fee and excludes L1 data fee and priority fee.",
+            "The harness uses minNetProfit=1 wei to expose raw economics; ranking deducts estimated gas off-chain.",
         ],
         "results": results,
     }

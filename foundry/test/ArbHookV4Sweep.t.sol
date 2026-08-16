@@ -112,6 +112,7 @@ contract ArbHookV4SweepTest is Test {
         uint256 initialLpWeth;
         uint256 initialLpUsdc;
         uint256 benchmarkWethOut;
+        uint256 benchmarkSwapGas;
         uint256 userWethOut;
         uint256 baselineSwapGas;
         uint256 hookSwapGas;
@@ -232,7 +233,7 @@ contract ArbHookV4SweepTest is Test {
         result.initialPriceX18 = _wethPriceX18(BENCHMARK_POOL);
 
         uint256 initialState = vm.snapshotState();
-        result.benchmarkWethOut = _swapV3(BENCHMARK_FEE, USDC, WETH, config.tradeUsdc);
+        (result.benchmarkWethOut, result.benchmarkSwapGas) = _swapV3(BENCHMARK_FEE, USDC, WETH, config.tradeUsdc);
         assertTrue(vm.revertToState(initialState), "quote snapshot restore failed");
 
         hook.setHookMaxIterations(0);
@@ -361,7 +362,7 @@ contract ArbHookV4SweepTest is Test {
 
     function _swapV3(uint24 fee, address tokenIn, address tokenOut, uint256 amountIn)
         private
-        returns (uint256 amountOut)
+        returns (uint256 amountOut, uint256 gasUsed)
     {
         amountOut = ISwapRouter02(SWAP_ROUTER)
             .exactInputSingle(
@@ -375,6 +376,7 @@ contract ArbHookV4SweepTest is Test {
                     sqrtPriceLimitX96: 0
                 })
             );
+        gasUsed = vm.lastCallGas().gasTotalUsed;
     }
 
     function _bestBackrun(PoolKey memory key, Config calldata config, uint256 maxAmount)
@@ -594,6 +596,7 @@ contract ArbHookV4SweepTest is Test {
         line = _append(line, result.initialLpWeth);
         line = _append(line, result.initialLpUsdc);
         line = _append(line, result.benchmarkWethOut);
+        line = _append(line, result.benchmarkSwapGas);
         line = _append(line, result.userWethOut);
         line = _append(line, result.baselineSwapGas);
         line = _append(line, result.hookSwapGas);
