@@ -13,10 +13,6 @@ import "@openzeppelin/contracts/utils/math/Math.sol"; // Import Math
 import "./interfaces/IUniswapV2Pair.sol"; // Added for V2
 import "@uniswap/v3-core/contracts/libraries/SwapMath.sol"; // Added for SwapMath
 import "./interfaces/IPancakeV3Pool.sol"; // NEW: Add PancakeV3 Pool interface
-import {IPoolManager} from "@uniswap/v4-core/src/interfaces/IPoolManager.sol";
-import {PoolId} from "@uniswap/v4-core/src/types/PoolId.sol";
-import {StateLibrary} from "@uniswap/v4-core/src/libraries/StateLibrary.sol";
-import {ProtocolFeeLibrary} from "@uniswap/v4-core/src/libraries/ProtocolFeeLibrary.sol";
 
 /**
  * @title ArbitrageLogic
@@ -24,9 +20,6 @@ import {ProtocolFeeLibrary} from "@uniswap/v4-core/src/libraries/ProtocolFeeLibr
  */
 contract ArbitrageLogic {
     using Math for uint256; // Add using directive for Math
-    using ProtocolFeeLibrary for uint16;
-    using ProtocolFeeLibrary for uint24;
-    using StateLibrary for IPoolManager;
 
     uint24 private constant UNISWAP_V2_FEE_PPM = 3000;
     uint24 private constant PANCAKESWAP_V2_FEE_PPM = 2500;
@@ -352,187 +345,6 @@ contract ArbitrageLogic {
         uint256 minChunkForStartToken; // _minChunk(startToken)
         uint256 currentStartTokenBalance; // For balance cap
         int24 initialAbsSpread; // For dynamic move calculation
-    }
-
-    struct V4V3RouteParams {
-        uint256 principal;
-        uint160 sqrtPriceLimitX96;
-        uint160 externalSqrtPriceLimitX96;
-        int24 spread;
-    }
-
-    /// @notice Size the counter-swap that restores a just-traded v4 pool toward an external V3 price.
-    /// @dev The v4 leg sells the triggering swap's output token, so only a directional spread is valid.
-    function getV4V3RouteParams(
-        PoolStatesForIteration memory v4State,
-        uint24 v4Fee,
-        address startToken,
-        address intermediateToken,
-        ArbUtils.PoolInfo memory externalPool,
-        IterationConfig memory config
-    ) external view returns (V4V3RouteParams memory route) {
-        return _getV4V3RouteParams(v4State, v4Fee, startToken, intermediateToken, externalPool, config);
-    }
-
-    /// @notice Read a live v4 pool and size its counter-swap against a registered V3 reference venue.
-    function getLiveV4V3RouteParams(
-        IPoolManager manager,
-        PoolId poolId,
-        address v4Token0,
-        address startToken,
-        address intermediateToken,
-        ArbUtils.PoolInfo memory externalPool,
-        IterationConfig memory config
-    ) external view returns (V4V3RouteParams memory route) {
-        (uint160 sqrtPriceX96, int24 tick, uint24 protocolFee, uint24 lpFee) = manager.getSlot0(poolId);
-        uint16 directionalProtocolFee = v4Token0 == startToken
-            ? protocolFee.getZeroForOneFee()
-            : protocolFee.getOneForZeroFee();
-        uint24 v4Fee = directionalProtocolFee == 0
-            ? lpFee
-            : directionalProtocolFee.calculateSwapFee(lpFee);
-
-        return _getV4V3RouteParams(
-            PoolStatesForIteration({
-                sqrtPrice: sqrtPriceX96,
-                tick: tick,
-                liquidity: manager.getLiquidity(poolId),
-                token0: v4Token0
-            }),
-            v4Fee,
-            startToken,
-            intermediateToken,
-            externalPool,
-            config
-        );
-    }
-
-    function _getV4V3RouteParams(
-        PoolStatesForIteration memory v4State,
-        uint24 v4Fee,
-        address startToken,
-        address intermediateToken,
-        ArbUtils.PoolInfo memory externalPool,
-        IterationConfig memory config
-    ) private view returns (V4V3RouteParams memory route) {
-        if (
-            (externalPool.poolType != ArbUtils.PoolType.V3 &&
-                externalPool.poolType != ArbUtils.PoolType.PANCAKESWAP_V3) ||
-            externalPool.token0 != v4State.token0 ||
-            !((externalPool.token0 == startToken && externalPool.token1 == intermediateToken) ||
-                (externalPool.token1 == startToken && externalPool.token0 == intermediateToken))
-        ) return route;
-
-        uint160 externalSqrtPriceX96;
-        int24 externalTick;
-        if (externalPool.poolType == ArbUtils.PoolType.V3) {
-            try IUniswapV3Pool(externalPool.poolAddress).slot0() returns (
-                uint160 sqrtPriceX96,
-                int24 tick,
-                uint16,
-                uint16,
-                uint16,
-                uint8,
-                bool
-            ) {
-                externalSqrtPriceX96 = sqrtPriceX96;
-                externalTick = tick;
-            } catch {
-                return route;
-            }
-        } else {
-            try IPancakeV3Pool(externalPool.poolAddress).slot0() returns (
-                uint160 sqrtPriceX96,
-                int24 tick,
-                uint16,
-                uint16,
-                uint16,
-                uint32,
-                bool
-            ) {
-                externalSqrtPriceX96 = sqrtPriceX96;
-                externalTick = tick;
-            } catch {
-                return route;
-            }
-        }
-
-        uint128 externalLiquidity;
-        try IUniswapV3Pool(externalPool.poolAddress).liquidity() returns (uint128 liquidity) {
-            externalLiquidity = liquidity;
-        } catch {
-            return route;
-        }
-        if (v4State.liquidity == 0 || externalLiquidity == 0 || externalSqrtPriceX96 == 0) return route;
-
-        bool zeroForOneV4 = v4State.token0 == startToken;
-        route.spread = zeroForOneV4 ? v4State.tick - externalTick : externalTick - v4State.tick;
-        if (route.spread < int24(uint24(config.minSpreadBps))) return route;
-
-        bool startIsToken0 = externalPool.token0 == startToken;
-        uint256 v4RawPrice = getRawPriceScaled(
-            v4State.sqrtPrice,
-            startIsToken0,
-            externalPool.token0Decimals,
-            externalPool.token1Decimals
-        );
-        uint256 externalRawPrice = getRawPriceScaled(
-            externalSqrtPriceX96,
-            startIsToken0,
-            externalPool.token0Decimals,
-            externalPool.token1Decimals
-        );
-        if (
-            getEffectiveSellPrice(v4RawPrice, v4Fee) <=
-            getEffectiveBuyPrice(externalRawPrice, externalPool.fee)
-        ) return route;
-
-        uint256 initialSpread = config.initialAbsSpread > 0
-            ? uint24(config.initialAbsSpread)
-            : uint24(route.spread);
-        if (config.maxImpactBps == 0) return route;
-        uint256 move =
-            (uint24(route.spread) *
-                (uint256(config.chunkSpreadConsumptionBps) +
-                    (2000 * uint24(route.spread)) /
-                    initialSpread)) /
-            (2 * config.bpsDivisor);
-        if (move == 0) move = 1;
-        if (move > config.maxImpactBps) move = config.maxImpactBps;
-
-        int256 targetV4Tick = int256(v4State.tick) + (zeroForOneV4 ? -int256(move) : int256(move));
-        if (targetV4Tick < TickMath.MIN_TICK) targetV4Tick = TickMath.MIN_TICK;
-        if (targetV4Tick > TickMath.MAX_TICK) targetV4Tick = TickMath.MAX_TICK;
-        route.sqrtPriceLimitX96 = TickMath.getSqrtRatioAtTick(int24(targetV4Tick));
-
-        bool zeroForOneExternal = externalPool.token0 == intermediateToken;
-        int256 targetExternalTick =
-            int256(externalTick) + (zeroForOneExternal ? -int256(move) : int256(move));
-        if (targetExternalTick < TickMath.MIN_TICK) targetExternalTick = TickMath.MIN_TICK;
-        if (targetExternalTick > TickMath.MAX_TICK) targetExternalTick = TickMath.MAX_TICK;
-        route.externalSqrtPriceLimitX96 = TickMath.getSqrtRatioAtTick(int24(targetExternalTick));
-
-        (uint256 startIn, uint256 intermediateOut) = ArbMath._deltaAmounts(
-            zeroForOneV4,
-            v4State.sqrtPrice,
-            route.sqrtPriceLimitX96,
-            v4State.liquidity
-        );
-        (uint256 externalCapacity, ) = ArbMath._deltaAmounts(
-            zeroForOneExternal,
-            externalSqrtPriceX96,
-            route.externalSqrtPriceLimitX96,
-            externalLiquidity
-        );
-        if (startIn == 0 || intermediateOut == 0 || externalCapacity == 0) return route;
-
-        route.principal = intermediateOut > externalCapacity
-            ? FullMath.mulDiv(startIn, externalCapacity, intermediateOut)
-            : startIn;
-        if (route.principal > config.currentStartTokenBalance) {
-            route.principal = config.currentStartTokenBalance;
-        }
-        if (route.principal < config.minChunkForStartToken) route.principal = 0;
     }
 
     /*───────────────────────────────────────────────────────────────────────────

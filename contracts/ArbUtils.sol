@@ -7,9 +7,8 @@ import {ArbErrors} from "./Errors.sol";
 import {ArbitrageLogic} from "./ArbitrageLogic.sol";
 
 /// @title ArbUtils
-/// @notice Shared state and helper routines for pool registration, production
-///         reference lookup, and the legacy parity executor.
-/// @dev Legacy route planning is intentionally simple and deterministic:
+/// @notice Shared state and helper routines for pool registration and route execution.
+/// @dev Route planning is intentionally simple and deterministic:
 ///      `supportedTokens` (outer loop) -> `baseCounterList[base]` (inner loop).
 ///      Registration order therefore determines evaluation order in `_attemptAllInternal`.
 abstract contract ArbUtils {
@@ -42,7 +41,7 @@ abstract contract ArbUtils {
 
     // Base token -> all pools registered under that base token.
     mapping(address => PoolInfo[]) internal tokenPools;
-    // Distinct base tokens in insertion order for the legacy parity scanner.
+    // Distinct base tokens in insertion order for the production scanner.
     address[] internal supportedTokens;
 
     // Base token -> unique counterpart tokens seen in registered pools.
@@ -111,7 +110,7 @@ abstract contract ArbUtils {
             poolAddresses.length != poolTypes.length
         ) revert ArbErrors.InputArrayLengthMismatch();
 
-        // Preserve first-seen ordering for deterministic legacy traversal.
+        // Preserve first-seen ordering for deterministic route traversal.
         bool tokenIsNew = true;
         for (uint j; j < supportedTokens.length; ++j)
             if (supportedTokens[j] == token) {
@@ -144,7 +143,7 @@ abstract contract ArbUtils {
         );
         tokenPools[token].push(info);
 
-        // Build the base -> counter adjacency list used by the legacy scanner.
+        // Build the base -> counter adjacency list used by the scanner.
         address counter = info.token0 == token ? info.token1 : info.token0;
         if (!isCounterKnown[token][counter]) {
             isCounterKnown[token][counter] = true;

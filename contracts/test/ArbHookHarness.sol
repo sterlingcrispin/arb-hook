@@ -16,6 +16,7 @@ contract ArbHookHarness is ArbHook {
     bool public testLegacyInventoryParityEnabled;
     address public testProfitPayer;
     uint256 public testFixedProfitAmount;
+    uint256 public testLastMaxIterations;
     mapping(address => uint256) public testProfitByIntermediateToken;
 
     event ArbitrageAttempted(
@@ -43,11 +44,6 @@ contract ArbHookHarness is ArbHook {
         bool success = _attemptAllViaSelfCall(iterations);
         _setActiveProfitRecipient(address(0));
         return success;
-    }
-
-    /// @dev Self-call target retained only for the legacy parity harness.
-    function attemptAllInternal(uint256 iterations) external returns (bool) {
-        return _attemptAllInternal(iterations);
     }
 
     function getPoolsForToken(
@@ -169,11 +165,12 @@ contract ArbHookHarness is ArbHook {
         ArbUtils.PoolType poolBType
     )
         public
+        override
         returns (bool success, int256 cumulativeProfit, uint256 iterations)
     {
         if (!testLegacyInventoryParityEnabled) {
             return
-                _executeIterativeArbViaFlash(
+                super.executeIterativeArbViaFlash(
                     poolA_addr,
                     poolB_addr,
                     startToken,
@@ -208,6 +205,7 @@ contract ArbHookHarness is ArbHook {
         override
         returns (bool success, int256 cumulativeProfit, uint256 iterations, uint256 totalAmountSwapped)
     {
+        testLastMaxIterations = maxIterations;
         uint256 routeProfit = testProfitByIntermediateToken[intermediateToken];
         if (
             (testProfitBps > 0 || routeProfit > 0) &&

@@ -102,7 +102,7 @@ contract RealLender is IERC3156FlashLender {
     }
 }
 
-/// @notice Exercises the legacy external-pool executor retained by the parity
+/// @notice Exercises the production external-pool executor also used by the parity
 ///         harness with no profit injection. The E2E suite stubs
 ///         executeIterativeArb to isolate flash plumbing; these
 ///         tests deliberately leave it intact so the two swap legs, the V2

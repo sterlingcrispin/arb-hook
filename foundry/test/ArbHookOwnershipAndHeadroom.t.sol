@@ -94,7 +94,7 @@ contract HeadroomLender is IERC3156FlashLender {
     }
 }
 
-/// @notice Pins owner controls and verifies donated balances cannot expand legacy route sizing.
+/// @notice Pins owner controls and verifies donated balances cannot expand production route sizing.
 contract ArbHookOwnershipAndHeadroomTest is Test {
     address private constant BASE_UNISWAP_V2_FACTORY = 0x8909Dc15e40173Ff4699343b6eB8132c65e18eC6;
     address private constant BASE_PANCAKE_V2_FACTORY = 0x02a84c1b3BBD7401a5f7fa98a384EBC70bB5749E;
