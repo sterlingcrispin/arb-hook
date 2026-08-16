@@ -9,6 +9,29 @@ The initial deployment is owner-operated with a small set of manually verified, 
 
 ## Strategy Findings
 
+69. Temporary one-round self-pool route bypassed the original iterative engine
+- Status: `ADDRESSED BY REMOVAL`
+- Priority: `CRITICAL`
+- Summary: Production `afterSwap` was changed to route directly through
+  `attemptHookPoolInternal`, which hardcoded `maxIterations: 1` and executed one
+  V4/V3 step. This bypassed the original ordered base/counter scanner and the
+  executor loop controlled by `hookMaxIterations`. The live Base experiment
+  confirmed the consequence: the hook captured one bounded step and an external
+  backrunner immediately captured additional LP-funded edge.
+- Resolution: removed `attemptHookPoolInternal`, `_executeV4Swap`, the V4/V3
+  route-sizing extension, the PoolId trigger floor, and all strategy-specific
+  canary tests/scripts. Production `afterSwap` now calls
+  `attemptAllInternal(hookMaxIterations)`, and flash settlement always invokes
+  `executeIterativeArb` with that same bound.
+- Regression evidence:
+  `testAfterSwapRunsRegisteredScannerWithConfiguredIterationLimit` triggers the
+  real callback, observes a registered-pool flash loan, and asserts that a
+  configured value of `2` reaches the iterative executor unchanged. Exact
+  inventory parity and the fixed-block flash sequence remain independent gates.
+- Constraint: do not replace or bypass the scanner, fallback loop, route-specific
+  sizing, or iterative executor again without explicit design approval and a
+  callback-level before/after behavioral comparison.
+
 68. Universal Router caller resolution is one hop, not recursive
 - Status: `DOCUMENTED`
 - Priority: `MEDIUM`
@@ -32,7 +55,7 @@ The initial deployment is owner-operated with a small set of manually verified, 
   contracts.
 
 65. Hook profit is LP value redistribution, not new value
-- Status: `CANARY RETIRED; STRATEGY REQUIRES REDESIGN`
+- Status: `SELF-POOL STRATEGY REMOVED`
 - Priority: `HIGH`
 - Summary: The counter-trade captures value from the v4 LP position. The product
   case is valid only when an external backrunner would otherwise capture the
@@ -69,12 +92,12 @@ The initial deployment is owner-operated with a small set of manually verified, 
   replace the external backrunner; the LP funded both captures.
 - Decision: the operator disabled the hook, zeroed its WETH principal ceiling,
   and burned the LP position. Do not add operator or third-party liquidity to
-  this design. Any successor must establish economic value that is not merely
-  extracted from its own LP, or demonstrate that it fully replaces an otherwise
-  unavoidable backrun under realistic routing.
+  this design. The self-pool route has now been removed from production code.
+  Current external/external execution does not require project-owned v4
+  liquidity, so this LP-redistribution question does not apply to that route.
 
 60. No dislocation ever opens on the selected cbBTC/WETH pair
-- Status: `RESOLVED BY ARCHITECTURE CHANGE`
+- Status: `OPEN FOR RESTORED EXTERNAL SCANNER`
 - Priority: `CRITICAL`
 - Summary: The intended edge is same-block backrunning: a large swap dislocates
   one venue and the hook, ordered behind it, captures the gap before anyone
@@ -100,11 +123,13 @@ The initial deployment is owner-operated with a small set of manually verified, 
 - Interpretation: the gap is not being closed by faster competitors. It never
   opens. The earlier external/external fork proof had to manufacture a large
   cbBTC/WETH displacement, so it measured settlement rather than opportunity.
-- Decision: the canary no longer registers or trades this pair. The production
-  route captures movement created in its own hooked WETH/USDC pool instead.
+- Current implication: the self-pool architecture that previously bypassed this
+  problem has been removed. Do not re-enable cbBTC/WETH merely because it was a
+  parity fixture; the measurement still shows no organic edge on the sampled
+  venues. A deployment needs a separately demonstrated external opportunity.
 
 62. Spreads equilibrate just below each venue pair's own fee floor
-- Status: `RESOLVED BY ARCHITECTURE CHANGE`
+- Status: `OPEN FOR RESTORED EXTERNAL SCANNER`
 - Priority: `CRITICAL`
 - Summary: Moving to thin, high-turnover pairs does produce much larger price
   moves, but it does not produce more profit, because the pools that move are
@@ -145,11 +170,13 @@ The initial deployment is owner-operated with a small set of manually verified, 
 - Consequence: the former model, comparing two registered external pools and
   trading between them, targeted a flow that essentially does not exist on Base.
   Pair selection is not the lever.
-- Decision: stop screening pairs. The exploitable quantity is the dislocation a
-  swap creates in the pool it hits. The implemented route now follows item 63.
+- Current implication: this finding again applies because production compares
+  registered external pools. Existing measurements found no profitable organic
+  flow on the sampled Base pairs. Market evidence, not a manufactured fork gap,
+  is required before enabling a new pool book.
 
 63. The hook cannot capture the dislocation its own trigger creates
-- Status: `ADDRESSED`
+- Status: `OPEN; SELF-POOL FIX REMOVED`
 - Priority: `CRITICAL`
 - Summary: A swap against the triggering v4 pool moves that pool and nothing
   else. The registered venues are untouched by it, so the trigger never creates
@@ -166,36 +193,26 @@ The initial deployment is owner-operated with a small set of manually verified, 
   by construction rather than by luck. This is the edge the original design
   described; the former implementation excluded it by never quoting or trading
   against the triggering pool.
-- Resolution: `afterSwap` now reads the post-swap v4 state, sizes a directional
-  counter-trade, borrows the user's output token, trades the same v4 pool while
-  PoolManager is unlocked, settles every v4 delta, closes through a registered
-  V3 reference, repays, and transfers realized profit to the resolved swap initiator.
-  The older external/external scanner remains only in the parity harness.
-- Evidence: the current-head Base test performs an ordinary 100 USDC-to-WETH
-  swap with no external displacement. At block `50018535` it borrowed
-  `0.008907102809547629 WETH`, paid `0.000427463494774361 WETH`, repaid Morpho,
-  left no token residue, and removed the LP position.
+- Current behavior: `afterSwap` does not quote or trade the triggering v4 pool.
+  It invokes the original external/external scanner. The trigger therefore does
+  not create the opportunity being searched, and this timing limitation is
+  accepted as part of restoring the original contract rather than concealed as
+  resolved.
 
 64. Known-undersized trigger swaps still enter the full arbitrage path
-- Status: `ADDRESSED`
+- Status: `OBSOLETE WITH SELF-POOL ROUTE REMOVAL`
 - Priority: `HIGH`
 - Summary: The realized `minNetProfit` check safely rejects small opportunities,
   but only after route discovery, a flash loan, and both swap attempts. At pinned
   block `50018808`, 48 USDC fell below the `0.0001 WETH` floor while 49 USDC
   cleared it for the tested v4 liquidity.
-- Resolution: each PoolId and direction can now have a minimum actual input.
-  `afterSwap` reads the input leg from PoolManager's `BalanceDelta` and returns
-  before beneficiary parsing or discovery when it is too small. The canary sets
-  49 USDC for USDC-to-WETH; 48 USDC used only 2,495 incremental gas in the
-  boundary replay, while 49 USDC remained eligible and settled.
-- Constraint: this is a calibrated gas prefilter, not a profitability proof.
-  Recalibrate it when liquidity, pool selection, or the profit floor changes.
-  The proposed $100-per-side profile was therefore recalibrated at block
-  `50029886`: 10 USDC cleared the same `0.0001 WETH` floor, so its launch gate
-  is 10 USDC rather than the deep fixture's historical 49 USDC.
+- Current behavior: the triggering swap amount has no causal relationship to an
+  unrelated external spread. The PoolId/direction threshold and its storage/API
+  were removed. Every enabled callback with a valid beneficiary enters route
+  discovery; route economics decide whether to borrow.
 
 61. Backrunning only pays if the hook can be ordered behind the dislocating swap
-- Status: `ADDRESSED`
+- Status: `OPEN FOR RESTORED EXTERNAL SCANNER`
 - Priority: `HIGH`
 - Summary: The former hook fired on swaps against its own v4 pool but never traded
   against that pool (item 26). In the old canary the trigger was WETH/USDC while
@@ -210,49 +227,43 @@ The initial deployment is owner-operated with a small set of manually verified, 
   triggering swap happens to be ordered. Landing behind a specific transaction
   requires bidding for placement, which is the searcher game rather than an
   alternative to it. Under organic traffic the placement is luck.
-- Decision: implemented the second option. The triggering v4 swap is the event
-  that creates the edge and the v4 pool is the first arbitrage leg, so no random
-  same-block coincidence or transaction-placement race is required.
+- Current implication: the self-pool option was removed after it bypassed the
+  original iterative engine and produced unacceptable canary economics. Organic
+  callbacks again have random timing relative to external dislocations. This is
+  a strategy limitation to measure before deployment.
 
 66. Retired native-trigger tests made the flash-fork release gate fail
-- Status: `ADDRESSED`
+- Status: `OBSOLETE; SELF-POOL FORK SUITE REMOVED`
 - Priority: `HIGH`
 - Summary: Two canonical-router tests still created a native-ETH/TestToken v4
   pool and expected it to trigger the retired external/external scanner. The
   production route correctly rejects native currencies and had no matching
   reference venue, so both tests failed with no settlement event.
-- Resolution: removed the two stale tests and their helper. The production
-  `ArbHookWethCanaryForkTest` already covers the canonical Universal Router,
-  recipient resolution, Morpho, the actual WETH/USDC route, and LP removal.
-  The remaining flash-fork gate passes with seven tests and four explicit
-  calibration skips.
+- Resolution: the complete `ArbHookWethCanaryForkTest` suite was removed because
+  it asserted the rejected self-pool strategy. Canonical recipient behavior and
+  flash settlement remain covered by strategy-independent tests.
 
 67. Nested v4 counter-trade recursion was attributed to empty hook data
-- Status: `NOT AN ISSUE`
+- Status: `OBSOLETE; NESTED V4 SWAP REMOVED`
 - Priority: `HIGH`
 - Summary: An audit claimed the nested counter-swap re-enters `afterSwap` and
   relies on empty `hookData` to stop recursion. In this v4 core,
   `Hooks.afterSwap` returns without calling the hook whenever
   `msg.sender == address(hook)`. `_executeV4Swap` is called by the hook itself,
   so its nested swap cannot invoke `ArbHook.afterSwap`, regardless of hook data.
-- Decision: documented the core self-call rule at `_executeV4Swap`; do not add a
-  redundant onchain reentrancy flag or its bytecode and gas cost.
+- Decision: `_executeV4Swap` no longer exists. Production arbitrage uses only the
+  registered external pool types.
 
-## Open For Canary
+## Open Before Any Deployment
 
 20. Independent review of release commit
-- Status: `ACCEPTED FOR RESEARCH CANARY`
+- Status: `REQUIRED FOR NEXT DEPLOYMENT`
 - Priority: `CRITICAL`
-- Summary: The trigger-pool V4/V3 execution, nested PoolManager settlement, and
-  flash-loan changes need independent Solidity review against the exact release
-  commit.
-- Decision: the operator accepts the supplied independent review for the small
-  research canary. Commit `284fe20` subsequently changed only the gas-budget
-  boundary and added `InsufficientHookGas`; it did not change route, sizing,
-  settlement, or recipient logic. That 13-byte runtime delta has local, exact
-  parity, Morpho-sequence, current-head fork, RPC-estimation, and live canary
-  evidence, but not another independent review. Obtain an exact-commit review
-  before materially increasing capital.
+- Summary: the former review covered a materially different production route.
+  The current release restores the external pool scanner and iterative flash
+  path to `afterSwap`, removes nested v4 settlement, and changes the deployed
+  ABI and bytecode. Review the exact next deployment commit rather than treating
+  the retired canary review as transferable.
 
 ## Accepted By Design
 
@@ -267,47 +278,46 @@ The initial deployment is owner-operated with a small set of manually verified, 
   profit. Intermediary semantics are documented in item 68. The triggering
   user's ordinary swap output remains unchanged.
 
-## Deferred Outside Canary Threat Model
+## Deferred Outside Research Threat Model
 
 8. V3 factory attestation
-- Status: `ADDRESSED FOR FIXED CANARY; GENERIC ENFORCEMENT DEFERRED`
+- Status: `DEFERRED; OPERATOR VERIFICATION REQUIRED`
 - Summary: V3 registration trusts the owner-supplied pool address rather than proving it against a factory.
-- Decision: `RegisterArbHookCanaryPools` attests code, factory, tokens, and fees
-  for the exact one-pool reference manifest before broadcast. Generic
-  owner-supplied V3 registration still relies on operator verification to avoid
-  adding runtime registry machinery outside the canary threat model.
+- Decision: the retired fixed-market registration script was removed with the
+  self-pool canary. Generic owner-supplied V3 registration relies on operator
+  verification to avoid adding runtime registry machinery outside the trusted
+  owner threat model. A future market-specific deployment script should attest
+  every configured pool before broadcast.
 
 9. Arbitrary registry-scale gas limits
-- Status: `DEFERRED`
-- Summary: Production reference lookup scales with the pools registered under
-  the triggering output token. Legacy scanner cost also scales with configured
-  bases, counters, and pools.
-- Decision: the canary registers one reference pool. Revisit traversal and add
-  explicit scale limits before supporting a broad production registry. The
-  legacy scanner's geometric per-pair gas budgets are test-harness behavior.
+- Status: `OPEN FOR DEPLOYMENT CONFIGURATION`
+- Summary: Production scanner cost scales with configured bases, counters, and
+  pools. Each isolated route receives half of the scanner's remaining gas, so
+  later pairs receive geometrically less.
+- Decision: keep the first deployment pool book deliberately small and measure
+  callback gas and route reachability for its exact registration order. Do not
+  add generic onchain scale accounting unless real use requires it.
 
 29. Approximate V3 initialized-tick capacity
-- Status: `DEFERRED`
-- Summary: Production V4/V3 sizing uses active liquidity over a bounded local
-  movement instead of traversing either venue's initialized-tick bitmap. It can
-  therefore misestimate capacity when the target crosses a liquidity boundary.
-- Decision: do not add expensive tick traversal for the canary. Both legs now
-  enforce the computed price limits, while atomic repayment, exact intermediate
-  restoration, and realized minimum-profit enforcement remain authoritative.
-  Revisit sizing precision after canary results.
+- Status: `DEFERRED IN EXISTING V3/V3 MODEL`
+- Summary: The original bounded V3/V3 model can approximate capacity around
+  initialized liquidity boundaries rather than solve the exact global optimum.
+- Decision: preserve the existing model. Pool-enforced price limits, atomic
+  repayment, exact intermediate restoration, and realized minimum-profit checks
+  remain authoritative. Do not add broad tick traversal without measured need.
 
 ## Addressed
 
-69. Fail-open execution could make automatic gas estimation suppress arbitrage
+70. Fail-open execution could make automatic gas estimation suppress arbitrage
 - Status: `ADDRESSED`
 - Priority: `HIGH`
 - Notes: The first hook allowed an eligible low-gas swap to settle after its
   arbitrage self-call exhausted its budget. Base transaction
   `0xcf849ad5ccc4a845217ca2bd0eefd42a8e75dcedb9704d0d81ce2a3ff2f39a42`
   therefore completed without `FlashLoanSettled`. A nonzero `hookGasLimit` is
-  now both the required attempt budget and its ceiling. Below-trigger swaps
-  still return before this check, while under-gassed eligible swaps revert so
-  `eth_estimateGas` must raise the transaction limit.
+  now both the required attempt budget and its ceiling. With the trigger floor
+  removed, every enabled callback with a valid recipient reaches this check;
+  under-gassed swaps revert so `eth_estimateGas` must raise the limit.
 - Live proof: replacement hook
   `0x7e8d44E0eAfB387a91a630536d934bbb1Ca34040` received a Base RPC estimate of
   `3,514,705` gas. Transaction
@@ -319,9 +329,9 @@ The initial deployment is owner-operated with a small set of manually verified, 
   distinction, not an organic-router limitation.
 
 21. Current-head Base rehearsal and economic calibration
-- Status: `ADDRESSED; RE-RUN IMMEDIATELY BEFORE BROADCAST`
+- Status: `RETIRED SELF-POOL EVIDENCE; NOT A CURRENT GATE`
 - Priority: `CRITICAL`
-- Notes: `ArbHookWethCanaryForkTest` now runs against an unpinned Base head with
+- Historical notes: the removed `ArbHookWethCanaryForkTest` ran against an unpinned Base head with
   canonical WETH/USDC V3 reference, WETH-bound Morpho adapter, canonical V4
   PoolManager, PositionManager, Permit2, Universal Router caller resolution,
   LP mint, and LP burn. At Base block `50018535`, an ordinary 100 USDC swap
@@ -329,12 +339,9 @@ The initial deployment is owner-operated with a small set of manually verified, 
   zero lender fee, returned no residue, and paid `0.000427463494774361 WETH` to
   the beneficiary. The same-snapshot disabled/enabled replay measured about
   `419546` incremental gas.
-- Decision: the integration and calibration blocker is addressed in code. The
-  runbook still requires the same unpinned test and address checks immediately
-  before broadcast because lender liquidity, gas price, and market state move.
-  A later $100-per-side replay at block `50029886` used a `0.005 WETH` ceiling;
-  a 10 USDC trigger borrowed `0.000812887664977685 WETH` and paid
-  `0.000153429487453379 WETH` after zero lender fee.
+- Decision: preserve these figures only as evidence that the removed route could
+  borrow and repay. Its fork suite and launch runbook were deleted. The restored
+  scanner needs a new current-head rehearsal using its actual external pool book.
 
 58. Retry suppression depends on lender revert-data propagation
 - Status: `DOCUMENTED`
@@ -466,15 +473,15 @@ The initial deployment is owner-operated with a small set of manually verified, 
   arithmetic in both token orientations without materializing a 320-bit square.
   Boundary tests cover WETH/cbBTC in both directions, the former floor-to-zero
   case, the reciprocal near the minimum sqrt price, and `type(uint160).max`.
-  Exact inventory parity remains 18,679,602 raw USDC, the Morpho fixed-block
-  sequence keeps all ten routes, and the current-head canary settles a live
-  WETH/USDC V4/V3 route in the WETH direction.
+  Exact inventory parity remains 18,679,602 raw USDC and the Morpho fixed-block
+  sequence keeps all ten routes. The retired WETH canary also exercised the
+  corrected orientation, but is no longer a current production gate.
 
 42. Unbounded hook gas could revert the triggering swap
 - Status: `ADDRESSED`
 - Notes: The speculative self-call previously forwarded all remaining gas. The
   63/64 rule leaves only 1/64 behind, which does not cover v4 settlement when the
-  swap was submitted with a modest gas limit. The production V4/V3 attempt now
+  swap was submitted with a modest gas limit. The production scanner now
   runs on an explicit budget from `setHookGasBounds` (200,000 reserve and
   3,000,000 required budget and ceiling by default). The current-head test
   measures the full enabled router lifecycle against an identical disabled
@@ -538,8 +545,9 @@ The initial deployment is owner-operated with a small set of manually verified, 
   `ArbHookRealExecution.t.sol` adds three local tests that run the legacy real executor
   against constant-product pools enforcing their own K invariant, covering both
   swap legs, V2 repayment callbacks, residue handling, unprofitable-route
-  containment, and donated-balance isolation. The production V4/V3 callback is
-  covered against canonical Base contracts rather than a second local mock stack.
+  containment, and donated-balance isolation. A callback-level flash regression
+  now also proves that `afterSwap` reaches the scanner and passes the configured
+  iteration bound into the executor.
 
 50. Flash principal sized above what is traded
 - Status: `WONTFIX`
@@ -555,12 +563,12 @@ The initial deployment is owner-operated with a small set of manually verified, 
   touching route selection; see item 40.
 
 1. ArbHook EIP-170 deployability
-- Status: `ADDRESSED`
-- Notes: Cold registration validation moved into the existing `ArbitrageLogic`
-  dependency, live v4 state preparation moved into that stateless contract, and
-  legacy scanner/flash dispatch moved to `ArbHookHarness` without deleting the
-  algorithms. `ArbHook` is 22,202 runtime bytes: 1,798 bytes below the
-  repository's 24,000-byte budget and 2,374 bytes below EIP-170.
+- Status: `ADDRESSED; RE-MEASURED AFTER SCANNER RESTORATION`
+- Notes: `npm run size` reports `ArbHook` at 22,491 runtime bytes after restoring
+  scanner dispatch and the flash wrapper to production. That leaves 2,085 bytes
+  below EIP-170 and 1,509 bytes below the repository's 24,000-byte budget. Size
+  optimization remains out of scope for this behavioral restoration and must
+  not remove core route logic.
 
 7. Shared pool metadata removal
 - Status: `ADDRESSED`
@@ -616,11 +624,11 @@ The initial deployment is owner-operated with a small set of manually verified, 
 
 4. Production router recipient integration
 - Status: `ADDRESSED`
-- Notes: Fork tests send a real v4 swap through Base's canonical Universal Router
-  and PoolManager with empty hook data, then verify that the arb pays the
-  router's original caller. The current-head WETH/USDC counter-trade passed
-  through the intended Morpho adapter with zero lender fee. An exact 20-byte
-  recipient remains covered as an optional override.
+- Notes: The callback-level flash regression uses empty hook data, resolves the
+  original caller through `IMsgSender`, executes the restored scanner, and pays
+  that beneficiary. The retired live canary separately proved Base's canonical
+  Universal Router implementation. An exact 20-byte recipient remains an
+  optional override.
 
 5. CREATE2 deployment workflow
 - Status: `ADDRESSED`
@@ -638,9 +646,8 @@ The initial deployment is owner-operated with a small set of manually verified, 
 - Status: `ADDRESSED`
 - Notes: The owner-run configuration script requires explicit nonzero WETH
   principal, fee-cap, and minimum-net-profit values, applies the principal cap
-  last, and does not enable execution. The runbook defines the WETH-denominated
-  differential-gas formula and records `0.0001 WETH` only as a provisional
-  rehearsal floor; the final value remains part of the current-head release gate.
+  last, and does not enable execution. Historical WETH values are not valid for
+  a new external pool book; recalibration is required before any deployment.
 
 24. Swap callback binding to active execution
 - Status: `ADDRESSED`
@@ -649,15 +656,16 @@ The initial deployment is owner-operated with a small set of manually verified, 
 25. Linked library omitted from release inventory
 - Status: `ADDRESSED`
 - Notes: `ArbitrageLogic` has an external link to `ArbMath`, which Foundry deploys
-  automatically through the CREATE2 factory. The runbook requires recording and
-  verifying all five artifacts: `ArbMath`, `ArbitrageLogic`, the Aave and Morpho
+  automatically through the CREATE2 factory. Any replacement runbook must record
+  and verify all five artifacts: `ArbMath`, `ArbitrageLogic`, the Aave and Morpho
   adapters, and `ArbHook`.
 
 26. Triggering v4 pool is not an arbitrage venue
-- Status: `ADDRESSED`
-- Notes: The production route now quotes and counter-trades the triggering v4
-  pool as its first leg, then exits through the first registered matching V3
-  reference venue. The external/external scanner remains test-only.
+- Status: `ACCEPTED BY RESTORATION; SEE ITEMS 61-63`
+- Notes: Production intentionally does not trade the triggering v4 pool. It uses
+  the restored external/external scanner and original iterative executor. This
+  preserves the original contract but reopens the trigger/opportunity timing
+  limitation documented above.
 
 27. Flash settlement can retain intermediate-token residue
 - Status: `ADDRESSED`

@@ -1,11 +1,13 @@
-"""Historical candidate search for the retired external/external strategy.
+"""Candidate search for the current external/external scanner.
 
 The execution engine handles Uniswap V2/V3 and PancakeSwap V2/V3 only. Aerodrome
 is not supported, which rules out most Base memecoin liquidity, so a candidate
 pair only qualifies when it has real depth on at least two of the four supported
 venues.
 
-The production route instead pairs its own v4 pool with one reference venue.
+The current production route again compares registered external venues. This
+script remains useful for candidate-pool discovery, but historical measurements
+show that volume and liquidity alone do not establish a profitable spread.
 Token addresses are verified on-chain by reading symbol() and decimals(); any
 address that does not respond is dropped rather than assumed.
 

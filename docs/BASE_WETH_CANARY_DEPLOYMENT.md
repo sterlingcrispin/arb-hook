@@ -1,5 +1,9 @@
 # Base WETH Canary Deployment
 
+> **HISTORICAL DEPLOYMENT RECORD.** The one-round self-pool route exercised by
+> these contracts has been removed from the source tree. Do not use the
+> addresses, settings, or measured economics below as a current launch plan.
+
 ## Current Status
 
 The replacement research canary has been retired. Hook

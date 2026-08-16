@@ -1,17 +1,18 @@
 # Flash Loan Migration Plan
 
-Status: implemented, then superseded at the production trigger layer. This file
-records the original inventory-to-flash migration. The current production route
-uses the triggering v4 pool as its first leg; see `README.md` and
-`docs/ARB_LOGIC_DEEP_DIVE.md` before using the historical phases below.
+Status: implemented. This file records the inventory-to-flash migration. The
+temporary self-pool, one-round trigger architecture that followed the migration
+has been removed; production once again uses the registered-pool scanner and
+original iterative executor described in `README.md` and
+`docs/ARB_LOGIC_DEEP_DIVE.md`.
 
 ## Goal
-Migrate `ArbHook` from inventory-funded arbitrage to flash-loan-funded arbitrage, so the hook does not need to hold principal inventory. The current production route resolves empty hook data through the canonical router's original caller and retains an exact packed recipient as an optional override.
+Migrate `ArbHook` from inventory-funded arbitrage to flash-loan-funded arbitrage without replacing its route traversal or iterative sizing. The hook does not need to hold principal inventory. Empty hook data resolves through the canonical router's original caller, with an exact packed recipient as an optional override.
 
 ## Context
-- Production execution is hook-triggered via `_afterSwap -> attemptHookPoolInternal -> onFlashLoan`; route failure is isolated after an eligible caller supplies the configured gas budget.
-- The triggering v4 pool is counter-traded against the first registered matching concentrated-liquidity reference venue.
-- The older `_attemptAllInternal -> _runPair -> executeIterativeArb` path remains in `ArbHookHarness` for exact parity and flash-migration regression tests.
+- Production execution is hook-triggered via `afterSwap -> attemptAllInternal -> _runPair -> executeIterativeArbViaFlash -> onFlashLoan -> executeIterativeArb`.
+- The triggering v4 pool supplies timing and a beneficiary; all arbitrage legs use registered external pools.
+- `ArbHookHarness` retains only the prefunded branch needed to reproduce the historical inventory oracle. The scanner and flash wrapper are production code.
 - The pre-migration implementation used contract balances as principal in iterative sizing and callback repayment logic.
 - The legacy inventory parity suite is the historical gross-profit baseline. The flash fork suite must preserve its natural per-round route sequence while remaining net-positive after lender fees.
 
@@ -36,10 +37,9 @@ Migrate `ArbHook` from inventory-funded arbitrage to flash-loan-funded arbitrage
 - A permissionless or adversarial asset registry.
 
 ## Deployment Size
-- Live v4 state preparation lives in `ArbitrageLogic`, and legacy scanner/flash dispatch lives only in the test harness.
-- `npm run size` enforces a 24,000-byte runtime budget for every production contract, preserving margin below EIP-170.
-- `ArbHook` is currently 22,202 runtime bytes.
-- Further gas optimization remains separate from flash-loan correctness and parity work.
+- `npm run size` reports production runtime sizes and enforces the repository budget.
+- With the scanner restored, `ArbHook` is 22,491 runtime bytes: 2,085 bytes below EIP-170 and 1,509 bytes below the repository's 24,000-byte budget.
+- Size reduction remains separate from flash-loan correctness and parity work; do not remove route behavior merely to satisfy an interim development budget.
 
 ## Refactor Constraints (Critical)
 1. Flash-loan path is the only production execution path after this refactor.
@@ -58,12 +58,12 @@ Migrate `ArbHook` from inventory-funded arbitrage to flash-loan-funded arbitrage
    - and explicit sign-off before merge.
 
 ## Target Architecture
-1. `afterSwap` observes the triggering pool after the user's price movement.
-2. The user's output token is the flash principal and profit token.
-3. Route sizing compares the same v4 pair with the first registered matching V3 reference pool.
-4. The loan callback counter-trades the v4 pool, closes through V3, repays, and pays the router-reported initiator or an optional encoded recipient.
-5. Realized balance checks remain authoritative and all speculative work stays behind the self-call failure boundary.
-6. Legacy external/external traversal and iterative execution remain available through test-only harness entrypoints.
+1. `afterSwap` resolves a beneficiary and dispatches the registered-pool scanner behind a failure boundary.
+2. The scanner traverses base/counter pairs in registration order and stops at the first profitable pair.
+3. Pool discovery selects the best fee-adjusted external buy and sell venues for that pair.
+4. Route-specific existing math derives a bounded base-token flash principal.
+5. The loan callback runs the unchanged iterative executor, repays, and pays the router-reported initiator or optional encoded recipient.
+6. Realized balance checks remain authoritative. The triggering v4 pool is not an arbitrage leg.
 
 ## Data Model and Config Additions
 Implemented in `ArbHook`:
@@ -80,7 +80,7 @@ Production telemetry:
 - Historical inventory telemetry exists only in the legacy test harness.
 
 ## Beneficiary Resolution Strategy
-For empty `hookData`, `_afterSwap` asks the callback sender for its original
+For empty `hookData`, `afterSwap` asks the callback sender for its original
 caller through `IMsgSender.msgSender()`. Canonical Universal Router swaps
 therefore pay their execution initiator without custom calldata. Exactly 20
 bytes produced by `abi.encodePacked(beneficiary)` remain an optional override.
@@ -166,7 +166,7 @@ Files:
 - `contracts/test/PoolManagerHarness.sol` (if needed to pass hook data in tests)
 
 Tasks:
-1. Resolve empty `hookData` to the hook treasury or parse an exact packed recipient in `_afterSwap`.
+1. Resolve empty `hookData` through the router's `IMsgSender` interface or parse an exact packed recipient in `afterSwap`.
 2. Bind resolved recipient into active execution context.
 3. Skip execution only for malformed nonempty data or a packed zero address.
 
@@ -254,7 +254,7 @@ Acceptance:
 - Mitigation: add invariant tests for traversal order, per-attempt retry behavior, and first-profitable-path stop behavior.
 
 8. Hook gas envelope expansion
-- Mitigation: track gas snapshots for `_afterSwap` path and set acceptance ceilings before merge.
+- Mitigation: track gas snapshots for the `afterSwap` path and set acceptance ceilings before merge.
 
 9. Integration breakage from interface/event schema drift
 - Mitigation: keep existing external function/event signatures stable unless strictly necessary; if a change is required, document it and add migration notes.
