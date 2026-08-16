@@ -25,19 +25,18 @@ borrow X
 
 The hook runs in the same transaction as the dislocating swap. It does not need an unrelated external opportunity to happen at the same time, and it does not race a searcher to observe published post-block state.
 
-The user's original swap has already settled its own v4 balance delta. The hook's nested counter-swap accrues separate deltas to the hook. Its profit is paid as a separate token transfer; it does not alter the router's quoted output accounting.
+The user's original swap has already settled its own v4 balance delta. The hook's nested counter-swap accrues separate deltas to the hook. Its profit remains in the hook for owner withdrawal; it does not alter the router's quoted output accounting.
 
-## 2. `afterSwap`, Recipient Resolution, And Failure Isolation
+## 2. `afterSwap`, Owner Revenue, And Failure Isolation
 
 `afterSwap` performs a small amount of orchestration:
 
 1. `onlyPoolManager` requires the immutable v4 `PoolManager`.
 2. Read `hookMaxIterations`; zero means execution is disabled.
-3. Resolve the beneficiary from exact 20-byte hook data or `IMsgSender.msgSender()` on the router.
-4. Store the beneficiary in EIP-1153 transient storage.
-5. Call `attemptTriggerPoolInternal` through a bounded external self-call.
-6. Clear the transient beneficiary.
-7. Return the `afterSwap` selector and zero hook delta.
+3. Store the hook itself as the profit recipient in EIP-1153 transient storage.
+4. Call `attemptTriggerPoolInternal` through a bounded external self-call.
+5. Clear the transient recipient.
+6. Return the `afterSwap` selector and zero hook delta.
 
 The self-call is a failure boundary. Route discovery, lender calls, nested swaps, callback repayment, unwind, and profit checks can revert without reverting the user's swap.
 
@@ -66,7 +65,7 @@ trigger zeroForOne = false:
     intermediateToken = currency1
 ```
 
-`startToken` is the token the hook borrows, profits in, and pays to the beneficiary. It is also the token that the user just made more expensive in v4.
+`startToken` is the token the hook borrows and profits in. It is also the token that the user just made more expensive in v4.
 
 Native currency is rejected because the current flash, transfer, and callback paths operate on ERC20 balances. ERC20/ERC20 v4 pairs are supported.
 
@@ -219,12 +218,12 @@ currentStartTokenBalance = initial loan principal + positive prior-round profit
 
 Each round can be smaller than the available balance because v4 movement, external capacity, spread, and minimum chunk are recomputed.
 
-At fixed Base block `50018808`, an identical 100 USDC trigger produced:
+At fixed Base block `50058863`, an identical 50 USDC trigger produced:
 
 | Bound | Completed rounds | WETH traded | Net WETH profit | Residual gap |
 |---:|---:|---:|---:|---:|
-| 1 | 1 | `0.008916275255831863` | `0.000427855387719440` | 434 ticks |
-| 10 | 10 | `0.038512027703384331` | `0.001247055334869567` | 134 ticks |
+| 1 | 1 | `0.002700000000000000` | `0.000012668624087717` | 54 ticks |
+| 10 | 10 | `0.018703796146752592` | `0.000053328188113127` | 18 ticks |
 
 The result demonstrates why the one-round stopgap was incomplete: later rounds remained profitable after live repricing.
 
@@ -281,9 +280,9 @@ Settlement requires:
 - exact intermediate-balance restoration;
 - positive net profit;
 - net profit at least `minNetProfit`; and
-- enough remaining start token for principal plus fee after beneficiary payment.
+- enough remaining start token for principal plus fee while retaining net profit.
 
-The beneficiary comes from transient callback context. Profit is transferred first, leaving exactly the principal and fee available for the authenticated lender to pull. Any failure reverts the loan, all nested swaps, and the payout atomically.
+The hook address comes from transient callback context. Profit remains in the hook while the authenticated lender pulls exactly principal plus fee. Any failure reverts the loan and all nested swaps atomically.
 
 ## 12. Why This Is Bounded Rather Than Exact
 
@@ -323,8 +322,8 @@ Production `afterSwap` does not call this scanner. `ArbHookHarness.attemptAllFor
 - The production return leg supports Uniswap V3 and PancakeSwap V3, not V2.
 - The external reference is selected once per callback, not once per round.
 - A direction without reference registration and flash configuration safely skips.
-- Ten rounds at the pinned test block still left 134 ticks; the bound is a risk/gas control, not a guarantee of full convergence.
-- At that snapshot, 20 rounds settled under the default 3,000,000-gas attempt
+- Ten rounds at the pinned test block still left 18 ticks; the bound is a risk/gas control, not a guarantee of full convergence.
+- In an earlier block `50018808` diagnostic, 20 rounds settled under the default 3,000,000-gas attempt
   budget and captured about 99% of the 31-round high-gas diagnostic profit. A
   25-round cap exhausted the default attempt budget and settled nothing. The
   iteration cap and gas budget must therefore be calibrated as one setting.

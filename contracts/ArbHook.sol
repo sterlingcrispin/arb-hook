@@ -15,7 +15,6 @@ import {PoolIdLibrary} from "@uniswap/v4-core/src/types/PoolId.sol";
 import {Currency} from "@uniswap/v4-core/src/types/Currency.sol";
 import {BalanceDelta} from "@uniswap/v4-core/src/types/BalanceDelta.sol";
 import {SwapParams} from "@uniswap/v4-core/src/types/PoolOperation.sol";
-import {IMsgSender} from "@uniswap/v4-periphery/src/interfaces/IMsgSender.sol";
 
 import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 import {Ownable2Step} from "@openzeppelin/contracts/access/Ownable2Step.sol";
@@ -75,7 +74,6 @@ contract ArbHook is
     /// @notice Required gas budget and hard ceiling for one attempt (0 = use available gas).
     uint32 internal hookGasLimit = 3_000_000;
 
-    uint256 private constant CALLER_LOOKUP_GAS = 10_000;
     bytes32 private constant ERC3156_CALLBACK_SUCCESS =
         keccak256("ERC3156FlashBorrower.onFlashLoan");
 
@@ -141,24 +139,21 @@ contract ArbHook is
     }
 
     function afterSwap(
-        address sender,
+        address,
         PoolKey calldata key,
         SwapParams calldata params,
         BalanceDelta,
-        bytes calldata hookData
+        bytes calldata
     ) external onlyPoolManager returns (bytes4, int128) {
         uint256 iterations = hookMaxIterations;
         if (iterations > 0) {
-            address beneficiary = _resolveProfitRecipient(sender, hookData);
-            if (beneficiary != address(0)) {
-                _setActiveProfitRecipient(beneficiary);
-                _attemptTriggerPoolViaSelfCall(
-                    key,
-                    params.zeroForOne,
-                    iterations
-                );
-                _setActiveProfitRecipient(address(0));
-            }
+            _setActiveProfitRecipient(address(this));
+            _attemptTriggerPoolViaSelfCall(
+                key,
+                params.zeroForOne,
+                iterations
+            );
+            _setActiveProfitRecipient(address(0));
         }
 
         return (IHooks.afterSwap.selector, 0);
@@ -1792,26 +1787,6 @@ contract ArbHook is
         if (reason.length < 4) return bytes4(0);
         assembly ("memory-safe") {
             selector := mload(add(reason, 0x20))
-        }
-    }
-
-    function _resolveProfitRecipient(
-        address sender,
-        bytes calldata hookData
-    ) internal view returns (address recipient) {
-        if (hookData.length == 0) {
-            // Canonical v4 routers expose the caller held in their execution lock.
-            try IMsgSender(sender).msgSender{gas: CALLER_LOOKUP_GAS}() returns (
-                address caller
-            ) {
-                return caller;
-            } catch {
-                return address(0);
-            }
-        }
-        if (hookData.length != 20) return address(0);
-        assembly ("memory-safe") {
-            recipient := shr(96, calldataload(hookData.offset))
         }
     }
 

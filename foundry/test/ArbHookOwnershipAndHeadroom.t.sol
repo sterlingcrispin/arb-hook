@@ -192,6 +192,20 @@ contract ArbHookOwnershipAndHeadroomTest is Test {
         assertEq(iterations, 0, "new owner controls the kill switch");
     }
 
+    function testOnlyCurrentOwnerCanWithdrawRevenue() public {
+        uint256 revenue = 123e18;
+        address outsider = makeAddr("outsider");
+        startToken.mint(address(hook), revenue);
+
+        vm.prank(outsider);
+        vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, outsider));
+        hook.removeTokens(address(startToken));
+
+        hook.removeTokens(address(startToken));
+        assertEq(startToken.balanceOf(address(hook)), 0, "withdrawal left revenue in hook");
+        assertEq(startToken.balanceOf(address(this)), revenue, "owner did not receive revenue");
+    }
+
     // ------------------------- Risk ceiling --------------------------------
 
     function testDonatedBalanceDoesNotExpandTradeSizing() public {
