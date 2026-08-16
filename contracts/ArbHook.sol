@@ -4,12 +4,15 @@ pragma solidity ^0.8.20;
 // Executes bounded on-chain arbitrage attempts from Uniswap v4 swap callbacks.
 import "./ArbUtils.sol";
 import "./ArbitrageLogic.sol";
+import {V4ArbExecutor} from "./V4ArbExecutor.sol";
 import {ArbErrors} from "./Errors.sol";
 
 import {Hooks} from "@uniswap/v4-core/src/libraries/Hooks.sol";
 import {IHooks} from "@uniswap/v4-core/src/interfaces/IHooks.sol";
 import {IPoolManager} from "@uniswap/v4-core/src/interfaces/IPoolManager.sol";
 import {PoolKey} from "@uniswap/v4-core/src/types/PoolKey.sol";
+import {PoolIdLibrary} from "@uniswap/v4-core/src/types/PoolId.sol";
+import {Currency} from "@uniswap/v4-core/src/types/Currency.sol";
 import {BalanceDelta} from "@uniswap/v4-core/src/types/BalanceDelta.sol";
 import {SwapParams} from "@uniswap/v4-core/src/types/PoolOperation.sol";
 import {IMsgSender} from "@uniswap/v4-periphery/src/interfaces/IMsgSender.sol";
@@ -35,18 +38,20 @@ import {IERC3156FlashBorrower} from "./interfaces/IERC3156FlashBorrower.sol";
 import {IERC3156FlashLender} from "./interfaces/IERC3156FlashLender.sol";
 
 /// @title ArbHook
-/// @notice Uniswap v4 hook that runs bounded iterative arbitrage across
-///         registered external pools using flash-loaned principal.
+/// @notice Uniswap v4 hook that iteratively counter-trades its triggering pool
+///         against a registered external reference using flash-loaned principal.
 contract ArbHook is
     ArbUtils,
     Ownable2Step,
     IERC3156FlashBorrower
 {
     using SafeERC20 for IERC20;
+    using PoolIdLibrary for PoolKey;
 
     error NotPoolManager();
 
     IPoolManager public immutable poolManager;
+    V4ArbExecutor private immutable v4Executor;
 
     struct PoolMeta {
         address token0;
@@ -70,7 +75,6 @@ contract ArbHook is
     /// @notice Required gas budget and hard ceiling for one attempt (0 = use available gas).
     uint32 internal hookGasLimit = 3_000_000;
 
-    uint256 private constant FEE_BPS_DIVISOR = 10_000;
     uint256 private constant CALLER_LOOKUP_GAS = 10_000;
     bytes32 private constant ERC3156_CALLBACK_SUCCESS =
         keccak256("ERC3156FlashBorrower.onFlashLoan");
@@ -131,17 +135,6 @@ contract ArbHook is
         return _tload(_T_LAST_ITERATIONS);
     }
 
-    struct FlashLoanExecutionParams {
-        address sellPool;
-        address buyPool;
-        address tokenA;
-        address tokenB;
-        uint256 maxIterations;
-        ArbUtils.PoolType sellPoolType;
-        ArbUtils.PoolType buyPoolType;
-        address beneficiary;
-    }
-
     modifier onlyPoolManager() {
         if (msg.sender != address(poolManager)) revert NotPoolManager();
         _;
@@ -149,8 +142,8 @@ contract ArbHook is
 
     function afterSwap(
         address sender,
-        PoolKey calldata,
-        SwapParams calldata,
+        PoolKey calldata key,
+        SwapParams calldata params,
         BalanceDelta,
         bytes calldata hookData
     ) external onlyPoolManager returns (bytes4, int128) {
@@ -159,7 +152,11 @@ contract ArbHook is
             address beneficiary = _resolveProfitRecipient(sender, hookData);
             if (beneficiary != address(0)) {
                 _setActiveProfitRecipient(beneficiary);
-                _attemptAllViaSelfCall(iterations);
+                _attemptTriggerPoolViaSelfCall(
+                    key,
+                    params.zeroForOne,
+                    iterations
+                );
                 _setActiveProfitRecipient(address(0));
             }
         }
@@ -186,21 +183,24 @@ contract ArbHook is
         }
     }
 
-    function _attemptAllViaSelfCall(
+    function _attemptTriggerPoolViaSelfCall(
+        PoolKey calldata key,
+        bool triggerZeroForOne,
         uint256 iterations
-    ) internal returns (bool) {
+    ) private returns (bool) {
         uint256 gasBudget = _attemptGasBudget();
         if (gasBudget == 0) return false;
 
-        // Self-call gives us a hard failure boundary:
-        // any revert in deep execution is captured as bytes and does not bubble,
-        // and the explicit budget bounds what a failure can cost the user.
+        // A self-call bounds gas and prevents route failure from reverting the swap.
         (bool successCall, bytes memory returndata) = address(this).call{
             gas: gasBudget
-        }(abi.encodeWithSelector(this.attemptAllInternal.selector, iterations));
-
-        bool tradeSuccess = successCall && abi.decode(returndata, (bool));
-        return successCall && tradeSuccess;
+        }(
+            abi.encodeCall(
+                this.attemptTriggerPoolInternal,
+                (key, triggerZeroForOne, iterations)
+            )
+        );
+        return successCall && abi.decode(returndata, (bool));
     }
 
     function getHookPermissions()
@@ -246,6 +246,7 @@ contract ArbHook is
         if (_arbLib == address(0))
             revert ArbErrors.InvalidArbitrageLogicAddress();
         arbLib = ArbitrageLogic(_arbLib);
+        v4Executor = new V4ArbExecutor();
     }
 
     // ------------------------------- Admin ---------------------------------
@@ -356,7 +357,7 @@ contract ArbHook is
         uint256 maxFeeBps
     ) external onlyOwner {
         if (token == address(0)) revert ArbErrors.InvalidTokenAddress();
-        if (maxFeeBps > FEE_BPS_DIVISOR)
+        if (maxFeeBps > BPS_DIVISOR)
             revert ArbErrors.FlashFeeBpsTooHigh();
         maxFlashFeeBpsByToken[token] = maxFeeBps;
     }
@@ -421,6 +422,83 @@ contract ArbHook is
             }
         }
         return d > 4 ? 10 ** (d - 4) : 1;
+    }
+
+    /// @notice Iteratively counter-trade the triggering v4 pool against its
+    ///         cheapest registered V3-compatible reference venue.
+    /// @dev The triggering swap's output token is overpriced in the v4 pool, so
+    ///      it is borrowed, sold into v4, and bought back externally each round.
+    function attemptTriggerPoolInternal(PoolKey calldata key, bool triggerZeroForOne, uint256 maxIterations)
+        external
+        returns (bool)
+    {
+        if (msg.sender != address(this)) revert ArbErrors.WrapperOnlySelf();
+
+        address startToken = Currency.unwrap(triggerZeroForOne ? key.currency1 : key.currency0);
+        address intermediateToken = Currency.unwrap(triggerZeroForOne ? key.currency0 : key.currency1);
+        if (startToken == address(0) || intermediateToken == address(0)) return false;
+
+        address lender = lenderByToken[startToken];
+        uint256 principalCap = _resolvePrincipalCap(startToken, lender);
+        if (principalCap == 0 || maxFlashFeeBpsByToken[startToken] == 0 || minNetProfitByToken[startToken] == 0) {
+            return false;
+        }
+
+        uint256 referenceIndex = _findReferencePool(startToken, intermediateToken);
+        if (referenceIndex == 0) return false;
+        ArbUtils.PoolInfo memory externalPool = tokenPools[startToken][referenceIndex - 1];
+
+        ArbitrageLogic.IterationConfig memory config;
+        config.minSpreadBps = minSpreadBps;
+        config.chunkSpreadConsumptionBps = CHUNK_SPREAD_CONSUMPTION_BPS;
+        config.maxImpactBps = _MAX_IMPACT_BPS;
+        config.minChunkForStartToken = _minChunk(startToken);
+        config.currentStartTokenBalance = principalCap;
+
+        ArbitrageLogic.V4V3RouteParams memory route = arbLib.getLiveV4V3RouteParams(
+            poolManager, key.toId(), Currency.unwrap(key.currency0), startToken, intermediateToken, externalPool, config
+        );
+        if (route.principal == 0) return false;
+        config.initialAbsSpread = route.spread;
+
+        FlashLoanExecutionParams memory params = FlashLoanExecutionParams({
+            sellPool: address(poolManager),
+            buyPool: externalPool.poolAddress,
+            tokenA: startToken,
+            tokenB: intermediateToken,
+            maxIterations: maxIterations,
+            sellPoolType: ArbUtils.PoolType.V3,
+            buyPoolType: externalPool.poolType
+        });
+        bytes memory loanData = abi.encode(params, key, externalPool, config);
+        _requestFlashLoan(lender, startToken, route.principal, loanData);
+        return _flashLastTradeSuccess();
+    }
+
+    function _findReferencePool(address startToken, address intermediateToken)
+        private
+        view
+        returns (uint256 bestPoolIndex)
+    {
+        uint256 bestBuyPrice;
+        ArbUtils.PoolInfo[] storage pools = tokenPools[startToken];
+        for (uint256 i; i < pools.length;) {
+            ArbUtils.PoolInfo storage candidate = pools[i];
+            if (
+                _isV3PoolType(candidate.poolType)
+                    && (candidate.token0 == intermediateToken || candidate.token1 == intermediateToken)
+            ) {
+                ArbUtils.PoolInfo memory pool = candidate;
+                (uint256 buyPrice,, bool ok) = arbLib._getSinglePoolPrices(startToken, intermediateToken, pool);
+                if (ok && (bestPoolIndex == 0 || buyPrice < bestBuyPrice)) {
+                    bestBuyPrice = buyPrice;
+                    bestPoolIndex = i + 1;
+                }
+            }
+            unchecked {
+                ++i;
+            }
+        }
     }
 
     // -------------------------- Core entrypoint ----------------------------
@@ -685,8 +763,8 @@ contract ArbHook is
 
         uint256 principalCap = _resolvePrincipalCap(startToken, lender);
         uint256 principal;
-        bool isPoolAV3 = poolAType == ArbUtils.PoolType.V3 || poolAType == ArbUtils.PoolType.PANCAKESWAP_V3;
-        bool isPoolBV3 = poolBType == ArbUtils.PoolType.V3 || poolBType == ArbUtils.PoolType.PANCAKESWAP_V3;
+        bool isPoolAV3 = _isV3PoolType(poolAType);
+        bool isPoolBV3 = _isV3PoolType(poolBType);
         uint256 refinedV3Principal;
         // Raw-token profit estimate for the pre-loan economic screen. Only the
         // V2/V2 and mixed sizing paths produce a figure that is comparable to
@@ -736,8 +814,7 @@ contract ArbHook is
                 expectedNetProfit - fee < minNetProfit)
         ) return (false, 0, 0);
 
-        address beneficiary = _activeProfitRecipient();
-        if (beneficiary == address(0)) return (false, 0, 0);
+        if (_activeProfitRecipient() == address(0)) return (false, 0, 0);
 
         FlashLoanExecutionParams memory params = FlashLoanExecutionParams({
             sellPool: poolA_addr,
@@ -746,8 +823,7 @@ contract ArbHook is
             tokenB: intermediateToken,
             maxIterations: maxIterations,
             sellPoolType: poolAType,
-            buyPoolType: poolBType,
-            beneficiary: beneficiary
+            buyPoolType: poolBType
         });
         bytes memory loanData = abi.encode(params);
 
@@ -856,7 +932,8 @@ contract ArbHook is
             (FlashLoanExecutionParams)
         );
         if (params.tokenA != token) revert ArbErrors.FlashTokenMismatch();
-        if (params.beneficiary == address(0))
+        address beneficiary = _activeProfitRecipient();
+        if (beneficiary == address(0))
             revert ArbErrors.InvalidFlashBeneficiary();
         if (
             _feeExceedsCap(amount, fee, maxFlashFeeBpsByToken[token])
@@ -867,21 +944,21 @@ contract ArbHook is
             address(this)
         );
 
-        (bool successCall, bytes memory returndata) = address(this).call(
-            abi.encodeWithSelector(
-                this.executeIterativeArb.selector,
-                params.sellPool,
-                params.buyPool,
-                params.tokenA,
-                params.tokenB,
-                params.maxIterations,
-                params.sellPoolType,
-                params.buyPoolType
-            )
-        );
+        bool tradeSuccess;
+        uint256 iters;
+        uint256 totalAmountSwapped;
+        (bool successCall, bytes memory returndata) = address(v4Executor)
+            .delegatecall(
+                abi.encodeCall(
+                    V4ArbExecutor.execute,
+                    (address(arbLib), poolManager, data, amount)
+                )
+            );
         if (!successCall) revert ArbErrors.FlashArbitrageExecutionFailed();
-        (bool tradeSuccess, , uint256 iters, uint256 totalAmountSwapped) =
-            abi.decode(returndata, (bool, int256, uint256, uint256));
+        (tradeSuccess, , iters, totalAmountSwapped) = abi.decode(
+            returndata,
+            (bool, int256, uint256, uint256)
+        );
         if (
             IERC20(params.tokenB).balanceOf(address(this)) !=
             intermediateBalanceBefore
@@ -904,8 +981,8 @@ contract ArbHook is
         _tstore(_T_LAST_PROFIT, uint256(netProfit));
         _tstore(_T_LAST_ITERATIONS, iters);
 
-        if (params.beneficiary != address(this)) {
-            IERC20(token).safeTransfer(params.beneficiary, uint256(netProfit));
+        if (beneficiary != address(this)) {
+            IERC20(token).safeTransfer(beneficiary, uint256(netProfit));
         }
 
         uint256 repayAmount = amount + fee;
@@ -927,7 +1004,7 @@ contract ArbHook is
             fee,
             netProfit,
             iters,
-            params.beneficiary
+            beneficiary
         );
 
         return ERC3156_CALLBACK_SUCCESS;
@@ -970,10 +1047,8 @@ contract ArbHook is
         // Guardrail to avoid "winning tiny amount after prior losses" situations.
         int256 minCumulativeProfit = int256(minChunkStartToken) / 10;
 
-        bool isPoolAV3 = (poolAType == ArbUtils.PoolType.V3 ||
-            poolAType == ArbUtils.PoolType.PANCAKESWAP_V3);
-        bool isPoolBV3 = (poolBType == ArbUtils.PoolType.V3 ||
-            poolBType == ArbUtils.PoolType.PANCAKESWAP_V3);
+        bool isPoolAV3 = _isV3PoolType(poolAType);
+        bool isPoolBV3 = _isV3PoolType(poolBType);
 
         int24 initialAbsSpreadForThisArbOpportunity = 0;
 
@@ -1089,7 +1164,6 @@ contract ArbHook is
                 iterConfig.minSpreadBps = minSpreadBps;
                 iterConfig
                     .chunkSpreadConsumptionBps = CHUNK_SPREAD_CONSUMPTION_BPS;
-                iterConfig.bpsDivisor = BPS_DIVISOR;
                 iterConfig.maxImpactBps = _MAX_IMPACT_BPS;
                 iterConfig.minChunkForStartToken = minChunkStartToken;
                 iterConfig.currentStartTokenBalance = sizingBalance;
@@ -1223,10 +1297,7 @@ contract ArbHook is
                 }
                 if (chunkToSwap == 0) break;
 
-                if (
-                    poolAType == ArbUtils.PoolType.V3 ||
-                    poolAType == ArbUtils.PoolType.PANCAKESWAP_V3
-                ) {
+                if (_isV3PoolType(poolAType)) {
                     if (
                         arbLib.estimateImpactBps(
                             poolA_addr,
@@ -1252,10 +1323,7 @@ contract ArbHook is
 
             // Leg 1: startToken -> intermediateToken on pool A.
             bool swap1Success = false;
-            if (
-                poolAType == ArbUtils.PoolType.V3 ||
-                poolAType == ArbUtils.PoolType.PANCAKESWAP_V3
-            ) {
+            if (_isV3PoolType(poolAType)) {
                 swap1Success = _executeSwapInternal_noBalanceCheck(
                     poolA_addr,
                     poolAType,
@@ -1280,10 +1348,7 @@ contract ArbHook is
                 // Stop cleanly rather than reverting the whole loan: an empty quote
                 // here would otherwise discard profit already realized this call.
                 if (amountToReceive == 0) break;
-                if (
-                    poolBType == ArbUtils.PoolType.V3 ||
-                    poolBType == ArbUtils.PoolType.PANCAKESWAP_V3
-                ) {
+                if (_isV3PoolType(poolBType)) {
                     uint256 estimatedImpactB = arbLib.estimateImpactBps(
                         poolB_addr,
                         intermediateToken,
@@ -1319,16 +1384,12 @@ contract ArbHook is
 
             bool swap2Success = false;
             // Leg 2: intermediateToken -> startToken on pool B.
-            if (
-                poolBType == ArbUtils.PoolType.V3 ||
-                poolBType == ArbUtils.PoolType.PANCAKESWAP_V3
-            ) {
+            if (_isV3PoolType(poolBType)) {
                 uint160 actualSqrtPriceLimitB_v3 = sqrtPriceLimitB_v3; // V3-V3 default
                 if (
                     (poolAType == ArbUtils.PoolType.V2 ||
                         poolAType == ArbUtils.PoolType.PANCAKESWAP_V2) &&
-                    (poolBType == ArbUtils.PoolType.V3 ||
-                        poolBType == ArbUtils.PoolType.PANCAKESWAP_V3)
+                    _isV3PoolType(poolBType)
                 ) {
                     actualSqrtPriceLimitB_v3 = arbLib
                         .calculateV3SqrtPriceLimitForAmountIn(
@@ -1474,10 +1535,7 @@ contract ArbHook is
         address startToken,
         uint256 amount
     ) private {
-        if (
-            poolType == ArbUtils.PoolType.V3 ||
-            poolType == ArbUtils.PoolType.PANCAKESWAP_V3
-        ) {
+        if (_isV3PoolType(poolType)) {
             bool zeroForOne = poolMetaByAddr[poolAddress].token0 ==
                 intermediateToken;
             _executeSwapInternal_noBalanceCheck(
@@ -1861,7 +1919,6 @@ contract ArbHook is
         ArbitrageLogic.IterationConfig memory config;
         config.minSpreadBps = minSpreadBps;
         config.chunkSpreadConsumptionBps = CHUNK_SPREAD_CONSUMPTION_BPS;
-        config.bpsDivisor = BPS_DIVISOR;
         config.maxImpactBps = _MAX_IMPACT_BPS;
         config.minChunkForStartToken = _minChunk(startToken);
         config.currentStartTokenBalance = principalCap;
@@ -1920,8 +1977,8 @@ contract ArbHook is
         uint256 maxFeeBps
     ) private pure returns (bool) {
         uint256 product = amount * maxFeeBps;
-        uint256 maxFee = product / FEE_BPS_DIVISOR;
-        if (product % FEE_BPS_DIVISOR != 0) ++maxFee;
+        uint256 maxFee = product / BPS_DIVISOR;
+        if (product % BPS_DIVISOR != 0) ++maxFee;
         return fee > maxFee;
     }
 
@@ -1932,6 +1989,14 @@ contract ArbHook is
             poolType == ArbUtils.PoolType.PANCAKESWAP_V2
                 ? PANCAKESWAP_V2_POOL_FEE_PPM
                 : V2_POOL_FEE_PPM;
+    }
+
+    function _isV3PoolType(
+        ArbUtils.PoolType poolType
+    ) private pure returns (bool) {
+        return
+            poolType == ArbUtils.PoolType.V3 ||
+            poolType == ArbUtils.PoolType.PANCAKESWAP_V3;
     }
 
     function _requireRegisteredV2CallbackPool(

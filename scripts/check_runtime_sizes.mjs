@@ -6,6 +6,7 @@ const RUNTIME_BUDGET = 24_000;
 const contracts = [
   ["ArbHook", "../foundry/out/ArbHook.sol/ArbHook.json"],
   ["ArbitrageLogic", "../foundry/out/ArbitrageLogic.sol/ArbitrageLogic.json"],
+  ["V4ArbExecutor", "../foundry/out/V4ArbExecutor.sol/V4ArbExecutor.json"],
   [
     "AaveV3ERC3156Adapter",
     "../foundry/out/AaveV3ERC3156Adapter.sol/AaveV3ERC3156Adapter.json",
