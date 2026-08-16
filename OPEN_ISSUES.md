@@ -32,7 +32,7 @@ The initial deployment is owner-operated with a small set of manually verified, 
   contracts.
 
 65. Hook profit is LP value redistribution, not new value
-- Status: `ACCEPTED FOR RESEARCH CANARY`
+- Status: `CANARY RETIRED; STRATEGY REQUIRES REDESIGN`
 - Priority: `HIGH`
 - Summary: The counter-trade captures value from the v4 LP position. The product
   case is valid only when an external backrunner would otherwise capture the
@@ -60,12 +60,18 @@ The initial deployment is owner-operated with a small set of manually verified, 
   baseline, the LP outcome is identical and the hook redirects the searcher's
   0.804926 USDC to the beneficiary. With one wallet in every role, the transfer
   cancels internally and only external fees plus gas remain.
-- Decision: the operator deliberately accepts this transfer for the small
-  research canary. The intended product gives the captured price-impact value
-  to the swap initiator whether or not an external searcher would otherwise have
-  backrun the pool. Do not describe `FlashLoanSettled.netProfit` as operator
-  revenue or infer organic demand from a controlled swap. Revisit LP economics
-  before accepting third-party liquidity or materially increasing capital.
+- Live result: the controlled replacement-canary swap paid
+  `0.000153175872232624 WETH` from the hook route. The next transaction in the
+  same block,
+  `0xf2398ab3eb7096450224cb624d46800270b69f638d5bb628f63f4ab47debe176`,
+  counter-traded the v4 pool against Hydrex Integral and retained a further
+  `0.000326008570667335 WETH` before gas. The one-shot hook therefore did not
+  replace the external backrunner; the LP funded both captures.
+- Decision: the operator disabled the hook, zeroed its WETH principal ceiling,
+  and burned the LP position. Do not add operator or third-party liquidity to
+  this design. Any successor must establish economic value that is not merely
+  extracted from its own LP, or demonstrate that it fully replaces an otherwise
+  unavoidable backrun under realistic routing.
 
 60. No dislocation ever opens on the selected cbBTC/WETH pair
 - Status: `RESOLVED BY ARCHITECTURE CHANGE`

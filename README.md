@@ -35,9 +35,9 @@ The production V4/V3 route does not traverse initialized ticks or solve an exact
 
 The initial principal is therefore not a fixed amount and is not the full cap. On Base block `50029886`, a 10 USDC swap against the proposed $100-per-side position selected about `0.000812887664977685 WETH` from a `0.005 WETH` ceiling.
 
-## Current Canary
+## Retired Canary Configuration
 
-The first Base canary is deliberately narrow:
+The first Base canary was deliberately narrow:
 
 | Role | Market |
 |---|---|
@@ -222,9 +222,13 @@ Disable execution before adding capital to an existing position. Use `script/Add
 
 Always simulate Forge scripts before adding `--broadcast`. Full commands and read-back checks are in the runbook.
 
-The live Base research canary is `0x7e8d44E0eAfB387a91a630536d934bbb1Ca34040`.
-Addresses, receipts, configuration, the successful flash settlement, and the
-superseded first deployment are recorded in
+The Base research canary at
+`0x7e8d44E0eAfB387a91a630536d934bbb1Ca34040` is retired. Its controlled swap
+proved flash settlement but was immediately followed by an external backrun,
+showing that the one-shot hook left additional LP-funded value available to a
+searcher. The hook is disabled, its WETH principal ceiling is zero, and its LP
+position has been burned. Addresses, receipts, final balances, and both retired
+deployments are recorded in
 `docs/BASE_WETH_CANARY_DEPLOYMENT.md`.
 
 ## Legacy Parity Context

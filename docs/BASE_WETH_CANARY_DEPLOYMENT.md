@@ -2,9 +2,11 @@
 
 ## Current Status
 
-The replacement research canary is live on Base mainnet from contract commit
-`284fe20`. Hook `0x7e8d44E0eAfB387a91a630536d934bbb1Ca34040` is enabled for one bounded
-V4/V3 attempt. Its full-range WETH/USDC position is NFT `2909998`.
+The replacement research canary has been retired. Hook
+`0x7e8d44E0eAfB387a91a630536d934bbb1Ca34040` is disabled, its WETH flash
+principal ceiling is zero, and its full-range WETH/USDC position NFT `2909998`
+has been burned. The hook remains deployed as historical research evidence but
+has no liquidity or token balances.
 
 The first hook `0xC537EDE696EAC0014A30a51706fb5E95C2734040` is disabled and holds no
 tokens. Its position NFT `2909971` was burned after the replacement settled a
@@ -33,30 +35,33 @@ adapter, and `2,144` for the Morpho adapter.
 | Pair | WETH/USDC |
 | LP fee | `500` (0.05%) |
 | Tick spacing | `10` |
-| Position NFT | `2909998` |
-| Position owner | `0x38580D3E838EdE8E6770Ae80881Cf71BaD2530aB` |
-| Position liquidity | `2305313247698` |
+| Position NFT | `2909998` (burned) |
+| Position owner | None (`ownerOf` reverts `NOT_MINTED`) |
+| Position liquidity | `0` (initially `2305313247698`) |
 | Initialize and mint transaction | `0x49cff08a1c4b509b083906a0ce2fb3c66d95a04fb9bf8118ace4fc9bd92aa62c` |
 | Opening sqrt price | `3436763424379252776215504` |
 | Post-canary tick | `-200915` |
+
+The pool remains initialized, but position NFT `2909998` has been burned and
+its liquidity is zero.
 
 The mint consumed `0.053144691700125703 WETH` and exactly `100 USDC`. The
 external reference is canonical Uniswap V3 WETH/USDC 0.05% at
 `0xd0b53D9277642d899DF5C87A3966A349A798F224`. Reference registration transaction:
 `0x7d82aa8677008ce213d9b6f69013a477203eb7949cce51115f6c5720d23239a2`.
 
-## Live Configuration
+## Current Configuration
 
 | Setting | Value |
 |---|---:|
-| Maximum hook attempts | `1` |
+| Maximum hook attempts | `0` (disabled; controlled value was `1`) |
 | Minimum spread | `10` bps |
 | Chunk spread consumption | `1500` bps |
 | Maximum modeled impact | `500` bps |
 | Gas reserve | `200,000` |
 | Required attempt budget and ceiling | `3,000,000` |
 | WETH lender | `0x54329f5B9b4079E9C4B8bda26F046Ad8c7Ac08a9` |
-| WETH principal ceiling | `0.005 WETH` |
+| WETH principal ceiling | `0` (controlled value was `0.005 WETH`) |
 | Maximum lender fee | `1` bp |
 | Minimum net route profit | `0.0001 WETH` |
 | USDC-to-WETH input gate | `10 USDC` |
@@ -125,19 +130,34 @@ Its liquidity now reads zero and `ownerOf(2909971)` reverts with `NOT_MINTED`.
 
 ## Current Balances And Exit
 
-After migration, the operator wallet held:
+The replacement position was retired after the controlled transaction showed
+that one bounded hook counter-trade did not consume the full edge. A separate
+transaction immediately after it in the same block counter-traded the v4 pool
+against Hydrex Integral. That transaction,
+`0xf2398ab3eb7096450224cb624d46800270b69f638d5bb628f63f4ab47debe176`,
+retained `0.000326008570667335 WETH` before gas, versus the hook route's
+`0.000153175872232624 WETH`. The hook therefore redirected part of the
+LP-funded price movement to the swap initiator while leaving additional
+LP-funded value for an external searcher. Adding more operator liquidity was
+rejected as the next step.
 
-- `0.059844703369427194 WETH`
-- `504.337735 USDC`
-- `0.045016816369054533 ETH`
+| Action | Transaction |
+|---|---|
+| Disable replacement hook | `0x6a3c57320c329d98f613b6e4bd22794ed55781059e9c17eee36eb4045fe3330e` |
+| Set WETH principal ceiling to zero | `0x6023c9147172aba0eb86c50306551284ec1cdf88ee8f4e60862af5581ab89161` |
+| Burn replacement position | `0x8500504e30486f7e4b6eebab5f7f9b6adfc96155c4589921ea0e23dc00b369f3` |
 
-The old hook, replacement hook, and both replacement adapters each held zero
-WETH and zero USDC. A post-settlement replacement withdrawal simulation passed
-without broadcasting and would return:
+Burning NFT `2909998` returned:
 
 - `0.053130079473601032 WETH`
 - `100.037035 USDC`
 
-To stop attempts, call `setHookMaxIterations(0)` on the replacement hook. To
-exit fully, disable first and follow `docs/MAINNET_CANARY_RUNBOOK.md` with fresh,
-nonzero withdrawal minima.
+After the exit, the operator wallet held:
+
+- `0.112974782843028226 WETH`
+- `604.374770 USDC`
+- `0.045015450956452899 ETH`
+
+The old hook, replacement hook, and both replacement adapters each hold zero
+WETH and zero USDC. Replacement NFT `2909998` reports zero liquidity and
+`ownerOf(2909998)` reverts with `NOT_MINTED`.
