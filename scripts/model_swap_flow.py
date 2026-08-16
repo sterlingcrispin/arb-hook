@@ -38,6 +38,10 @@ V4_SWAP_TOPIC = "0x40e9cecb9f5f1f1c5b9c97dec2917b7ee92e57ba5563708daca94dd84ad71
 
 THRESHOLDS_USDC = (1, 5, 10, 25, 50, 75, 100, 150, 250, 500, 1_000, 5_000, 10_000)
 QUANTILES = (0.10, 0.25, 0.50, 0.75, 0.90, 0.95, 0.99, 0.999)
+KNOWN_CALLERS = {
+    "0x2626664c2603336e57b271c5c0b26f421741e481": "Uniswap SwapRouter02",
+    "0x6ff5693b99212da76ad316178a184ab56d299b43": "Uniswap Universal Router",
+}
 
 
 @dataclass(frozen=True)
@@ -346,6 +350,13 @@ def count_model(hourly_counts: list[int]) -> dict:
         "fano_factor": variance / mean if mean else 0.0,
         "negative_binomial_r": dispersion,
         "negative_binomial_p": probability,
+        "hourly_quantiles": {
+            "p10": quantile(sorted(hourly_counts), 0.10),
+            "p50": quantile(sorted(hourly_counts), 0.50),
+            "p90": quantile(sorted(hourly_counts), 0.90),
+            "p99": quantile(sorted(hourly_counts), 0.99),
+            "max": max(hourly_counts, default=0),
+        },
     }
 
 
@@ -357,6 +368,9 @@ def flow_stats(events: list[dict], start_time: int, end_time: int) -> dict:
     daily = bucket_counts(events, start_time, end_time, 86_400)
     daily_volume = bucket_volume(events, start_time, end_time, 86_400)
     callers = Counter(event["sender"] for event in events)
+    caller_volume = Counter()
+    for event in events:
+        caller_volume[event["sender"]] += event["usdc"]
     caller_counts = sorted(callers.values(), reverse=True)
     directions = Counter(event["direction"] for event in events)
     log_sizes = [math.log(size) for size in sizes if size >= 0.01]
@@ -400,6 +414,16 @@ def flow_stats(events: list[dict], start_time: int, end_time: int) -> dict:
             "top5_event_fraction": sum(caller_counts[:5]) / len(events) if events else 0.0,
             "top10_event_fraction": sum(caller_counts[:10]) / len(events) if events else 0.0,
         },
+        "top_callers": [
+            {
+                "address": address,
+                "label": KNOWN_CALLERS.get(address, "unlabelled"),
+                "events": count,
+                "event_fraction": count / len(events),
+                "volume_usdc": caller_volume[address],
+            }
+            for address, count in callers.most_common(10)
+        ],
         "arrival_model": count_model(hourly),
         "size_model": {
             "body": "lognormal",
@@ -412,12 +436,22 @@ def flow_stats(events: list[dict], start_time: int, end_time: int) -> dict:
         "thresholds": {},
     }
     for threshold in THRESHOLDS_USDC:
-        qualifying = [size for size in sizes if size >= threshold]
+        qualifying_events = [event for event in events if event["usdc"] >= threshold]
+        qualifying = [event["usdc"] for event in qualifying_events]
+        threshold_daily = bucket_counts(qualifying_events, start_time, end_time, 86_400)
         stats["thresholds"][str(threshold)] = {
             "events": len(qualifying),
             "events_per_day": len(qualifying) / duration_days,
             "event_fraction": len(qualifying) / len(sizes) if sizes else 0.0,
             "volume_fraction": sum(qualifying) / sum(sizes) if sizes and sum(sizes) else 0.0,
+            "daily_event_quantiles": {
+                "p10": quantile(sorted(threshold_daily), 0.10),
+                "p50": quantile(sorted(threshold_daily), 0.50),
+                "p90": quantile(sorted(threshold_daily), 0.90),
+            },
+            "arrival_model": count_model(
+                bucket_counts(qualifying_events, start_time, end_time, 3_600)
+            ),
         }
     return stats
 
@@ -615,7 +649,7 @@ def print_report(payload: dict) -> None:
 
     weighted = payload.get("sweep_weighting", [])
     if weighted:
-        print("\nExisting frontier sweep weighted by deep-pool trades in its $50-$150 modeled slice")
+        print("\nExisting frontier sweep weighted by deep-pool USDC->WETH trades in its $50-$150 modeled slice")
         print("fee   LP/side range  covered/day route-win/day LP PnL/day at 1% observed share")
         for row in weighted[:8]:
             pnl = row.get("route_winner_lp_pnl_usdc_per_day", 0) * 0.01
@@ -623,6 +657,20 @@ def print_report(payload: dict) -> None:
                 f"{row['pool_fee_bps']:>4.2f}bp ${row['lp_usdc_per_side']:<7,.0f} "
                 f"{row['half_range_ticks']:>5}t {row['modeled_events_per_day']:>11,.0f} "
                 f"{row['route_winner_events_per_day']:>13,.0f} ${pnl:>10,.2f}"
+            )
+        executing = sorted(
+            (row for row in weighted if row["arb_events_per_day"] > 0),
+            key=lambda row: row.get("route_winner_rebate_usdc_per_day", 0),
+            reverse=True,
+        )
+        print("\nRoute-competitive rows that also execute the hook")
+        print("fee   LP/side range  arb/day route-win/day rebate/day at 1% observed share")
+        for row in executing[:8]:
+            rebate = row.get("route_winner_rebate_usdc_per_day", 0) * 0.01
+            print(
+                f"{row['pool_fee_bps']:>4.2f}bp ${row['lp_usdc_per_side']:<7,.0f} "
+                f"{row['half_range_ticks']:>5}t {row['arb_events_per_day']:>8,.0f} "
+                f"{row['route_winner_events_per_day']:>13,.0f} ${rebate:>10,.3f}"
             )
 
 
@@ -713,8 +761,35 @@ def main() -> int:
 
     aggregate_stats = flow_stats(events, start_time, end_time)
     aggregate_stats["cross_pool_event_fraction"] = cross_pool_events / len(events) if events else 0.0
+    sender_pools = defaultdict(set)
+    sender_events = Counter()
+    sender_volume = Counter()
+    for event in events:
+        sender_pools[event["sender"]].add(event["pool"])
+        sender_events[event["sender"]] += 1
+        sender_volume[event["sender"]] += event["usdc"]
+    aggregate_stats["multi_venue_sender_concentration"] = {
+        f"at_least_{minimum}_pools": {
+            "sender_count": sum(len(venues) >= minimum for venues in sender_pools.values()),
+            "event_fraction": sum(
+                count
+                for sender, count in sender_events.items()
+                if len(sender_pools[sender]) >= minimum
+            ) / len(events),
+            "volume_fraction": sum(
+                volume
+                for sender, volume in sender_volume.items()
+                if len(sender_pools[sender]) >= minimum
+            ) / aggregate_stats["volume_usdc"],
+        }
+        for minimum in (2, 3, 5, 7)
+    }
     proxy_stats = flow_stats(proxy, start_time, end_time)
-    reference_events = by_pool["uniswap_v3_5bp"]
+    reference_events = [
+        event
+        for event in by_pool["uniswap_v3_5bp"]
+        if event["direction"] == "usdc_to_weth"
+    ]
     payload = {
         "metadata": metadata,
         "limitations": [
@@ -723,12 +798,13 @@ def main() -> int:
             "A new pool's routing share is not inferred; projections use explicit hypothetical shares.",
             "Sweep weighting linearly interpolates isolated reset-per-trigger fork scenarios and does not model evolving LP inventory.",
             "Sweep economics cover only trade sizes present in the selected result file; larger and smaller swaps are excluded.",
+            "Sweep weighting uses only USDC-to-WETH events because the selected sweep does not model the reverse direction.",
         ],
         "pools": pool_payload,
         "aggregate_event_flow": aggregate_stats,
         "market_order_proxy": proxy_stats,
         "reference_flow_projections": projection(pool_payload["uniswap_v3_5bp"]["stats"], args.shares),
-        "sweep_weighting_source": "uniswap_v3_5bp",
+        "sweep_weighting_source": "uniswap_v3_5bp_usdc_to_weth",
         "sweep_weighting": weight_sweep(args.sweep_results, reference_events, duration_days),
     }
     json_path, csv_path = write_outputs(args.output_dir, stem, payload)
