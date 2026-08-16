@@ -261,7 +261,12 @@ class Rpc:
             {"jsonrpc": "2.0", "id": request_id, "method": method, "params": params}
         ).encode()
         request = urllib.request.Request(
-            self.url, data=payload, headers={"Content-Type": "application/json"}
+            self.url,
+            data=payload,
+            headers={
+                "Content-Type": "application/json",
+                "User-Agent": "arb-hook-flow-model/1.0",
+            },
         )
         with urllib.request.urlopen(request, timeout=timeout) as response:
             body = json.load(response)
