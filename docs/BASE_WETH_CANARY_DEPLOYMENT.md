@@ -1,10 +1,58 @@
 # Base WETH Canary Deployment
 
-> **HISTORICAL DEPLOYMENT RECORD.** No address in this document is an active
-> canary. Do not use these settings or measured economics as a current launch
-> plan.
+## Active Multi-Round Canary
 
-## Latest Closed Canary
+This limited-capital research canary is active on Base from source commit
+`57a0cfb`. Profit remains in the hook for current-owner withdrawal.
+
+| Artifact | Address | Deployment transaction |
+|---|---|---|
+| `ArbitrageLogic` | `0x4B2FA891c57b3919aac9e55391Eb61E731957873` | `0x528e1d7c9d46d4033a0636e1b00a4d368f48a4b241974840397284853323cfaa` |
+| WETH Morpho adapter | `0x2a7911Afdb539B776579F9ce04C7d292C5A0a1F3` | `0xc80507ff00a610bb284baa7cc8e2bc1bd229e5ee1d3665a5ad67afde6f9eb4d0` |
+| USDC Morpho adapter | `0x5c192911f3e5AAaf244ba9d133A3A81010bCA459` | `0x98163735c4f4e38bfc3f5a0d696bc662b8012276d511fa2bae37a7c9fecb1829` |
+| `ArbHook` | `0x079a5f5231a34C60E60090f7C0CcF333510A4040` | `0x4bd7ad50da8ee707a31c6e47457c52c33170f0630ace7b6c6d89aaca53854bdc` |
+
+The hook requests only `afterSwap`; its low permission bits are `0x0040`.
+
+| Pool field | Value |
+|---|---|
+| Pool ID | `0x2d92e3aff6dc298dab4bea46e759156162777da3636d43424254ffbdbc4466db` |
+| Position NFT | `2913425` |
+| Position liquidity | `377847812833483` |
+| Tick range | `-201260..-200650` |
+| WETH deposited | `0.133398674855053634` |
+| USDC deposited | `245.086496` |
+| Initialize and mint | `0x1e6c1ddebe3a594e3bf3b1057afc7396dbcd159c5dfd88361c1e1c3a0777ed12` |
+| Enable ten rounds | `0xd56f62c22872427ef976f5d0e9a00ad76081811046a580d883594a0cebdc0616` |
+
+### Controlled Swap
+
+Transaction `0xb0f1a93ae4fb495723a8c7237f2f0c459fbf418c4bd88a20168410c5f5844eab`
+swapped 50 USDC for `0.026562851994812012 WETH`. The hook borrowed
+`0.0027 WETH`, traded `0.023050022309536079 WETH` over ten rounds, repaid
+Morpho with zero fee, and retained `0.000093783763919242 WETH` for the owner.
+The hook balance exactly matched that event and both adapter balances remained
+zero.
+
+The swap used a `4,459,209` gas limit and consumed `1,387,508` gas. Its L2
+execution gas was about `$0.025` at the contemporaneous WETH reference price,
+before the receipt's L1 data fee.
+
+### Initial Organic Observation
+
+Through Base block `50064263`, the pool received 15 third-party swaps after the
+controlled transaction, totaling about `41.79 USDC` of notional across both
+directions and six non-canonical transaction targets. None produced a profitable
+hook settlement or violated an invariant. This proves immediate external route
+discovery, not sustained volume or profitability.
+
+The automatic kill-switch monitor runs in tmux session
+`arb-hook-canary-079a`; its log is
+`artifacts/base-canary-monitor-079a.log`.
+
+## Retired Canaries
+
+### Latest Closed Canary
 
 The multi-round hook `0x431380080801E04D5D886390E40c84323E37c040`
 is disabled (`hookMaxIterations = 0`) and holds no WETH or USDC. Its WETH/USDC
@@ -22,7 +70,7 @@ The burn returned `0.140536465569262201 WETH` and `231.046985 USDC` to the
 operator wallet. ERC20-to-Permit2 and Permit2-to-PositionManager/Universal
 Router allowances are zero for both WETH and USDC.
 
-## Earlier One-Round Canaries
+### Earlier One-Round Canaries
 
 The replacement research canary has been retired. Hook
 `0x7e8d44E0eAfB387a91a630536d934bbb1Ca34040` is disabled, its WETH flash
@@ -34,7 +82,7 @@ The first hook `0xC537EDE696EAC0014A30a51706fb5E95C2734040` is disabled and hold
 tokens. Its position NFT `2909971` was burned after the replacement settled a
 live RPC-estimated transaction.
 
-## Current Contracts
+### One-Round Replacement Contracts
 
 | Artifact | Address | Deployment transaction | Sourcify |
 |---|---|---|---|
@@ -49,7 +97,7 @@ which enables only `afterSwap`. Runtime sizes are `22,215` bytes for `ArbHook`,
 `19,678` for `ArbitrageLogic`, `5,779` for `ArbMath`, `2,590` for the Aave
 adapter, and `2,144` for the Morpho adapter.
 
-## Current Pool
+### One-Round Replacement Pool
 
 | Field | Value |
 |---|---|
@@ -72,7 +120,7 @@ external reference is canonical Uniswap V3 WETH/USDC 0.05% at
 `0xd0b53D9277642d899DF5C87A3966A349A798F224`. Reference registration transaction:
 `0x7d82aa8677008ce213d9b6f69013a477203eb7949cce51115f6c5720d23239a2`.
 
-## Current Configuration
+### One-Round Replacement Configuration
 
 | Setting | Value |
 |---|---:|
@@ -99,7 +147,7 @@ Configuration transactions:
 | Input gate | `0x958f6831095269ebef6fcd6b6f4092767e0a276c7f415448f97c16d5aa11b328` |
 | Enable | `0xa9200e151a764342b06baf93e813c7ab88ab7a60cb8e5056b75bfa1fc94a899c` |
 
-## RPC-Estimated Canary
+### One-Round RPC-Estimated Canary
 
 The replacement launch generated fresh Universal Router calldata, set exact
 one-swap USDC and Permit2 allowances, and requested `eth_estimateGas` from the
@@ -132,7 +180,7 @@ for the release proof or a deliberately sufficient Forge multiplier. Always
 regenerate dry-run calldata immediately before sending because its Universal
 Router deadline is ten minutes.
 
-## First Deployment Retirement
+### First Deployment Retirement
 
 The first hook demonstrated settlement but allowed automatic gas estimation to
 select a successful no-arbitrage branch. Transaction
@@ -150,7 +198,7 @@ After the replacement settled:
 Burning NFT `2909971` returned `0.053196931435194189 WETH` and `99.919323 USDC`.
 Its liquidity now reads zero and `ownerOf(2909971)` reverts with `NOT_MINTED`.
 
-## Current Balances And Exit
+### Retired Balances And Exit
 
 The replacement position was retired after the controlled transaction showed
 that one bounded hook counter-trade did not consume the full edge. A separate

@@ -251,9 +251,11 @@ ticks, and a `15 bp` fee. A small-capital canary favored roughly `$250..$500`
 per side, `+/-300` ticks, and `10 bp`.
 
 Those are configuration rankings, not revenue forecasts. Uniswap's production
-routing API filters non-allowlisted hooks, so canonical UI/API flow is
-conditional on allowlisting the exact deployed hook. Route discovery is swept
-explicitly rather than assumed, and low-discovery results are near break-even.
+routing API filters non-allowlisted hooks, so canonical Uniswap UI/API flow is
+conditional on allowlisting the exact deployed hook. That is not a network-wide
+routing ban: the live canary received third-party routed swaps immediately.
+Route discovery is swept explicitly rather than assumed, and low-discovery
+results are near break-even.
 See [`docs/BASE_WETH_USDC_STRATEGY_REPLAY.md`](docs/BASE_WETH_USDC_STRATEGY_REPLAY.md)
 for methodology, reference-pool results, sensitivity tables, and the canary
 decision sequence.
@@ -261,8 +263,8 @@ decision sequence.
 Robinhood Chain WETH/USDG research used a separate three-day, 693,667-event
 sample and USDG-only Morpho execution. The optimized full-discovery ceiling was
 about `$10.40/day` at `$500` per side, `+/-50` ticks, and `10 bp`; the known-router
-subset was `$4.31/day`. Most of that result is LP fee income, while modeled hook
-profit of about `$1.03/day` was modeled as paid to swap callers under the now
+subset was `$4.31/day`. Most of that result is LP fee income, while hook profit
+of about `$1.03/day` was modeled as paid to swap callers under the now
 retired rebate policy. Base remains the stronger
 modeled first target, but Robinhood has enough positive evidence for a separate
 `$250..$500`-per-side canary after its deployment path, fixed-block integration
@@ -289,11 +291,26 @@ The inventory oracle's exact reference is `18,679,602` raw USDC across ten round
 
 ## Deployment Status
 
-There is no active production canary or current market-specific launch runbook.
+An owner-revenue Base WETH/USDC research canary is active from source commit
+`57a0cfb`:
 
-The former Base WETH/USDC canary was retired because its temporary one-round implementation left a large profitable gap for an external backrunner. Its hook was disabled, its principal cap was zeroed, and its LP position was burned. Receipts remain in [`docs/BASE_WETH_CANARY_DEPLOYMENT.md`](docs/BASE_WETH_CANARY_DEPLOYMENT.md) as historical evidence.
+- hook: `0x079a5f5231a34C60E60090f7C0CcF333510A4040`
+- pool: `0x2d92e3aff6dc298dab4bea46e759156162777da3636d43424254ffbdbc4466db`
+- position NFT: `2913425`
+- initial liquidity: `0.133398674855053634 WETH` and `245.086496 USDC`
+- monitor: automatic disable on owner/config, adapter-residue, settlement-floor,
+  iteration, or revenue-recipient invariant failure
 
-The current source fixes that specific implementation failure by performing repeated live-repriced rounds. It has not redeployed the retired canary. A new deployment still needs current-head simulation, a reviewed reference venue and lender configuration for each enabled direction, gas calibration, a calibrated `minNetProfit`, and a new runbook from the reviewed release commit.
+The controlled 50 USDC swap completed ten live-repriced rounds, repaid Morpho,
+and retained `0.000093783763919242 WETH` in the hook for owner withdrawal. At the
+first observation snapshot, the pool had already received 15 additional
+third-party swaps totaling about `41.79 USDC` of notional. That proves some
+external route discovery, not durable volume or profitability.
+
+Earlier canaries are disabled and have no liquidity. Current addresses,
+receipts, configuration, shutdown instructions, and timestamped observations
+are recorded in
+[`docs/BASE_WETH_CANARY_DEPLOYMENT.md`](docs/BASE_WETH_CANARY_DEPLOYMENT.md).
 
 Current optimized runtime sizes are enforced by `npm run size`. `ArbHook` is `23,644` bytes, leaving 356 bytes below the repository's `24,000`-byte budget and 932 bytes below EIP-170. `V4ArbExecutor` is `5,624` bytes and remains a separate immutable delegate-called execution module so the original route logic does not have to be deleted for deployability.
 

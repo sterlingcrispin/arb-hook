@@ -30,22 +30,22 @@ The initial deployment is owner-operated with a small set of manually verified, 
   `0x6211e7ff5b1256f6eccf05d6fc3df7891913754566eed5f58603c0c15255b44e`.
 
 74. Always-on creator revenue changes the gas-floor routing tradeoff
-- Status: `BLOCKS NEXT DEPLOYMENT CONFIGURATION`
-- Priority: `CRITICAL`
+- Status: `LIVE ROUTING SUCCEEDED; CONTINUE MONITORING`
+- Priority: `MEDIUM`
 - Summary: With recipient lookup removed, every enabled callback reaches
   `_attemptGasBudget`. The current nonzero `3,000,000` attempt limit is also a
   hard floor, so a swap must enter the callback with more than `3,200,000` gas.
   Four small external canary swaps used transaction gas limits between roughly
   `804,000` and `1,146,000`; they completed only because the retired recipient
   lookup skipped their arbitrage attempts.
-- Consequence: those exact routes would now revert during estimation or
-  execution. Estimators may raise the limit, but routers with fixed gas policy
-  may exclude the pool. This is independent of the hook's permission bitmap and
-  separate from Uniswap's exact-address allowlist in item 71.
-- Decision required: do not redeploy with the current gas configuration until a
-  same-path router fork test establishes whether ordinary routes will supply the
-  required envelope. Preserve the floor unless evidence supports changing it;
-  removing it can restore the fail-open behavior documented in item 70.
+- Live evidence: the creator-retained canary's controlled Universal Router swap
+  used a `4,459,209` gas limit, consumed `1,387,508`, and settled ten rounds.
+  Within two minutes, 15 third-party transactions through six other transaction
+  targets also reached the pool without reverting. Their no-op attempts found no
+  profitable settlement, which is expected after dynamic screening.
+- Decision: keep the floor during this canary. It did not prevent immediate
+  third-party routing, while removing it can restore the fail-open behavior in
+  item 70. Continue measuring route share and gas limits before scaling.
 
 69. Temporary one-round self-pool route bypassed the original iterative engine
 - Status: `ADDRESSED BY ITERATIVE SELF-POOL EXECUTION`
@@ -308,7 +308,7 @@ The initial deployment is owner-operated with a small set of manually verified, 
   nested hook data. The fixed-fork multi-round test would fail recursively if
   this invariant changed.
 
-## Open Before Any Deployment
+## Open Before Scaling Or Other-Chain Deployment
 
 72. Robinhood deployment path is not implemented or release-gated
 - Status: `REQUIRED BEFORE ROBINHOOD DEPLOYMENT`
@@ -328,35 +328,37 @@ The initial deployment is owner-operated with a small set of manually verified, 
 - Detail: [`docs/ROBINHOOD_WETH_USDG_STRATEGY_REPLAY.md`](docs/ROBINHOOD_WETH_USDG_STRATEGY_REPLAY.md).
 
 71. Organic Uniswap routing requires hook allowlisting
-- Status: `REQUIRED BEFORE ROUTING-DEPENDENT DEPLOYMENT`
-- Priority: `CRITICAL`
+- Status: `CANONICAL UNISWAP LIMITATION; NOT A CANARY BLOCKER`
+- Priority: `MEDIUM`
 - Summary: Uniswap's production routing API filters v4 pools whose nonzero hook
   address is not in its explicit hook-address allowlist. Adding metadata to the
   public hooklist does not automatically add an address to that routing
   allowlist. Direct swaps, third-party integrations, and searchers can still
   target the PoolId, but ordinary UI/API route discovery cannot be assumed.
-- Consequence: historical canonical-router replays are upper-bound scenarios
-  conditional on allowlisting. They are not evidence that a newly deployed pool
-  will receive canonical flow. Without a measured traffic source, expected
-  routing share and therefore expected LP revenue remain unknown.
-- Action: deploy the exact reviewed hook disabled, complete the current Uniswap
-  allowlisting process, then verify production quote requests consider and
-  select the PoolId before enabling or scaling liquidity. Keep explicit
-  discovery-share sensitivity in every economic projection.
+- Live evidence: the non-allowlisted hook received 15 third-party swaps totaling
+  about `41.79 USDC` of notional within two minutes of its controlled swap. Those
+  transactions used six non-canonical transaction targets. Exact-address
+  allowlisting therefore limits canonical Uniswap routing, but does not imply
+  that aggregators, searchers, or other routers will ignore the pool.
+- Action: observe actual route share before scaling. Uniswap allowlisting may
+  increase traffic, but it is not required to run this small research canary.
+  Keep discovery-share sensitivity in every economic projection.
 - Sources: the routing API's
   [hook allowlist](https://github.com/Uniswap/routing-api/blob/main/lib/util/hooksAddressesAllowlist.ts),
   [quote filter](https://github.com/Uniswap/routing-api/blob/main/lib/handlers/quote/quote.ts),
   and the [hooklist submission notes](https://github.com/Uniswap/hooklist).
 
 20. Independent review of release commit
-- Status: `REQUIRED FOR NEXT DEPLOYMENT`
+- Status: `ACCEPTED FOR RESEARCH CANARY; REQUIRED AGAIN BEFORE SCALE`
 - Priority: `CRITICAL`
 - Summary: the former review covered materially different production routes,
   including the retired one-round implementation. The current release adds an
   immutable delegate-called executor and repeated live-repriced v4/V3 rounds
   inside one flash loan. Review the exact next deployment commit rather than
   treating either the retired canary review or legacy scanner review as
-  transferable.
+  transferable. The owner accepted the limited-capital canary risk after the
+  reported external review; any material source or capital change requires a
+  fresh review.
 
 ## Accepted By Design
 
@@ -421,7 +423,7 @@ The initial deployment is owner-operated with a small set of manually verified, 
   distinction, not an organic-router limitation.
 
 21. Current-head Base rehearsal and economic calibration
-- Status: `REQUIRED FOR NEXT DEPLOYMENT`
+- Status: `LIVE CANARY ACTIVE; OBSERVATION IN PROGRESS`
 - Priority: `CRITICAL`
 - Historical notes: the removed `ArbHookWethCanaryForkTest` ran against an unpinned Base head with
   canonical WETH/USDC V3 reference, WETH-bound Morpho adapter, canonical V4
@@ -436,6 +438,11 @@ The initial deployment is owner-operated with a small set of manually verified, 
   `0.000053328188113127 WETH` for owner withdrawal, and leave 18 ticks versus
   the one-round baseline's 54 ticks after the same 50 USDC trigger. The reverse
   direction retains `0.095317 USDC` under the release profit floor.
+- Live evidence: source commit `57a0cfb` was deployed as hook
+  `0x079a5f5231a34C60E60090f7C0CcF333510A4040`. A 50 USDC controlled swap in
+  transaction `0xb0f1a93ae4fb495723a8c7237f2f0c459fbf418c4bd88a20168410c5f5844eab`
+  borrowed `0.0027 WETH`, completed ten rounds, repaid Morpho with zero fee, and
+  retained `0.000093783763919242 WETH` in the hook.
 - Calibration sweep: 20 rounds settled under the default 3,000,000-gas attempt
   budget and earned `0.001313458837594588 WETH`; 25 rounds exhausted that budget
   and settled nothing. At an 8,000,000-gas diagnostic budget, the route stopped
@@ -443,9 +450,8 @@ The initial deployment is owner-operated with a small set of manually verified, 
   and gas bounds must be selected together; maximizing the iteration number can
   reduce realized capture to zero.
 - Decision: preserve the retired figures only as historical one-round evidence.
-  Before deployment, repeat the current iterative callback at current head with
-  the actual v4 liquidity, V3 reference, iteration bound, principal cap, fee
-  ceiling, profit floor, and realistic gas assumptions.
+  Continue the live monitor and evaluate realized third-party volume, LP fees,
+  owner revenue, no-op rate, and any residual external backrun before scaling.
 
 58. Retry suppression depends on lender revert-data propagation
 - Status: `DOCUMENTED FOR LEGACY SCANNER`
