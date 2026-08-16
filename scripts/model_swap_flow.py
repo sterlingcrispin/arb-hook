@@ -31,6 +31,10 @@ ROOT = Path(__file__).resolve().parents[1]
 WETH = "0x4200000000000000000000000000000000000006"
 USDC = "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913"
 POOL_MANAGER = "0x498581ff718922c3f8e6a244956af099b2652b2b"
+NETWORK_LABEL = "Base"
+QUOTE_SYMBOL = "USDC"
+CHAIN_ID = 8453
+REFERENCE_POOL_KEY = "uniswap_v3_5bp"
 
 V3_SWAP_TOPIC = "0xc42079f94a6350d7e6235f29174924f928cc2ac818eb64fed8004e115fbcca67"
 PANCAKE_V3_SWAP_TOPIC = "0x19b47279256b2a23a1665c810c8d55a1758940ee09377d4f8d26497a3577dc83"
@@ -55,7 +59,7 @@ class Pool:
     pool_id: str = ""
 
 
-POOLS = (
+BASE_POOLS = (
     Pool(
         "uniswap_v3_1bp",
         "Uniswap v3 1 bp",
@@ -114,6 +118,133 @@ POOLS = (
         "0x90333bb05c258fe0dddb2840ef66f1a05165aa7dac6815d24e807cc6ebd943a0",
     ),
 )
+
+ROBINHOOD_POOLS = (
+    Pool(
+        "uniswap_v3_1bp",
+        "Uniswap v3 1 bp",
+        "uniswap-v3",
+        "0x52e65b17fb6e5ba00ed806f37afcd2daa50271ca",
+        1.0,
+        V3_SWAP_TOPIC,
+    ),
+    Pool(
+        "uniswap_v3_5bp",
+        "Uniswap v3 5 bp",
+        "uniswap-v3",
+        "0x69bfaf19c9f377bb306a89aed9f6b07e2c1a8d9a",
+        5.0,
+        V3_SWAP_TOPIC,
+    ),
+    Pool(
+        "uniswap_v3_30bp",
+        "Uniswap v3 30 bp",
+        "uniswap-v3",
+        "0xa9188730fe85be88ad499d7d52b099e800fb0334",
+        30.0,
+        V3_SWAP_TOPIC,
+    ),
+    Pool(
+        "pancake_v3_5bp",
+        "Pancake v3 5 bp",
+        "pancake-v3",
+        "0x88a8e96e7785d378825e8b5d7fc0e6f62487061e",
+        5.0,
+        PANCAKE_V3_SWAP_TOPIC,
+    ),
+    Pool(
+        "uniswap_v4_native_dynamic_a",
+        "Uniswap v4 native dynamic A",
+        "uniswap-v4",
+        "0x8366a39cc670b4001a1121b8f6a443a643e40951",
+        0.0,
+        V4_SWAP_TOPIC,
+        "0x30dac7167c36242d1bacfd30561d444cf014529ee55978991d03e4ee178e725a",
+    ),
+    Pool(
+        "uniswap_v4_native_dynamic_b",
+        "Uniswap v4 native dynamic B",
+        "uniswap-v4",
+        "0x8366a39cc670b4001a1121b8f6a443a643e40951",
+        0.0,
+        V4_SWAP_TOPIC,
+        "0xa53aed8eb6f4c8a2c5d990c261868f45d2b2f10b13f1b14924ef5a6e614f2a28",
+    ),
+    Pool(
+        "uniswap_v4_native_dynamic_c",
+        "Uniswap v4 native dynamic C",
+        "uniswap-v4",
+        "0x8366a39cc670b4001a1121b8f6a443a643e40951",
+        0.0,
+        V4_SWAP_TOPIC,
+        "0xc396e8bccee362d5c8d1575e7951332584d759fb1b9daf2cde5e708fb77167f1",
+    ),
+    Pool(
+        "uniswap_v4_native_0_25bp",
+        "Uniswap v4 native 0.25 bp",
+        "uniswap-v4",
+        "0x8366a39cc670b4001a1121b8f6a443a643e40951",
+        0.25,
+        V4_SWAP_TOPIC,
+        "0x85aa9a7c2ef9deec7bcbc5e78c6b26d2598c2aaf3f810b267fa4f8f9b0854142",
+    ),
+    Pool(
+        "uniswap_v4_native_1bp",
+        "Uniswap v4 native 1 bp",
+        "uniswap-v4",
+        "0x8366a39cc670b4001a1121b8f6a443a643e40951",
+        1.0,
+        V4_SWAP_TOPIC,
+        "0x24107d152f14a76d292123265ae3f3c71f863fc2f4ef7ba49d64e78d28ea379e",
+    ),
+    Pool(
+        "uniswap_v4_native_4_6bp",
+        "Uniswap v4 native 4.6 bp",
+        "uniswap-v4",
+        "0x8366a39cc670b4001a1121b8f6a443a643e40951",
+        4.6,
+        V4_SWAP_TOPIC,
+        "0x54f7883914619af9105355bf83ed678bcf9f63560218ac61c9963b9503d0ba32",
+    ),
+    Pool(
+        "uniswap_v4_weth_2bp",
+        "Uniswap v4 WETH 2 bp",
+        "uniswap-v4",
+        "0x8366a39cc670b4001a1121b8f6a443a643e40951",
+        2.0,
+        V4_SWAP_TOPIC,
+        "0x84bd4e2d8be11aeb0afc1195b38f587b61e90068548f1063fdbe448fb8cad0b6",
+    ),
+    Pool(
+        "uniswap_v4_weth_4_5bp",
+        "Uniswap v4 WETH 4.5 bp",
+        "uniswap-v4",
+        "0x8366a39cc670b4001a1121b8f6a443a643e40951",
+        4.5,
+        V4_SWAP_TOPIC,
+        "0x6ba18d461bfe3df70a80b50a4700e330e49efdaf597901b931f210554a5035d2",
+    ),
+)
+
+POOLS = BASE_POOLS
+
+
+def configure_network(network: str) -> None:
+    global WETH, USDC, POOL_MANAGER, NETWORK_LABEL, QUOTE_SYMBOL, CHAIN_ID
+    global REFERENCE_POOL_KEY, KNOWN_CALLERS, POOLS
+    if network == "base":
+        return
+    WETH = "0x0bd7d308f8e1639fab988df18a8011f41eacad73"
+    USDC = "0x5fc5360d0400a0fd4f2af552add042d716f1d168"
+    POOL_MANAGER = "0x8366a39cc670b4001a1121b8f6a443a643e40951"
+    NETWORK_LABEL = "Robinhood Chain"
+    QUOTE_SYMBOL = "USDG"
+    CHAIN_ID = 4663
+    REFERENCE_POOL_KEY = "uniswap_v3_1bp"
+    KNOWN_CALLERS = {
+        "0x8876789976decbfcbbbe364623c63652db8c0904": "Uniswap Universal Router",
+    }
+    POOLS = ROBINHOOD_POOLS
 
 
 class Rpc:
@@ -182,7 +313,9 @@ def verify_pools(rpc: Rpc, pools: Iterable[Pool]) -> None:
         token0 = rpc.token(pool.address, "0x0dfe1681")
         token1 = rpc.token(pool.address, "0xd21220a7")
         if token0 != WETH or token1 != USDC:
-            raise RuntimeError(f"{pool.label} token order is {token0}/{token1}, expected WETH/USDC")
+            raise RuntimeError(
+                f"{pool.label} token order is {token0}/{token1}, expected WETH/{QUOTE_SYMBOL}"
+            )
 
 
 def fetch_range(rpc: Rpc, pool: Pool, start: int, end: int) -> list[dict]:
@@ -501,8 +634,8 @@ def interpolate(points: list[dict], size: float, field: str) -> float | None:
     return float(points[-1][field])
 
 
-def weight_sweep(path: Path, source_events: list[dict], duration_days: float) -> list[dict]:
-    if not path.exists():
+def weight_sweep(path: Path | None, source_events: list[dict], duration_days: float) -> list[dict]:
+    if path is None or not path.exists():
         return []
     paths = [path] if path.is_file() else sorted(path.rglob("v4-parameter-sweep-*.json"))
     rows = []
@@ -651,9 +784,9 @@ def print_report(payload: dict) -> None:
             f"${quantiles['p99']:>8,.2f} {stats['thresholds']['100']['events_per_day']:>10,.1f}"
         )
 
-    reference = payload["pools"]["uniswap_v3_5bp"]["stats"]
+    reference = payload["pools"][REFERENCE_POOL_KEY]["stats"]
     model = reference["arrival_model"]
-    print("\nDeep Uniswap v3 5 bp reference model")
+    print(f"\n{payload['pools'][REFERENCE_POOL_KEY]['metadata']['label']} reference model")
     print(
         f"  {reference['events_per_day']:,.0f} swaps/day, ${reference['volume_usdc_per_day']:,.0f}/day; "
         f"hourly count model={model['family']} (Fano {model['fano_factor']:.2f})"
@@ -716,6 +849,7 @@ def parse_shares(value: str) -> list[float]:
 
 def parser() -> argparse.ArgumentParser:
     command = argparse.ArgumentParser(description=__doc__)
+    command.add_argument("--network", choices=("base", "robinhood"), default="base")
     command.add_argument("--rpc-url", default=os.environ.get("BASE_RPC_URL"))
     command.add_argument("--days", type=float, default=7.0)
     command.add_argument("--end-block", type=int)
@@ -727,7 +861,6 @@ def parser() -> argparse.ArgumentParser:
     command.add_argument(
         "--sweep-results",
         type=Path,
-        default=ROOT / "artifacts" / "frontier" / "v4-parameter-sweep-50052773.json",
         help="sweep JSON file or directory containing sweep JSON files",
     )
     return command
@@ -735,6 +868,9 @@ def parser() -> argparse.ArgumentParser:
 
 def main() -> int:
     args = parser().parse_args()
+    configure_network(args.network)
+    if args.sweep_results is None and args.network == "base":
+        args.sweep_results = ROOT / "artifacts" / "frontier" / "v4-parameter-sweep-50052773.json"
     if not args.rpc_url:
         raise SystemExit("BASE_RPC_URL or --rpc-url is required")
     if args.days <= 0 or args.chunk_blocks <= 0 or args.workers <= 0:
@@ -746,11 +882,12 @@ def main() -> int:
     start = block_at_timestamp(rpc, end, end_time - round(args.days * 86_400))
     start_time = block_timestamp(rpc.block(start))
     duration_days = (end_time - start_time) / 86_400
-    stem = f"swap-flow-{start}-{end}"
+    prefix = "" if args.network == "base" else f"{args.network}-"
+    stem = f"{prefix}swap-flow-{start}-{end}"
     cache_path = args.output_dir / f"{stem}-events.jsonl.gz"
     metadata = {
         "schema_version": 2,
-        "chain_id": 8453,
+        "chain_id": CHAIN_ID,
         "start_block": start,
         "end_block": end,
         "start_timestamp": start_time,
@@ -758,6 +895,8 @@ def main() -> int:
         "duration_days": duration_days,
         "pools": [asdict(pool) for pool in POOLS],
     }
+    if args.network != "base":
+        metadata.update(network=args.network, quote_symbol=QUOTE_SYMBOL)
 
     verify_pools(rpc, POOLS)
     if cache_path.exists() and not args.refresh:
@@ -768,7 +907,7 @@ def main() -> int:
     else:
         print(
             f"Fetching {duration_days:.2f} days across {len(POOLS)} pools, "
-            f"Base blocks {start}..{end}..."
+            f"{NETWORK_LABEL} blocks {start}..{end}..."
         )
         events = fetch_events(
             rpc,
@@ -821,9 +960,7 @@ def main() -> int:
     }
     proxy_stats = flow_stats(proxy, start_time, end_time)
     reference_events = [
-        event
-        for event in by_pool["uniswap_v3_5bp"]
-        if event["direction"] == "usdc_to_weth"
+        event for event in by_pool[REFERENCE_POOL_KEY] if event["direction"] == "usdc_to_weth"
     ]
     payload = {
         "metadata": metadata,
@@ -839,8 +976,8 @@ def main() -> int:
         "pools": pool_payload,
         "aggregate_event_flow": aggregate_stats,
         "market_order_proxy": proxy_stats,
-        "reference_flow_projections": projection(pool_payload["uniswap_v3_5bp"]["stats"], args.shares),
-        "sweep_weighting_source": "uniswap_v3_5bp_usdc_to_weth",
+        "reference_flow_projections": projection(pool_payload[REFERENCE_POOL_KEY]["stats"], args.shares),
+        "sweep_weighting_source": f"{REFERENCE_POOL_KEY}_usdc_to_weth",
         "sweep_weighting": weight_sweep(args.sweep_results, reference_events, duration_days),
     }
     json_path, csv_path = write_outputs(args.output_dir, stem, payload)
