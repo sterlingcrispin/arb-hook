@@ -21,6 +21,7 @@ import {Hooks} from "@uniswap/v4-core/src/libraries/Hooks.sol";
 import {TickMath} from "@uniswap/v4-core/src/libraries/TickMath.sol";
 import {IHooks} from "@uniswap/v4-core/src/interfaces/IHooks.sol";
 import {IPoolManager} from "@uniswap/v4-core/src/interfaces/IPoolManager.sol";
+import {StateLibrary} from "@uniswap/v4-core/src/libraries/StateLibrary.sol";
 import {PoolKey} from "@uniswap/v4-core/src/types/PoolKey.sol";
 import {PoolIdLibrary} from "@uniswap/v4-core/src/types/PoolId.sol";
 import {Currency} from "@uniswap/v4-core/src/types/Currency.sol";
@@ -33,6 +34,7 @@ interface IPermit2Allowance {
 
 contract ArbHookWethCanaryForkTest is Test {
     using PoolIdLibrary for PoolKey;
+    using StateLibrary for IPoolManager;
 
     address internal constant WETH = 0x4200000000000000000000000000000000000006;
     address internal constant USDC = 0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913;
@@ -81,6 +83,7 @@ contract ArbHookWethCanaryForkTest is Test {
     uint256 internal triggerPositionTokenId;
     uint256 internal v4WethDeposited;
     uint256 internal v4UsdcDeposited;
+    uint256 internal principalCap;
 
     function setUp() public {
         if (!vm.envOr("RUN_WETH_CANARY_FORK", false)) return;
@@ -107,8 +110,9 @@ contract ArbHookWethCanaryForkTest is Test {
         assertEq(address(hook), expected, "mined hook address mismatch");
 
         adapter = new MorphoERC3156Adapter(MORPHO_BLUE, WETH);
+        principalCap = vm.envOr("WETH_FLASH_PRINCIPAL_CAP_WEI", uint256(PRINCIPAL_CAP));
         hook.setLenderForToken(WETH, address(adapter));
-        hook.setFlashPrincipalForToken(WETH, PRINCIPAL_CAP);
+        hook.setFlashPrincipalForToken(WETH, principalCap);
         hook.setMaxFlashFeeBpsForToken(WETH, 1);
         hook.setMinNetProfitForToken(WETH, MIN_NET_PROFIT);
         hook.setHookMaxIterations(1);
@@ -125,7 +129,7 @@ contract ArbHookWethCanaryForkTest is Test {
         }
 
         uint256 lenderBalanceBefore = IERC20(WETH).balanceOf(MORPHO_BLUE);
-        assertGt(lenderBalanceBefore, PRINCIPAL_CAP, "insufficient Morpho WETH liquidity");
+        assertGt(lenderBalanceBefore, principalCap, "insufficient Morpho WETH liquidity");
 
         address beneficiary = makeAddr("WETH canary beneficiary");
         uint256 snapshot = vm.snapshotState();
@@ -148,7 +152,7 @@ contract ArbHookWethCanaryForkTest is Test {
         assertEq(settled.buyPool, UNISWAP_WETH_USDC_500, "wrong external pool");
         assertEq(settled.sellPool, V4_POOL_MANAGER, "triggering v4 pool was not traded");
         assertGt(settled.principal, 0, "adaptive sizing returned zero");
-        assertLe(settled.principal, PRINCIPAL_CAP, "principal exceeded canary cap");
+        assertLe(settled.principal, principalCap, "principal exceeded canary cap");
         assertGt(settled.totalAmountSwapped, 0, "no arbitrage input was swapped");
         assertEq(settled.fee, 0, "Morpho charged a fee");
         assertGt(settled.netProfit, 0, "arbitrage was not profitable");
@@ -187,6 +191,21 @@ contract ArbHookWethCanaryForkTest is Test {
         assertEq(IERC20(WETH).balanceOf(address(hook)), 0, "hook retained caller profit");
         assertEq(IERC20(USDC).balanceOf(address(hook)), 0, "hook retained USDC");
         assertEq(IERC20(WETH).balanceOf(MORPHO_BLUE), lenderBalanceBefore, "Morpho was not repaid");
+    }
+
+    function testCanIncreaseAndRemoveCanaryLiquidity() public {
+        if (!forkEnabled) {
+            vm.skip(true, "set RUN_WETH_CANARY_FORK=true and BASE_RPC_URL");
+            return;
+        }
+
+        IUniswapV4PositionManager positionManager = IUniswapV4PositionManager(V4_POSITION_MANAGER);
+        uint128 liquidityBefore = positionManager.getPositionLiquidity(triggerPositionTokenId);
+        _increaseTriggerLiquidity(0.05 ether, 100e6);
+        assertGt(
+            positionManager.getPositionLiquidity(triggerPositionTokenId), liquidityBefore, "liquidity did not increase"
+        );
+        _removeTriggerLiquidity();
     }
 
     /// @notice Compares leaving the swap-created edge open, paying it to an
@@ -443,8 +462,8 @@ contract ArbHookWethCanaryForkTest is Test {
         IWETH9(WETH).deposit{value: 200 ether}();
         _pullUsdc(50_000e6);
 
-        uint256 wethMax = 2 ether;
-        uint256 usdcMax = 5_000e6;
+        uint256 wethMax = vm.envOr("WETH_LP_AMOUNT_WEI", uint256(2 ether));
+        uint256 usdcMax = vm.envOr("USDC_LP_AMOUNT_RAW", uint256(5_000e6));
         int24 tickLower = TickMath.minUsableTick(triggerKey.tickSpacing);
         int24 tickUpper = TickMath.maxUsableTick(triggerKey.tickSpacing);
         uint128 liquidity = LiquidityAmounts.getLiquidityForAmounts(
@@ -516,6 +535,41 @@ contract ArbHookWethCanaryForkTest is Test {
 
         assertGt(IERC20(WETH).balanceOf(address(this)), wethBefore, "LP WETH was not returned");
         assertGt(IERC20(USDC).balanceOf(address(this)), usdcBefore, "LP USDC was not returned");
+    }
+
+    function _increaseTriggerLiquidity(uint256 wethMax, uint256 usdcMax) private {
+        (uint160 sqrtPriceX96,,,) = IPoolManager(V4_POOL_MANAGER).getSlot0(triggerKey.toId());
+        int24 tickLower = TickMath.minUsableTick(triggerKey.tickSpacing);
+        int24 tickUpper = TickMath.maxUsableTick(triggerKey.tickSpacing);
+        uint128 liquidity = LiquidityAmounts.getLiquidityForAmounts(
+            sqrtPriceX96,
+            TickMath.getSqrtPriceAtTick(tickLower),
+            TickMath.getSqrtPriceAtTick(tickUpper),
+            wethMax,
+            usdcMax
+        );
+
+        IERC20(WETH).approve(PERMIT2, wethMax);
+        IERC20(USDC).approve(PERMIT2, usdcMax);
+        IPermit2Allowance(PERMIT2).approve(WETH, V4_POSITION_MANAGER, uint160(wethMax), type(uint48).max);
+        IPermit2Allowance(PERMIT2).approve(USDC, V4_POSITION_MANAGER, uint160(usdcMax), type(uint48).max);
+
+        bytes[] memory params = new bytes[](3);
+        params[0] = abi.encode(triggerPositionTokenId, liquidity, uint128(wethMax), uint128(usdcMax), bytes(""));
+        params[1] = abi.encode(triggerKey.currency0);
+        params[2] = abi.encode(triggerKey.currency1);
+        IUniswapV4PositionManager(V4_POSITION_MANAGER)
+            .modifyLiquidities(
+                abi.encode(
+                    abi.encodePacked(
+                        bytes1(uint8(Actions.INCREASE_LIQUIDITY)),
+                        bytes1(uint8(Actions.CLOSE_CURRENCY)),
+                        bytes1(uint8(Actions.CLOSE_CURRENCY))
+                    ),
+                    params
+                ),
+                block.timestamp
+            );
     }
 
     function _swapTriggerPool(uint128 amountIn, address beneficiary) private {

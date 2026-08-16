@@ -6,7 +6,7 @@ uses the triggering v4 pool as its first leg; see `README.md` and
 `docs/ARB_LOGIC_DEEP_DIVE.md` before using the historical phases below.
 
 ## Goal
-Migrate `ArbHook` from inventory-funded arbitrage to flash-loan-funded arbitrage, so the hook does not need to hold principal inventory. Net profit is paid to an explicit recipient when supplied or retained for the owner when hook data is empty.
+Migrate `ArbHook` from inventory-funded arbitrage to flash-loan-funded arbitrage, so the hook does not need to hold principal inventory. The current production route resolves empty hook data through the canonical router's original caller and retains an exact packed recipient as an optional override.
 
 ## Context
 - Production execution is hook-triggered and best-effort via `_afterSwap -> attemptHookPoolInternal -> onFlashLoan`.

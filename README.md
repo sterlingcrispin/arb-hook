@@ -33,7 +33,7 @@ The production V4/V3 route does not traverse initialized ticks or solve an exact
 7. If execution reverts for a retryable reason, try one-half and then one-quarter of the original principal. A positive result below `minNetProfit` is final and is not retried smaller.
 8. Treat realized post-swap balances as authoritative. Estimates can reject or size a candidate, but they cannot make an unprofitable loan settle.
 
-The initial principal is therefore not a fixed amount and is not the full cap. On Base block `50018535`, a 100 USDC canary swap selected about `0.008907102809547629 WETH` from a 1 WETH ceiling.
+The initial principal is therefore not a fixed amount and is not the full cap. On Base block `50029886`, a 10 USDC swap against the proposed $100-per-side position selected about `0.000812887664977685 WETH` from a `0.005 WETH` ceiling.
 
 ## Current Canary
 
@@ -45,19 +45,22 @@ The first Base canary is deliberately narrow:
 | External reference and second leg | Uniswap v3 WETH/USDC 0.05% at `0xd0b53D9277642d899DF5C87A3966A349A798F224` |
 | Flash lender | WETH-bound Morpho Blue ERC-3156 adapter |
 | Enabled direction | USDC to WETH trigger swaps, with profit paid in WETH |
-| Minimum eligible trigger | `49 USDC` of actual input for the USDC-to-WETH direction |
+| Initial LP target | approximately `$100 WETH + $100 USDC` in one full-range position |
+| Minimum eligible trigger | `10 USDC` of actual input for the USDC-to-WETH direction |
 
 Only WETH is configured as a flash-loan token in this canary. A WETH-to-USDC trigger therefore does not attempt arbitrage. Supporting that direction requires a reviewed USDC lender configuration, minimum-profit floor, and registration under USDC.
 
-The current-head fork gate initializes and funds the v4 pool, performs an ordinary 100 USDC swap, and does not manufacture a separate external-pool dislocation. At block `50018535` it:
+The current-head fork gate initializes and funds the v4 pool and does not manufacture a separate external-pool dislocation. At block `50029886`, the shallow-canary replay deposited `0.053140792207665807 WETH` and `99.973139 USDC`. A 10 USDC swap then:
 
-- borrowed `0.008907102809547629 WETH`;
-- paid `0.000427463494774361 WETH` to the beneficiary;
+- borrowed `0.000812887664977685 WETH`;
+- paid `0.000153429487453379 WETH` to the beneficiary;
 - paid zero Morpho fee;
-- added about `419,546` gas versus the disabled swap;
+- added about `420,105` gas versus the disabled swap;
 - repaid Morpho exactly;
 - left no WETH or USDC in the hook; and
 - burned the test LP position successfully.
+
+At the replay's `0.006 gwei` L2 gas price, the route profit exceeded incremental execution gas by `0.000150908857453379 WETH`. A 100 USDC swap is inappropriate for this shallow position and correctly produced no arbitrage settlement; it is not the first controlled swap.
 
 Those values prove integration and settlement, not future yield. Profit depends on the hooked pool's depth, the triggering swap size, both pool fees, the external reference state, and gas.
 
@@ -146,7 +149,7 @@ Hook execution starts disabled.
 
 - `setMinTriggerAmount(poolId, zeroForOne, amount)`
   - Sets the minimum actual swap input before route discovery. `amount` uses currency0 raw units when `zeroForOne` is true and currency1 raw units otherwise; zero disables the gate.
-  - The canary uses `49,000,000` raw USDC for its WETH/USDC PoolId with `zeroForOne = false`. The value is pool-specific because liquidity and pool state determine how large a swap must be to create the required edge.
+  - The $100-per-side canary uses `10,000,000` raw USDC for its WETH/USDC PoolId with `zeroForOne = false`. The value is pool-specific because liquidity and pool state determine how large a swap must be to create the required edge.
   - This avoids spending full arbitrage gas on known-undersized swaps. The spread and realized-profit checks still decide whether an eligible swap can settle.
 
 Per output token:
@@ -156,7 +159,7 @@ Per output token:
 - `setMaxFlashFeeBpsForToken(token, cap)` rejects quoted or realized fees above the cap. Zero disables borrowing.
 - `setMinNetProfitForToken(token, floor)` requires realized profit after lender fee in raw token units. Zero disables borrowing.
 
-The Base WETH canary uses a 49 USDC trigger floor, a 1 WETH principal ceiling, a 1 bp fee ceiling, and a provisional `0.0001 WETH` minimum profit. Recalibrate the input and profit floors against the intended liquidity and current fork state immediately before broadcast.
+The $100-per-side Base WETH canary uses a 10 USDC trigger floor, a `0.005 WETH` principal ceiling, a 1 bp fee ceiling, and a provisional `0.0001 WETH` minimum profit. Recalibrate the input and profit floors against the intended liquidity and current fork state immediately before broadcast.
 
 ## Tests
 
@@ -207,11 +210,13 @@ The canary sequence is:
 
 1. Deploy and verify all artifacts while disabled.
 2. Register the canonical Uniswap V3 WETH/USDC reference with `script/RegisterArbHookCanaryPools.s.sol`.
-3. Configure the WETH Morpho adapter, economic ceilings, and 49 USDC trigger floor with `script/ConfigureArbHookCanary.s.sol`.
+3. Configure the WETH Morpho adapter, economic ceilings, and 10 USDC trigger floor with `script/ConfigureArbHookCanary.s.sol`.
 4. Initialize and fund the hooked v4 WETH/USDC pool with `script/InitializeArbHookCanaryPool.s.sol`.
 5. Prove a protected swap while disabled.
 6. Set `hookMaxIterations` to `1` and run a protected USDC-to-WETH canary swap.
 7. Disable execution and burn the LP position if settlement or economics are not acceptable.
+
+Disable execution before adding capital to an existing position. Use `script/AddArbHookCanaryLiquidity.s.sol`, rerun the current-state sweep at the proposed total depth, and recalibrate the trigger, principal, and profit limits before enabling again.
 
 Always simulate Forge scripts before adding `--broadcast`. Full commands and read-back checks are in the runbook.
 

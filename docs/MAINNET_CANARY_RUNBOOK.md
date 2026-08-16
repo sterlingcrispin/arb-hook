@@ -22,7 +22,7 @@ Do not broadcast until:
 2. Every release gate below passes from a clean checkout.
 3. Canonical Base addresses and runtime code are reverified.
 4. The hook owner and LP recipient are the intended canary wallets.
-5. LP caps, swap size, 49 USDC trigger floor, 1 WETH principal ceiling, and WETH profit floor are recorded.
+5. LP caps, swap size, 10 USDC trigger floor, `0.005 WETH` principal ceiling, and WETH profit floor are recorded.
 6. The owner can set `hookMaxIterations` to zero.
 7. The LP wallet can simulate burning the position.
 8. The controlled swap has a current minimum WETH output and uses the canonical Universal Router with empty hook data.
@@ -77,7 +77,7 @@ BASE_RPC_URL="$BASE_RPC_URL" \
 forge test --match-contract ArbHookWethCanaryForkTest -vv
 ```
 
-This test uses canonical Base v4 periphery, Morpho, and Uniswap v3. It initializes the hooked pool, submits an ordinary 100 USDC swap, captures the edge created by that swap, repays, proves that empty hook data pays the Universal Router's original caller, validates the optional explicit-recipient override, and removes liquidity. It does not force an unrelated external dislocation.
+This test uses canonical Base v4 periphery, Morpho, and Uniswap v3. Its default deep fixture initializes the hooked pool, submits an ordinary 100 USDC swap, captures the edge created by that swap, repays, proves that empty hook data pays the Universal Router's original caller, validates the optional explicit-recipient override, increases the position, and removes liquidity. It does not force an unrelated external dislocation. Run the separate shallow-profile sweep below for the actual $100-per-side deployment limits.
 
 It also compares no backrun, a matched external V4/V3 backrun, and the hook using distinct accounts. At pinned block `50018808`, the backrunner and hook each captured `0.804926 USDC` and left the LP at the same value; the recipient was the searcher in one case and the beneficiary in the other. With no backrun, the LP retained an additional `0.813727 USDC`. Treat this as MEV redistribution, not operator revenue, unless organic backrunning is established as the correct baseline.
 
@@ -159,10 +159,10 @@ The first registered matching concentrated pool is the production reference venu
 Initial reviewed values:
 
 ```text
-WETH_FLASH_PRINCIPAL_CAP_WEI = 1000000000000000000   # 1 WETH ceiling
+WETH_FLASH_PRINCIPAL_CAP_WEI = 5000000000000000      # 0.005 WETH ceiling
 WETH_MAX_FLASH_FEE_BPS       = 1                     # smallest enabled cap
 WETH_MIN_NET_PROFIT_WEI      = 100000000000000       # provisional 0.0001 WETH
-USDC_MIN_TRIGGER_AMOUNT_RAW  = 49000000               # 49 USDC actual input
+USDC_MIN_TRIGGER_AMOUNT_RAW  = 10000000               # 10 USDC actual input
 ```
 
 The principal is a ceiling, not the requested amount. A zero principal, fee cap, or profit floor disables borrowing. The trigger floor is keyed to the exact WETH/USDC PoolId and USDC-to-WETH direction; swaps below it skip before route discovery.
@@ -173,10 +173,10 @@ Simulate while the hook remains disabled:
 PRIVATE_KEY="$OWNER_KEY" \
 HOOK="$HOOK" \
 LENDER_ADAPTER="$MORPHO_ADAPTER" \
-WETH_FLASH_PRINCIPAL_CAP_WEI=1000000000000000000 \
+WETH_FLASH_PRINCIPAL_CAP_WEI=5000000000000000 \
 WETH_MAX_FLASH_FEE_BPS=1 \
 WETH_MIN_NET_PROFIT_WEI=100000000000000 \
-USDC_MIN_TRIGGER_AMOUNT_RAW=49000000 \
+USDC_MIN_TRIGGER_AMOUNT_RAW=10000000 \
 forge script script/ConfigureArbHookCanary.s.sol:ConfigureArbHookCanary \
   --rpc-url "$BASE_RPC_URL"
 ```
@@ -201,11 +201,11 @@ minimumProfitWei >=
   + desiredBeneficiaryMarginWei
 ```
 
-At pinned block `50018808`, the calibrated boundary was 48 USDC below the `0.0001 WETH` floor and 49 USDC above it. With the 49 USDC input gate enabled, smaller swaps added only about 2,500 to 3,100 gas instead of entering the roughly 419,500-gas attempt. These values depend on pool liquidity and state and are not production guarantees.
+At Base block `50029886`, the $100-per-side replay cleared the `0.0001 WETH` floor at 10 USDC. Swaps below the 10 USDC input gate added only about 2,700 to 3,100 gas instead of entering the roughly 420,000-gas attempt. The older 2 WETH fixture did not clear the same profit floor until 49 USDC, demonstrating why these settings must be recalibrated whenever liquidity changes.
 
 ## 5. Initialize And Fund The V4 Pool
 
-Choose explicit LP caps and test them on a current fork with the intended swap size. The integration proof uses up to 2 WETH and 5,000 USDC; those are test parameters, not mandatory launch amounts.
+Choose explicit LP caps and test them on a current fork with the intended swap size. The initial target is approximately $100 of WETH and 100 USDC. At block `50029886`, the rehearsed WETH cap was `0.053140792207679097 WETH`; recalculate it from the current reference price immediately before launch.
 
 ```bash
 PRIVATE_KEY="$LP_KEY" \
@@ -221,6 +221,22 @@ forge script \
 The script reads the current canonical V3 price, computes full-range liquidity, approves only the supplied caps, and atomically initializes plus mints through the canonical V4 PositionManager.
 
 Review the PoolKey, opening price, liquidity, LP recipient, and predicted token ID. Repeat with `--broadcast`, record `POSITION_TOKEN_ID`, and keep the NFT in the canary LP wallet.
+
+Before broadcasting, run the exact shallow-profile sweep:
+
+```bash
+RUN_WETH_CANARY_FORK=true \
+RUN_WETH_CANARY_SWEEP=true \
+WETH_LP_AMOUNT_WEI="$WETH_LP_AMOUNT_WEI" \
+USDC_LP_AMOUNT_RAW=100000000 \
+WETH_FLASH_PRINCIPAL_CAP_WEI=5000000000000000 \
+WETH_CANARY_SIM_GAS_PRICE_WEI="$CONSERVATIVE_GAS_PRICE_WEI" \
+WETH_CANARY_SWEEP_MIN_PROFIT_WEI=100000000000000 \
+WETH_CANARY_SWEEP_MIN_TRIGGER_AMOUNT_RAW=10000000 \
+BASE_RPC_URL="$BASE_RPC_URL" \
+forge test --match-contract ArbHookWethCanaryForkTest \
+  --match-test testSweepSwapSizeAgainstLiveReference -vv
+```
 
 ## 6. Prove Normal Settlement While Disabled
 
@@ -257,7 +273,7 @@ A successful `FlashLoanSettled` event must show:
 - `tokenB` is USDC;
 - `buyPool` is `0xd0b53D9277642d899DF5C87A3966A349A798F224`;
 - `sellPool` is the canonical v4 PoolManager `0x498581fF718922c3f8e6A244956aF099B2652b2b`;
-- principal is positive and no more than 1 WETH;
+- principal is positive and no more than `0.005 WETH`;
 - fee is zero;
 - iterations equals `1`;
 - net profit meets the configured WETH floor; and
@@ -267,7 +283,7 @@ Also verify Morpho's WETH balance is unchanged after the transaction and the hoo
 
 `netProfit` is route profit paid to the event's beneficiary address. On the controlled empty-data path, that address is the Universal Router's original caller. It is not proof that the LP/operator gained value. When the operator is also LP and recipient, the transfer is internal and external fees plus gas remain as net costs.
 
-No event is expected below the configured 49 USDC actual-input floor or when an eligible swap cannot clear pool fees and the minimum-profit floor. Do not deliberately create an unsafe mainnet trade merely to force a loan. Reproduce the exact intended LP and swap parameters on a current fork first.
+No event is expected below the configured 10 USDC actual-input floor or when an eligible swap cannot clear pool fees and the minimum-profit floor. The first enabled controlled swap is 10 USDC, not 100 USDC. Do not deliberately create an unsafe mainnet trade merely to force a loan. Reproduce the exact intended LP and swap parameters on a current fork first.
 
 ## Profit Recipient
 
@@ -284,6 +300,27 @@ If an empty-data swap uses a custom router that does not implement `IMsgSender`,
 Normal swap output is returned by the router and the hook returns zero V4 delta. Arbitrage profit is a separate WETH transfer from the hook to the resolved recipient.
 
 The caller lookup does not guarantee that the public Uniswap interface or an aggregator will discover and route through the canary pool. It only removes the need for recipient-specific calldata once a canonical Universal Router swap reaches the pool. An intermediary contract that initiates the Universal Router execution receives the rebate and must either forward its full WETH output or pass the end user through the packed recipient override.
+
+## Increase Liquidity
+
+Do not scale directly from one successful transaction. First set
+`hookMaxIterations` to zero, choose the proposed new total liquidity, and rerun
+the current-state sweep at that depth. Then add to the existing full-range NFT:
+
+```bash
+PRIVATE_KEY="$LP_KEY" \
+HOOK="$HOOK" \
+POSITION_TOKEN_ID="$POSITION_TOKEN_ID" \
+WETH_LP_AMOUNT_WEI="$ADDITIONAL_WETH_WEI" \
+USDC_LP_AMOUNT_RAW="$ADDITIONAL_USDC_RAW" \
+forge script script/AddArbHookCanaryLiquidity.s.sol:AddArbHookCanaryLiquidity \
+  --rpc-url "$BASE_RPC_URL"
+```
+
+Review the simulated liquidity and actual token debits, then repeat with
+`--broadcast`. Recalibrate and write the new principal ceiling, profit floor,
+and trigger input before setting `hookMaxIterations` back to one. The existing
+burn script withdraws the entire enlarged position.
 
 ## Stop And Withdraw
 

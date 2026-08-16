@@ -32,8 +32,8 @@ The initial deployment is owner-operated with a small set of manually verified, 
   contracts.
 
 65. Hook profit is LP value redistribution, not new value
-- Status: `BLOCKS DEPLOYMENT`
-- Priority: `CRITICAL`
+- Status: `ACCEPTED FOR RESEARCH CANARY`
+- Priority: `HIGH`
 - Summary: The counter-trade captures value from the v4 LP position. The product
   case is valid only when an external backrunner would otherwise capture the
   same edge; then the hook changes the recipient rather than worsening the LP's
@@ -60,11 +60,12 @@ The initial deployment is owner-operated with a small set of manually verified, 
   baseline, the LP outcome is identical and the hook redirects the searcher's
   0.804926 USDC to the beneficiary. With one wallet in every role, the transfer
   cancels internally and only external fees plus gas remain.
-- Decision: do not describe `FlashLoanSettled.netProfit` as operator revenue.
-  Before deployment, decide whether the canary is an integration/rebate study or
-  assumes external backrunning as its economic baseline. The code now proves the
-  redistribution mechanism exactly; it does not prove that organic backrunning
-  would occur on this new thin pool.
+- Decision: the operator deliberately accepts this transfer for the small
+  research canary. The intended product gives the captured price-impact value
+  to the swap initiator whether or not an external searcher would otherwise have
+  backrun the pool. Do not describe `FlashLoanSettled.netProfit` as operator
+  revenue or infer organic demand from a controlled swap. Revisit LP economics
+  before accepting third-party liquidity or materially increasing capital.
 
 60. No dislocation ever opens on the selected cbBTC/WETH pair
 - Status: `RESOLVED BY ARCHITECTURE CHANGE`
@@ -183,6 +184,9 @@ The initial deployment is owner-operated with a small set of manually verified, 
   boundary replay, while 49 USDC remained eligible and settled.
 - Constraint: this is a calibrated gas prefilter, not a profitability proof.
   Recalibrate it when liquidity, pool selection, or the profit floor changes.
+  The proposed $100-per-side profile was therefore recalibrated at block
+  `50029886`: 10 USDC cleared the same `0.0001 WETH` floor, so its launch gate
+  is 10 USDC rather than the deep fixture's historical 49 USDC.
 
 61. Backrunning only pays if the hook can be ordered behind the dislocating swap
 - Status: `ADDRESSED`
@@ -231,14 +235,16 @@ The initial deployment is owner-operated with a small set of manually verified, 
 ## Open For Canary
 
 20. Independent review of release commit
-- Status: `BLOCKS DEPLOYMENT`
+- Status: `ACCEPTED FOR RESEARCH CANARY`
 - Priority: `CRITICAL`
 - Summary: The trigger-pool V4/V3 execution, nested PoolManager settlement, and
   flash-loan changes need independent Solidity review against the exact release
   commit.
-- Decision: no mainnet swap routing before sign-off on the exact release diff.
-  Prior review of the external/external version does not cover this architecture.
-  This is an external release gate, not a reason to add more onchain checks.
+- Decision: the operator accepts the supplied independent review for the small
+  research canary. Production contract code has not changed since the reviewed
+  recipient-routing commit; subsequent changes are fork evidence, scripts,
+  interfaces, and documentation. Obtain another exact-commit review before
+  materially increasing capital.
 
 ## Accepted By Design
 
@@ -298,6 +304,9 @@ The initial deployment is owner-operated with a small set of manually verified, 
 - Decision: the integration and calibration blocker is addressed in code. The
   runbook still requires the same unpinned test and address checks immediately
   before broadcast because lender liquidity, gas price, and market state move.
+  A later $100-per-side replay at block `50029886` used a `0.005 WETH` ceiling;
+  a 10 USDC trigger borrowed `0.000812887664977685 WETH` and paid
+  `0.000153429487453379 WETH` after zero lender fee.
 
 58. Retry suppression depends on lender revert-data propagation
 - Status: `DOCUMENTED`

@@ -9,4 +9,5 @@ interface IUniswapV4PositionManager {
     function multicall(bytes[] calldata data) external payable returns (bytes[] memory results);
     function nextTokenId() external view returns (uint256);
     function ownerOf(uint256 tokenId) external view returns (address);
+    function getPositionLiquidity(uint256 tokenId) external view returns (uint128);
 }

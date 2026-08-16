@@ -67,24 +67,67 @@ Use the WETH-bound Morpho adapter:
 | Morpho Blue | `0xBBBBBbbBBb9cC5e90e3b3Af64bdAF62C37EEFFCb` |
 | Supported asset | WETH |
 | Flash fee | 0 in the tested adapter path |
-| Initial principal ceiling | `1 WETH` |
+| Initial principal ceiling | `0.005 WETH` |
 | Fee ceiling | `1` bp, the smallest nonzero enabled value |
 | Provisional minimum net profit | `0.0001 WETH` |
-| Minimum triggering input | `49 USDC` (`49,000,000` raw), USDC-to-WETH only |
+| Minimum triggering input | `10 USDC` (`10,000,000` raw), USDC-to-WETH only |
 
-The 1 WETH value is only a ceiling. Live route math chooses the amount from post-swap spread and active liquidity. The current-head 100 USDC fork rehearsal selected about `0.0089 WETH`, more than 100 times below the cap.
+The `0.005 WETH` value is only a ceiling. Live route math chooses the amount from post-swap spread and active liquidity. The current-head 10 USDC shallow-pool rehearsal selected about `0.000813 WETH`, more than six times below the cap.
 
-The 49 USDC value is an early gas-saving gate for this exact PoolId and direction. It uses the actual USDC input reported by v4's `BalanceDelta`, not caller-supplied calldata. Smaller swaps skip before route discovery and borrowing; eligible swaps must still clear spread, fee, and realized-profit checks.
+The 10 USDC value is an early gas-saving gate for this exact PoolId and direction. It uses the actual USDC input reported by v4's `BalanceDelta`, not caller-supplied calldata. Smaller swaps skip before route discovery and borrowing; eligible swaps must still clear spread, fee, and realized-profit checks.
 
 Recheck lender liquidity, fee behavior, gas, the input floor, and the profit floor immediately before broadcast.
 
-## Trigger Size Simulation
+## $100-Per-Side Simulation
+
+At Base block `50029886`, the fork fixture capped the full-range position at
+`0.053140792207679097 WETH` and `100 USDC`. The position consumed
+`0.053140792207665807 WETH` and `99.973139 USDC`. With a `0.005 WETH`
+principal ceiling, `0.0001 WETH` profit floor, 10 USDC input gate, and
+`0.006 gwei` execution gas price:
+
+| Trigger | Borrowed WETH | Net WETH profit | Incremental gas cost | Result |
+|---:|---:|---:|---:|---|
+| 9.50 USDC | none | none | `0.000000016266` | skipped by input gate |
+| 10.00 USDC | 0.000812887664977685 | 0.000153429487453379 | 0.000002520630 | settled |
+| 15.00 USDC | 0.001145230970668001 | 0.000331160063410583 | 0.000002515122 | settled |
+| 50.00 USDC | 0.000896916611820716 | 0.001069071890579578 | 0.000002512542 | settled |
+| 75.00 USDC | none | none | n/a | no profitable settlement |
+| 100.00 USDC | none | none | n/a | no profitable settlement |
+
+The 10 USDC route remained `0.000150908857453379 WETH` positive after its
+incremental L2 execution cost. This is a same-snapshot differential; Base also
+charges an L1 data fee, but enabled and disabled calls have identical calldata,
+so that component cancels when measuring the hook's added cost. A 100 USDC swap
+is too large relative to the proposed pool and is not the controlled launch
+transaction.
+
+Reproduce the proposed canary profile against current state with:
+
+```bash
+RUN_WETH_CANARY_FORK=true \
+RUN_WETH_CANARY_SWEEP=true \
+WETH_LP_AMOUNT_WEI=53140792207679097 \
+USDC_LP_AMOUNT_RAW=100000000 \
+WETH_FLASH_PRINCIPAL_CAP_WEI=5000000000000000 \
+WETH_CANARY_SIM_GAS_PRICE_WEI=6000000 \
+WETH_CANARY_SWEEP_MIN_PROFIT_WEI=100000000000000 \
+WETH_CANARY_SWEEP_MIN_TRIGGER_AMOUNT_RAW=10000000 \
+BASE_RPC_URL="$BASE_RPC_URL" \
+forge test --match-contract ArbHookWethCanaryForkTest \
+  --match-test testSweepSwapSizeAgainstLiveReference -vv
+```
+
+Recalculate the WETH LP cap from the current reference price rather than
+treating the block-`50029886` amount as a permanent USD conversion.
+
+## Deep-Fixture Benchmark
 
 `testSweepSwapSizeAgainstLiveReference` replays each amount from the same Base
-fork snapshot with the canary's full-range position capped at 2 WETH and 5,000
-USDC. It compares identical disabled and enabled swaps, so the reported cost is
-the hook's incremental execution gas rather than the gas for a swap the user was
-already making.
+fork snapshot. The older benchmark uses a full-range position capped at 2 WETH
+and 5,000 USDC. It compares identical disabled and enabled swaps, so the reported
+cost is the hook's incremental execution gas rather than the gas for a swap the
+user was already making.
 
 At block `50018808`, that position consumed `1.999999999999990607 WETH` and
 `3,762.610635 USDC`; the USDC cap was not the limiting side.
@@ -131,10 +174,13 @@ forge test --match-contract ArbHookWethCanaryForkTest \
   --match-test testSweepSwapSizeAgainstLiveReference -vv
 ```
 
+Set `WETH_LP_AMOUNT_WEI`, `USDC_LP_AMOUNT_RAW`, and
+`WETH_FLASH_PRINCIPAL_CAP_WEI` to rehearse the exact deployment limits instead
+of the default deep-fixture values.
 Set `WETH_CANARY_SWEEP_MIN_PROFIT_WEI=100000000000000` to replay the actual
-canary profit floor instead of observing smaller positive results. Also set
-`WETH_CANARY_SWEEP_MIN_TRIGGER_AMOUNT_RAW=49000000` to replay the production
-input gate and its 48/49 USDC boundary assertion.
+profit floor instead of observing smaller positive results. Set the trigger
+override to the gate being evaluated; the proposed shallow-canary value is
+`WETH_CANARY_SWEEP_MIN_TRIGGER_AMOUNT_RAW=10000000`.
 
 ## MEV Redistribution Comparison
 
@@ -199,10 +245,10 @@ Recheck these against current official deployment sources and confirm runtime co
 - canonical PoolManager, PositionManager, Permit2, and Universal Router integration;
 - canonical WETH/USDC V3 reference registration;
 - WETH-bound Morpho borrowing and exact zero-fee repayment;
-- full-range v4 LP mint and withdrawal;
+- full-range v4 LP mint, increase, and withdrawal;
 - a normal 100 USDC-to-WETH trigger with an optional packed recipient override;
 - a normal 100 USDC-to-WETH trigger with empty data that pays the Universal Router's original caller;
-- a pool-and-direction-specific 49 USDC actual-input gate before discovery;
+- a pool-and-direction-specific actual-input gate before discovery;
 - adaptive direction and principal selection without a supplied hint;
 - bounded execution price limits on both swap legs;
 - a counter-swap against the same v4 pool that triggered the hook;
@@ -211,6 +257,6 @@ Recheck these against current official deployment sources and confirm runtime co
 - exact redistribution parity against a matched external V4/V3 backrunner; and
 - zero residual WETH and USDC after payout.
 
-At Base block `50018535`, the proof borrowed `0.008907102809547629 WETH`, paid `0.000427463494774361 WETH`, paid zero lender fee, and measured about `419546` incremental gas. The test did not manufacture an external-pool dislocation. Its own v4 swap created the captured edge.
+At Base block `50029886`, the shallow-profile proof borrowed `0.000812887664977685 WETH`, paid `0.000153429487453379 WETH`, paid zero lender fee, and measured about `420105` incremental gas for a 10 USDC trigger. The test did not manufacture an external-pool dislocation. Its own v4 swap created the captured edge.
 
 These values are a settlement proof, not expected production yield.
