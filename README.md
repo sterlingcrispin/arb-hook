@@ -222,9 +222,9 @@ Disable execution before adding capital to an existing position. Use `script/Add
 
 Always simulate Forge scripts before adding `--broadcast`. Full commands and read-back checks are in the runbook.
 
-The live Base research canary is `0xC537EDE696EAC0014A30a51706fb5E95C2734040`.
+The live Base research canary is `0x7e8d44E0eAfB387a91a630536d934bbb1Ca34040`.
 Addresses, receipts, configuration, the successful flash settlement, and the
-current gas-estimation limitation are recorded in
+superseded first deployment are recorded in
 `docs/BASE_WETH_CANARY_DEPLOYMENT.md`.
 
 ## Legacy Parity Context

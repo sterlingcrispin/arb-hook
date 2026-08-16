@@ -234,31 +234,6 @@ The initial deployment is owner-operated with a small set of manually verified, 
 
 ## Open For Canary
 
-69. Fail-open execution can make automatic gas estimation suppress arbitrage
-- Status: `ACTIVE CANARY LIMITATION`
-- Priority: `HIGH`
-- Summary: The hook reserves gas and contains a failed arbitrage self-call so a
-  failed attempt cannot revert the triggering swap. That also gives transaction
-  gas estimators a cheaper successful branch: provide too little gas for the
-  arbitrage, let the self-call fail, and complete the ordinary swap.
-- Live evidence: Base transaction
-  `0xcf849ad5ccc4a845217ca2bd0eefd42a8e75dcedb9704d0d81ce2a3ff2f39a42`
-  had a `628,423` gas limit. Its hook self-call received `297,092` gas and ran
-  out of gas. The 10 USDC swap settled normally but emitted no
-  `FlashLoanSettled` event. Repeating from current state with a four-times Forge
-  gas-estimate multiplier produced a `1,817,320` gas limit and settled the
-  flash route in transaction
-  `0x34f3564ddab4bd7e3f742e5c4b83d866362009e18a81343ab9f61e463efdd2fd`.
-- Consequence: the controlled canary works with an explicit gas envelope, but a
-  generic router or wallet using its own low estimate can complete an eligible
-  swap without paying a rebate. No funds become stuck and the ordinary swap is
-  unaffected; organic execution reliability is not yet proven.
-- Decision: leave this accepted for the small research canary and require the
-  explicit runbook multiplier for controlled swaps. Resolve before claiming
-  reliable rebates for generic organic flow. A robust fix likely requires a
-  contract-level minimum-gas policy or materially cheaper execution, followed
-  by a new hook and pool deployment.
-
 20. Independent review of release commit
 - Status: `ACCEPTED FOR RESEARCH CANARY`
 - Priority: `CRITICAL`
@@ -266,10 +241,12 @@ The initial deployment is owner-operated with a small set of manually verified, 
   flash-loan changes need independent Solidity review against the exact release
   commit.
 - Decision: the operator accepts the supplied independent review for the small
-  research canary. Production contract code has not changed since the reviewed
-  recipient-routing commit; subsequent changes are fork evidence, scripts,
-  interfaces, and documentation. Obtain another exact-commit review before
-  materially increasing capital.
+  research canary. Commit `284fe20` subsequently changed only the gas-budget
+  boundary and added `InsufficientHookGas`; it did not change route, sizing,
+  settlement, or recipient logic. That 13-byte runtime delta has local, exact
+  parity, Morpho-sequence, current-head fork, RPC-estimation, and live canary
+  evidence, but not another independent review. Obtain an exact-commit review
+  before materially increasing capital.
 
 ## Accepted By Design
 
@@ -314,6 +291,26 @@ The initial deployment is owner-operated with a small set of manually verified, 
   Revisit sizing precision after canary results.
 
 ## Addressed
+
+69. Fail-open execution could make automatic gas estimation suppress arbitrage
+- Status: `ADDRESSED`
+- Priority: `HIGH`
+- Notes: The first hook allowed an eligible low-gas swap to settle after its
+  arbitrage self-call exhausted its budget. Base transaction
+  `0xcf849ad5ccc4a845217ca2bd0eefd42a8e75dcedb9704d0d81ce2a3ff2f39a42`
+  therefore completed without `FlashLoanSettled`. A nonzero `hookGasLimit` is
+  now both the required attempt budget and its ceiling. Below-trigger swaps
+  still return before this check, while under-gassed eligible swaps revert so
+  `eth_estimateGas` must raise the transaction limit.
+- Live proof: replacement hook
+  `0x7e8d44E0eAfB387a91a630536d934bbb1Ca34040` received a Base RPC estimate of
+  `3,514,705` gas. Transaction
+  `0x16a597c30f2c2feba6668f02890b536a3fbdf9e7e346e4cdb8fc78541dae471b`
+  used `454,936` gas and settled a zero-fee Morpho route for
+  `0.000153175872232624 WETH` profit. Forge script broadcasting still needs an
+  RPC-derived or deliberately generous limit because Forge estimates consumed
+  gas rather than the required unused envelope; that is an operator-tooling
+  distinction, not an organic-router limitation.
 
 21. Current-head Base rehearsal and economic calibration
 - Status: `ADDRESSED; RE-RUN IMMEDIATELY BEFORE BROADCAST`
@@ -473,8 +470,10 @@ The initial deployment is owner-operated with a small set of manually verified, 
   63/64 rule leaves only 1/64 behind, which does not cover v4 settlement when the
   swap was submitted with a modest gas limit. The production V4/V3 attempt now
   runs on an explicit budget from `setHookGasBounds` (200,000 reserve and
-  3,000,000 ceiling by default). The current-head test measures the full enabled
-  router lifecycle against an identical disabled snapshot.
+  3,000,000 required budget and ceiling by default). The current-head test
+  measures the full enabled router lifecycle against an identical disabled
+  snapshot. Eligible callers below that floor now revert deliberately so gas
+  estimation cannot choose a successful no-arbitrage branch.
 
 43. Unwind skipped for USDC and WETH intermediates
 - Status: `ADDRESSED`

@@ -271,15 +271,15 @@ cast send "$HOOK" "setHookMaxIterations(uint256)" 1 \
 Read back `getExecutionConfig()`, then simulate the intended protected
 USDC-to-WETH swap with the same script. If that simulation still matches the
 calibrated route, broadcast the same protected 10 USDC swap. This should be the
-pool's first real swap. Supply enough gas for the 3,000,000-gas attempt ceiling
-plus normal router settlement. A low-gas attempt may be skipped while the user
-swap still settles.
+pool's first real swap. A nonzero `hookGasLimit` is both the attempt ceiling and
+the gas floor for an eligible swap. Supplying less than the reserve plus that
+budget reverts with `InsufficientHookGas`; this forces normal RPC estimation to
+include the arbitrage path instead of silently settling without it.
 
-Do not rely on Forge's default gas estimate for the enabled transaction. The
-hook deliberately contains a failed attempt, so an estimator can find a cheaper
-successful execution in which the arbitrage self-call runs out of gas and the
-ordinary swap still settles. For the initial canary, use the multiplier that was
-validated on the live deployment:
+Do not use Forge's default broadcast limit for this proof. Forge derives that
+limit from gas consumed by its high-gas simulation rather than preserving the
+unused gas required by the contract floor. First generate fresh calldata with a
+non-broadcast run:
 
 ```bash
 PRIVATE_KEY="$SWAP_KEY" \
@@ -287,14 +287,16 @@ HOOK="$HOOK" \
 USDC_SWAP_AMOUNT_RAW="$USDC_SWAP_AMOUNT_RAW" \
 MIN_WETH_OUT_WEI="$MIN_WETH_OUT_WEI" \
 forge script script/SwapArbHookCanary.s.sol:SwapArbHookCanary \
-  --rpc-url "$BASE_RPC_URL" --broadcast --slow \
-  --gas-estimate-multiplier 400 -vv
+  --rpc-url "$BASE_RPC_URL" -vv
 ```
 
-`400` means four times the estimated limit, not four times the gas charge.
-Unused gas is not charged. This is a canary-specific operational bound, not a
-permanent strategy constant. Confirm the resulting transaction's gas limit and
-receipt event; the script simulation log alone is not proof of live settlement.
+Set the exact USDC and Permit2 allowances, extract the Universal Router calldata
+from `broadcast/SwapArbHookCanary.s.sol/8453/dry-run/run-latest.json`, and call
+`eth_estimateGas` with the payer as `from`. Broadcast with that returned limit.
+The replacement launch estimated `3,514,705` gas and consumed `454,936`; unused
+gas was not charged. Regenerate the dry run immediately before sending because
+the router deadline is ten minutes. Confirm the receipt event; the simulation
+log alone is not proof of live settlement.
 
 A successful `FlashLoanSettled` event must show:
 

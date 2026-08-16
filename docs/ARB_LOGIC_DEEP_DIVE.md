@@ -45,9 +45,18 @@ The production path does not traverse `supportedTokens` or compare unrelated ext
 
 The input gate is pool- and direction-specific because the useful threshold depends on that pool's liquidity and state. For `zeroForOne`, it compares the magnitude of `amount0`; otherwise it compares `amount1`. Values are therefore raw units of the input currency. Zero disables the gate. This check deliberately uses PoolManager's realized delta rather than trusting router calldata or `amountSpecified`, and it runs before recipient resolution, reference reads, lender quoting, or a self-call.
 
-The self-call is important. Any deep revert from pool lookup, lender quoting, V4 settlement, V3 execution, repayment, or profit enforcement is caught by the low-level call and does not bubble into the user's swap.
+The self-call is important. Once the configured attempt budget is available,
+any deep revert from pool lookup, lender quoting, V4 settlement, V3 execution,
+repayment, or profit enforcement is caught by the low-level call and does not
+bubble into the user's swap. An eligible transaction that does not supply that
+budget intentionally reverts so RPC gas estimation cannot select a cheaper
+successful path that silently omits the rebate.
 
-`hookGasReserve` is withheld for the caller's remaining settlement. `hookGasLimit` caps the speculative attempt. The production route does not use the legacy scanner's geometric per-pair gas subdivision.
+`hookGasReserve` is withheld for the caller's remaining settlement. A nonzero
+`hookGasLimit` is both the required attempt budget and its consumption ceiling;
+zero restores the old use-whatever-is-available behavior without an estimation
+floor. The production route does not use the legacy scanner's geometric
+per-pair gas subdivision.
 
 ## 3. Reference Pool Selection
 
