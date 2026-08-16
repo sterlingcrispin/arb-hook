@@ -204,6 +204,26 @@ def liquidity_amounts(sqrt_price: int, sqrt_lower: int, sqrt_upper: int, liquidi
     return 0, liquidity * (sqrt_upper - sqrt_lower) // Q96
 
 
+def strategy_accounting(
+    lp_principal_value: float,
+    lp_fee_value: float,
+    hook_value: float,
+    adapter_value: float,
+    deployed_capital_value: float,
+    setup_gas_value: float,
+) -> dict[str, float]:
+    strategy_value = lp_principal_value + lp_fee_value + hook_value + adapter_value
+    capital_benchmark = deployed_capital_value + setup_gas_value
+    return {
+        "strategyValueUsd": strategy_value,
+        "capitalBenchmarkUsd": capital_benchmark,
+        "netPnlUsd": strategy_value - capital_benchmark,
+        "netPnlPct": (
+            (strategy_value / capital_benchmark - 1) * 100 if capital_benchmark else 0.0
+        ),
+    }
+
+
 class PortfolioEngine:
     BALANCE_OF = selector("balanceOf(address)")
     EXTSLOAD = selector("extsload(bytes32)")
@@ -212,7 +232,6 @@ class PortfolioEngine:
     def __init__(self, rpc: RpcClient, config: CanaryConfig) -> None:
         self.rpc = rpc
         self.config = config
-        self.owner = config.address("owner")
         self.hook = config.address("hook")
         self.pool_manager = config.address("poolManager")
         self.position_manager = config.address("positionManager")
@@ -253,7 +272,6 @@ class PortfolioEngine:
 
     def _request_set(self, block: int) -> list[tuple[str, tuple[str, list[Any]]]]:
         requests: list[tuple[str, tuple[str, list[Any]]]] = [
-            ("owner_native", ("eth_getBalance", [self.owner, rpc_quantity(block)])),
             ("reference_slot0", self._call(self.reference_pool, self.V3_SLOT0, block)),
             ("pool_slot0", self._slot_request(self.pool_state_slot, block)),
             ("fee_global0", self._slot_request(self.pool_state_slot + 1, block)),
@@ -267,7 +285,6 @@ class PortfolioEngine:
             ("position_fee1", self._slot_request(self.position_slot + 2, block)),
         ]
         for account_name, account in (
-            ("owner", self.owner),
             ("hook", self.hook),
             ("weth_adapter", self.weth_adapter),
             ("usdc_adapter", self.usdc_adapter),
@@ -292,27 +309,6 @@ class PortfolioEngine:
     def snapshot(self, block: int) -> dict[str, Any]:
         return self.snapshots([block])[0]
 
-    def apply_external_flows(self, snapshot: dict[str, Any], flows: dict[str, int]) -> dict[str, Any]:
-        flow_weth_like = flows.get("native", 0) + flows.get("weth", 0)
-        flow_value = flow_weth_like / 1e18 * snapshot["referencePrice"] + flows.get("usdc", 0) / 1e6
-        snapshot["holdValueUsd"] += flow_value
-        snapshot["netPnlUsd"] = snapshot["strategyValueUsd"] - snapshot["holdValueUsd"]
-        snapshot["netPnlPct"] = (
-            (snapshot["strategyValueUsd"] / snapshot["holdValueUsd"] - 1) * 100
-            if snapshot["holdValueUsd"]
-            else 0.0
-        )
-        baseline_native = int(self.config.raw["baseline"]["nativeWei"])
-        adjusted_native_budget = baseline_native + flows.get("native", 0)
-        snapshot["ownerGasValueUsd"] = max(adjusted_native_budget - int(snapshot["balances"]["ownerEth"] * 1e18), 0) / 1e18 * snapshot["referencePrice"]
-        snapshot["externalNetFlowUsd"] = flow_value
-        snapshot["externalFlows"] = {
-            "native": flows.get("native", 0) / 1e18,
-            "weth": flows.get("weth", 0) / 1e18,
-            "usdc": flows.get("usdc", 0) / 1e6,
-        }
-        return snapshot
-
     def _derive(self, block: int, raw: dict[str, int]) -> dict[str, Any]:
         reference_sqrt = raw["reference_slot0"] & ((1 << 160) - 1)
         reference_price = reference_sqrt * reference_sqrt * 1e12 / (1 << 192)
@@ -335,29 +331,28 @@ class PortfolioEngine:
         fee1 = ((inside1 - raw["position_fee1"]) % UINT256_MOD) * liquidity // Q128 if liquidity else 0
         principal0, principal1 = liquidity_amounts(sqrt_price, self.sqrt_lower, self.sqrt_upper, liquidity)
 
-        owner_weth_like = raw["owner_native"] + raw["owner_weth"]
         hook_weth = raw["hook_weth"]
         hook_usdc = raw["hook_usdc"]
         adapter_weth = raw["weth_adapter_weth"] + raw["usdc_adapter_weth"]
         adapter_usdc = raw["weth_adapter_usdc"] + raw["usdc_adapter_usdc"]
-        total_weth_like = owner_weth_like + hook_weth + adapter_weth + principal0 + fee0
-        total_usdc = raw["owner_usdc"] + hook_usdc + adapter_usdc + principal1 + fee1
 
-        baseline = self.config.raw["baseline"]
-        baseline_weth_like = int(baseline["nativeWei"]) + int(baseline["wethRaw"])
-        baseline_usdc = int(baseline["usdcRaw"])
-        strategy_value = total_weth_like / 1e18 * reference_price + total_usdc / 1e6
-        hold_value = baseline_weth_like / 1e18 * reference_price + baseline_usdc / 1e6
         lp_principal_value = principal0 / 1e18 * reference_price + principal1 / 1e6
         lp_fee_value = fee0 / 1e18 * reference_price + fee1 / 1e6
         hook_value = hook_weth / 1e18 * reference_price + hook_usdc / 1e6
-        wallet_value = owner_weth_like / 1e18 * reference_price + raw["owner_usdc"] / 1e6
         adapter_value = adapter_weth / 1e18 * reference_price + adapter_usdc / 1e6
         deposited_value = (
             int(self.config.raw["depositedWethRaw"]) / 1e18 * reference_price
             + int(self.config.raw["depositedUsdcRaw"]) / 1e6
         )
-        gas_weth = int(baseline["nativeWei"]) - raw["owner_native"]
+        setup_gas_value = int(self.config.raw["setupGasWei"]) / 1e18 * reference_price
+        accounting = strategy_accounting(
+            lp_principal_value,
+            lp_fee_value,
+            hook_value,
+            adapter_value,
+            deposited_value,
+            setup_gas_value,
+        )
         pool_price = sqrt_price * sqrt_price * 1e12 / (1 << 192) if sqrt_price else 0.0
 
         return {
@@ -369,21 +364,15 @@ class PortfolioEngine:
             "tickUpper": self.tick_upper,
             "inRange": self.tick_lower <= tick < self.tick_upper if sqrt_price else False,
             "liquidity": str(liquidity),
-            "strategyValueUsd": strategy_value,
-            "holdValueUsd": hold_value,
-            "netPnlUsd": strategy_value - hold_value,
-            "netPnlPct": (strategy_value / hold_value - 1) * 100 if hold_value else 0.0,
-            "walletValueUsd": wallet_value,
+            **accounting,
             "lpPrincipalValueUsd": lp_principal_value,
             "lpFeeValueUsd": lp_fee_value,
             "hookRevenueValueUsd": hook_value,
             "adapterValueUsd": adapter_value,
+            "deployedCapitalValueUsd": deposited_value,
+            "setupGasValueUsd": setup_gas_value,
             "lpInventoryPnlUsd": lp_principal_value - deposited_value,
-            "ownerGasValueUsd": max(gas_weth, 0) / 1e18 * reference_price,
             "balances": {
-                "ownerEth": raw["owner_native"] / 1e18,
-                "ownerWeth": raw["owner_weth"] / 1e18,
-                "ownerUsdc": raw["owner_usdc"] / 1e6,
                 "hookWeth": hook_weth / 1e18,
                 "hookUsdc": hook_usdc / 1e6,
                 "adapterWeth": adapter_weth / 1e18,
@@ -610,108 +599,6 @@ class EventIndex:
         }
 
 
-class ExternalFlowIndex:
-    """Identify wallet cash flows that must change capital, not reported P&L."""
-
-    def __init__(self, rpc: RpcClient, config: CanaryConfig) -> None:
-        self.rpc = rpc
-        self.config = config
-        self.owner = config.address("owner")
-        self.weth = config.address("weth")
-        self.usdc = config.address("usdc")
-        self.milestones = {value.lower() for value in config.raw.get("milestoneTransactions", [])}
-        self.internal_addresses = {
-            config.address(name)
-            for name in ("hook", "poolManager", "positionManager", "wethAdapter", "usdcAdapter")
-        }
-        self.flows: list[dict[str, Any]] = []
-
-    def refresh(self, safe_head: int) -> None:
-        transfers: list[dict[str, Any]] = []
-        for direction in ("toAddress", "fromAddress"):
-            params = {
-                "fromBlock": rpc_quantity(int(self.config.raw["baselineBlock"])),
-                "toBlock": rpc_quantity(safe_head),
-                direction: self.owner,
-                "category": ["external", "internal", "erc20"],
-                "withMetadata": False,
-                "excludeZeroValue": True,
-                "maxCount": "0x3e8",
-                "order": "asc",
-            }
-            while True:
-                result = self.rpc.request("alchemy_getAssetTransfers", [params])
-                transfers.extend(result.get("transfers", []))
-                page_key = result.get("pageKey")
-                if not page_key:
-                    break
-                params["pageKey"] = page_key
-
-        unique: dict[str, dict[str, Any]] = {}
-        for transfer in transfers:
-            raw = transfer.get("rawContract") or {}
-            raw_value = raw.get("value")
-            if not raw_value:
-                continue
-            tx_hash = (transfer.get("hash") or "").lower()
-            from_address = (transfer.get("from") or "").lower()
-            to_address = (transfer.get("to") or "").lower()
-            other = from_address if to_address == self.owner else to_address
-            if tx_hash in self.milestones or other in self.internal_addresses:
-                continue
-            token_address = (raw.get("address") or "").lower()
-            if token_address == self.weth:
-                asset = "weth"
-            elif token_address == self.usdc:
-                asset = "usdc"
-            elif not token_address and (transfer.get("asset") or "").upper() == "ETH":
-                asset = "native"
-            else:
-                continue
-            sign = (1 if to_address == self.owner else 0) - (1 if from_address == self.owner else 0)
-            if sign == 0:
-                continue
-            identity = transfer.get("uniqueId") or ":".join(
-                (tx_hash, from_address, to_address, asset, raw_value)
-            )
-            unique[identity] = {
-                "block": int(transfer["blockNum"], 16),
-                "transaction": tx_hash,
-                "asset": asset,
-                "raw": sign * int(raw_value, 16),
-                "from": from_address,
-                "to": to_address,
-            }
-        self.flows = sorted(unique.values(), key=lambda item: (item["block"], item["transaction"]))
-
-    def cumulative(self, block: int) -> dict[str, int]:
-        totals = {"native": 0, "weth": 0, "usdc": 0}
-        for flow in self.flows:
-            if flow["block"] > block:
-                break
-            totals[flow["asset"]] += flow["raw"]
-        return totals
-
-    def public_summary(self, price: float) -> dict[str, Any]:
-        totals = self.cumulative(2**63 - 1)
-        value = (totals["native"] + totals["weth"]) / 1e18 * price + totals["usdc"] / 1e6
-        return {
-            "count": len(self.flows),
-            "netValueUsd": value,
-            "native": totals["native"] / 1e18,
-            "weth": totals["weth"] / 1e18,
-            "usdc": totals["usdc"] / 1e6,
-            "transfers": [
-                {
-                    **flow,
-                    "raw": str(flow["raw"]),
-                    "amount": flow["raw"] / (1e6 if flow["asset"] == "usdc" else 1e18),
-                }
-                for flow in self.flows
-            ],
-        }
-
-
 class DashboardModel:
     OWNER = selector("owner()")
     EXECUTION = selector("getExecutionConfig()")
@@ -722,7 +609,6 @@ class DashboardModel:
         self.config = config
         self.portfolio = PortfolioEngine(rpc, config)
         self.events = EventIndex(rpc, config)
-        self.external_flows = ExternalFlowIndex(rpc, config)
         self._history: list[dict[str, Any]] = []
         self._milestone_blocks: set[int] = set()
         self._state: dict[str, Any] = {"status": "loading", "updatedAt": int(time.time())}
@@ -754,15 +640,12 @@ class DashboardModel:
         head = int(self.rpc.request("eth_blockNumber", []), 16)
         safe_head = max(int(self.config.raw["enabledBlock"]), head - 1)
         self.events.refresh(safe_head)
-        self.external_flows.refresh(safe_head)
         if not self._milestone_blocks:
             self._load_milestones()
         if not self._history:
             self._build_history(safe_head)
 
-        current = self.portfolio.apply_external_flows(
-            self.portfolio.snapshot(safe_head), self.external_flows.cumulative(safe_head)
-        )
+        current = self.portfolio.snapshot(safe_head)
         current_block = self.rpc.request("eth_getBlockByNumber", [rpc_quantity(safe_head), False])
         current["timestamp"] = int(current_block["timestamp"], 16)
         if not self._history or safe_head - self._history[-1]["block"] >= 15:
@@ -779,8 +662,8 @@ class DashboardModel:
                 prices[snapshot["block"]] = snapshot["referencePrice"]
         event_summary = self.events.summary(prices)
         health = self._health(current, head)
-        baseline_timestamp = self._block_timestamp(int(self.config.raw["baselineBlock"]))
-        elapsed = max(0, current["timestamp"] - baseline_timestamp)
+        start_timestamp = self._block_timestamp(int(self.config.raw["accountingStartBlock"]))
+        elapsed = max(0, current["timestamp"] - start_timestamp)
 
         payload = {
             "status": "live",
@@ -791,7 +674,7 @@ class DashboardModel:
                 "poolId": self.config.pool_id,
                 "positionTokenId": self.config.raw["positionTokenId"],
                 "owner": self.config.address("owner"),
-                "baselineBlock": self.config.raw["baselineBlock"],
+                "accountingStartBlock": self.config.raw["accountingStartBlock"],
                 "enabledBlock": self.config.raw["enabledBlock"],
                 "elapsedSeconds": elapsed,
             },
@@ -800,10 +683,9 @@ class DashboardModel:
             "history": self._history,
             "health": health,
             "accounting": {
-                "method": "Current operator wallet + withdrawable v4 principal and fees + hook and adapter balances, compared with the launch wallet holdings marked at the same reference price.",
-                "assumption": "Detected external ETH/WETH/USDC deposits and withdrawals change the benchmark rather than P&L. Unsupported-token activity is outside this view.",
+                "method": "Withdrawable v4 LP principal + accrued LP fees + hook revenue + adapter balances, compared with the original LP capital and setup gas.",
+                "assumption": "The owner/dev wallet and controlled swapper balances are excluded from strategy value. Both sides are marked at the same WETH price.",
                 "reference": "PancakeSwap V3 WETH/USDC 0.01% pool",
-                "externalFlows": self.external_flows.public_summary(current["referencePrice"]),
             },
         }
         with self._state_lock:
@@ -817,14 +699,14 @@ class DashboardModel:
         }
 
     def _build_history(self, head: int) -> None:
-        baseline = int(self.config.raw["baselineBlock"])
-        span = max(1, head - baseline)
+        start = int(self.config.raw["accountingStartBlock"])
+        span = max(1, head - start)
         step = max(30, math.ceil(span / 120))
-        blocks = set(range(baseline, head + 1, step))
+        blocks = set(range(start, head + 1, step))
         blocks.update(self._milestone_blocks)
         blocks.update(self.events.settlement_blocks())
-        blocks.update((baseline, head))
-        ordered = sorted(block for block in blocks if baseline <= block <= head)
+        blocks.update((start, head))
+        ordered = sorted(block for block in blocks if start <= block <= head)
         if len(ordered) > 180:
             stride = math.ceil(len(ordered) / 180)
             ordered = ordered[::stride]
@@ -835,9 +717,7 @@ class DashboardModel:
         self._history = [
             self._history_point(
                 {
-                    **self.portfolio.apply_external_flows(
-                        snapshot, self.external_flows.cumulative(snapshot["block"])
-                    ),
+                    **snapshot,
                     "timestamp": timestamps[snapshot["block"]],
                 }
             )
@@ -851,7 +731,7 @@ class DashboardModel:
             "timestamp": snapshot["timestamp"],
             "netPnlUsd": snapshot["netPnlUsd"],
             "strategyValueUsd": snapshot["strategyValueUsd"],
-            "holdValueUsd": snapshot["holdValueUsd"],
+            "capitalBenchmarkUsd": snapshot["capitalBenchmarkUsd"],
             "hookRevenueValueUsd": snapshot["hookRevenueValueUsd"],
             "lpFeeValueUsd": snapshot["lpFeeValueUsd"],
             "referencePrice": snapshot["referencePrice"],

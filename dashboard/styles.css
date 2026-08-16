@@ -213,10 +213,10 @@ main { padding: 38px 0 56px; }
 .composition-panel { padding-bottom: 18px; }
 .composition { display: flex; height: 18px; margin: 25px 22px 22px; background: var(--paper-deep); overflow: hidden; }
 .composition span { min-width: 2px; transition: width .5s ease; }
-.composition .wallet { background: var(--ink); }
 .composition .lp { background: #557181; }
 .composition .fees { background: var(--acid); }
 .composition .revenue { background: var(--coral); }
+.composition .adapters { background: var(--ink); }
 
 .position-readout { margin: 0 22px; }
 .position-readout div { display: flex; justify-content: space-between; padding: 11px 0; border-bottom: 1px solid var(--line); }

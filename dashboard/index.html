@@ -32,13 +32,13 @@
   <main>
     <section class="hero reveal delay-1">
       <div class="hero-copy">
-        <p class="eyebrow">NET STRATEGY P&amp;L <span>VS HOLD</span></p>
+        <p class="eyebrow">NET STRATEGY P&amp;L <span>VS CAPITAL</span></p>
         <div class="pnl-line">
           <span id="pnl-sign" class="pnl-sign">+</span>
           <strong id="net-pnl">$0.00</strong>
           <span id="net-pnl-pct" class="pnl-pct">0.00%</span>
         </div>
-        <p class="hero-note">Wallet + withdrawable LP + accrued fees + hook revenue, marked against the launch portfolio at the same WETH price.</p>
+        <p class="hero-note">Withdrawable LP principal + accrued fees + hook revenue + adapter balances, compared with initial LP capital and setup gas.</p>
       </div>
       <div class="hero-stamp">
         <span>RUN TIME</span>
@@ -51,7 +51,7 @@
       <article>
         <span>STRATEGY VALUE</span>
         <strong id="strategy-value">$--</strong>
-        <small id="hold-value">Hold benchmark $--</small>
+        <small id="capital-benchmark">Capital + gas $--</small>
       </article>
       <article>
         <span>RETAINED REVENUE</span>
@@ -107,10 +107,10 @@
         </div>
         <div id="composition" class="composition"></div>
         <dl class="position-readout">
-          <div><dt>Wallet</dt><dd id="wallet-value">$--</dd></div>
           <div><dt>LP principal</dt><dd id="lp-principal">$--</dd></div>
           <div><dt>Accrued fees</dt><dd id="fee-value">$--</dd></div>
           <div><dt>Hook revenue</dt><dd id="revenue-value">$--</dd></div>
+          <div><dt>Adapters</dt><dd id="adapter-value">$--</dd></div>
           <div class="total"><dt>Total</dt><dd id="portfolio-total">$--</dd></div>
         </dl>
         <div class="price-spread">

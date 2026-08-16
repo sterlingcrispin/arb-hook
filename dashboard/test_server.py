@@ -1,8 +1,6 @@
-import json
 import unittest
-from pathlib import Path
 
-from server import CanaryConfig, PortfolioEngine, liquidity_amounts, sqrt_price_at_tick
+from server import liquidity_amounts, sqrt_price_at_tick, strategy_accounting
 
 
 class AccountingMathTest(unittest.TestCase):
@@ -29,23 +27,12 @@ class AccountingMathTest(unittest.TestCase):
         self.assertEqual(above[0], 0)
         self.assertGreater(above[1], 0)
 
-    def test_external_deposit_changes_benchmark_not_profit(self) -> None:
-        config = CanaryConfig(json.loads((Path(__file__).parent / "base-canary.json").read_text()))
-        engine = object.__new__(PortfolioEngine)
-        engine.config = config
-        snapshot = {
-            "referencePrice": 2000.0,
-            "strategyValueUsd": 2240.0,
-            "holdValueUsd": 900.0,
-            "balances": {"ownerEth": 0.693438687085635},
-        }
-        adjusted = engine.apply_external_flows(
-            snapshot,
-            {"native": 668251304314405286, "weth": 0, "usdc": 0},
-        )
-        self.assertAlmostEqual(adjusted["externalNetFlowUsd"], 1336.5026086288106)
-        self.assertAlmostEqual(adjusted["netPnlUsd"], 3.4973913711894358)
-        self.assertGreater(adjusted["ownerGasValueUsd"], 0)
+    def test_strategy_accounting_excludes_operator_wallet(self) -> None:
+        accounting = strategy_accounting(495.0, 2.0, 4.0, 0.0, 495.0, 0.16)
+        self.assertAlmostEqual(accounting["strategyValueUsd"], 501.0)
+        self.assertAlmostEqual(accounting["capitalBenchmarkUsd"], 495.16)
+        self.assertAlmostEqual(accounting["netPnlUsd"], 5.84)
+        self.assertAlmostEqual(accounting["netPnlPct"], 5.84 / 495.16 * 100)
 
 
 if __name__ == "__main__":

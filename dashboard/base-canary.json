@@ -1,7 +1,7 @@
 {
   "chainId": 8453,
   "chainName": "Base",
-  "baselineBlock": 50063975,
+  "accountingStartBlock": 50064108,
   "enabledBlock": 50064136,
   "owner": "0x38580D3E838EdE8E6770Ae80881Cf71BaD2530aB",
   "hook": "0x079a5f5231a34C60E60090f7C0CcF333510A4040",
@@ -18,6 +18,7 @@
   "tickUpper": -200650,
   "depositedWethRaw": "133398674855053634",
   "depositedUsdcRaw": "245086496",
+  "setupGasWei": "83286102170262",
   "controlledTransaction": "0xb0f1a93ae4fb495723a8c7237f2f0c459fbf418c4bd88a20168410c5f5844eab",
   "milestoneTransactions": [
     "0x528e1d7c9d46d4033a0636e1b00a4d368f48a4b241974840397284853323cfaa",
@@ -27,10 +28,5 @@
     "0x1e6c1ddebe3a594e3bf3b1057afc7396dbcd159c5dfd88361c1e1c3a0777ed12",
     "0xd56f62c22872427ef976f5d0e9a00ad76081811046a580d883594a0cebdc0616",
     "0xb0f1a93ae4fb495723a8c7237f2f0c459fbf418c4bd88a20168410c5f5844eab"
-  ],
-  "baseline": {
-    "nativeWei": "25270668873400072",
-    "wethRaw": "167025158311010617",
-    "usdcRaw": "539624145"
-  }
+  ]
 }

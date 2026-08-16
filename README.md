@@ -326,13 +326,13 @@ Then open `http://127.0.0.1:8765`. The server reads `BASE_RPC_URL` from the
 ignored `.env`; it never sends the RPC URL or private key to the browser and
 does not sign transactions.
 
-Net P&L compares the operator wallet, withdrawable v4 principal and accrued
-fees, hook revenue, and adapter balances with the verified launch holdings at
-Base block `50063975`. Both sides are marked at the same PancakeSwap V3
-WETH/USDC reference price. Alchemy asset transfers adjust the benchmark for
-later ETH/WETH/USDC deposits and withdrawals, so adding capital is not reported
-as profit. Per-settlement profit remains gross hook revenue; transaction gas is
-shown separately because the triggering swapper pays it.
+Net P&L compares withdrawable v4 LP principal, accrued LP fees, hook revenue,
+and adapter balances with the original LP deposit plus setup and controlled-test
+gas. Both sides are marked at the same PancakeSwap V3 WETH/USDC reference
+price. The operator/dev wallet is deliberately excluded, so unrelated wallet
+deposits and withdrawals cannot change strategy value or P&L. Per-settlement
+profit remains gross hook revenue; transaction gas is shown separately because
+the triggering swapper pays it.
 
 Current optimized runtime sizes are enforced by `npm run size`. `ArbHook` is `23,644` bytes, leaving 356 bytes below the repository's `24,000`-byte budget and 932 bytes below EIP-170. `V4ArbExecutor` is `5,624` bytes and remains a separate immutable delegate-called execution module so the original route logic does not have to be deleted for deployability.
 

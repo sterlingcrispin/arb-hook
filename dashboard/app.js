@@ -38,7 +38,7 @@ function renderPnl(current) {
   document.title = `${positive ? "+" : "-"}${money(Math.abs(pnl))} / Base Canary`;
 
   set("strategy-value", money(current.strategyValueUsd));
-  set("hold-value", `Hold benchmark ${money(current.holdValueUsd)}`);
+  set("capital-benchmark", `Capital + gas ${money(current.capitalBenchmarkUsd)}`);
   set("hook-revenue", money(current.hookRevenueValueUsd));
   set("hook-weth", `${token(current.balances.hookWeth, 9)} WETH`);
   set("lp-fees", money(current.lpFeeValueUsd));
@@ -51,19 +51,19 @@ function renderPnl(current) {
 
 function renderComposition(current) {
   const parts = [
-    ["wallet", current.walletValueUsd],
     ["lp", current.lpPrincipalValueUsd],
     ["fees", current.lpFeeValueUsd],
     ["revenue", current.hookRevenueValueUsd],
+    ["adapters", current.adapterValueUsd],
   ];
   const total = parts.reduce((sum, item) => sum + item[1], 0) || 1;
   $("composition").innerHTML = parts.map(([name, value]) =>
     `<span class="${name}" style="width:${Math.max(0, value / total * 100)}%" title="${name}: ${money(value)}"></span>`
   ).join("");
-  set("wallet-value", money(current.walletValueUsd));
   set("lp-principal", money(current.lpPrincipalValueUsd));
   set("fee-value", money(current.lpFeeValueUsd));
   set("revenue-value", money(current.hookRevenueValueUsd));
+  set("adapter-value", money(current.adapterValueUsd));
   set("portfolio-total", money(current.strategyValueUsd));
   set("lp-weth", token(current.balances.lpPrincipalWeth, 9));
   set("lp-usdc", number(current.balances.lpPrincipalUsdc, 6));
@@ -205,11 +205,7 @@ function render(data) {
   renderActivity(data.activity);
   renderHealth(data.health);
   set("accounting-method", data.accounting.method);
-  const flows = data.accounting.externalFlows;
-  const flowNote = flows && flows.count
-    ? ` Excluded external flow: ${flows.native >= 0 ? "+" : ""}${token(flows.native, 9)} ETH, ${flows.weth >= 0 ? "+" : ""}${token(flows.weth, 9)} WETH, ${flows.usdc >= 0 ? "+" : ""}${number(flows.usdc, 6)} USDC.`
-    : " No external cash flows detected.";
-  set("accounting-assumption", `${data.accounting.assumption} Reference: ${data.accounting.reference}.${flowNote}`);
+  set("accounting-assumption", `${data.accounting.assumption} Reference: ${data.accounting.reference}.`);
 }
 
 function showError(message) {
