@@ -130,10 +130,18 @@
           </div>
           <div class="tape-summary">
             <span>AVG <b id="average-profit">$--</b></span>
+            <span>MIN HIT <b id="minimum-hit">$--</b></span>
             <span>NO-OPS <b id="noop-count">--</b></span>
           </div>
         </div>
-        <div id="profit-bars" class="profit-bars"></div>
+        <div class="trade-chart-wrap">
+          <div class="trade-chart-legend">
+            <span><i class="hit-dot"></i>Profitable</span>
+            <span><i class="noop-dot"></i>No-op</span>
+            <span><i class="test-dot"></i>Controlled test</span>
+          </div>
+          <svg id="trade-chart" role="img" aria-label="Trigger size versus retained profit" viewBox="0 0 1000 300"></svg>
+        </div>
         <div class="table-scroll">
           <table>
             <thead>

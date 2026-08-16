@@ -560,6 +560,29 @@ class EventIndex:
             )
 
         organic_trades = [trade for trade in trades if not trade["controlled"]]
+        trades_by_tx = {trade["transaction"]: trade for trade in trades}
+        observations: list[dict[str, Any]] = []
+        for tx_hash, trigger_swaps in swaps_by_tx.items():
+            amount1 = sum(item["amount1"] for item in trigger_swaps)
+            block = min(item["block"] for item in trigger_swaps)
+            trade = trades_by_tx.get(tx_hash)
+            observations.append(
+                {
+                    "transaction": tx_hash,
+                    "block": block,
+                    "timestamp": int((self.blocks.get(block) or {}).get("timestamp", "0x0"), 16),
+                    "controlled": tx_hash == self.controlled,
+                    "direction": "USDC -> WETH" if amount1 > 0 else "WETH -> USDC",
+                    "triggerNotionalUsd": sum(abs(item["amount1"]) for item in trigger_swaps) / 1e6,
+                    "settled": trade is not None,
+                    "profitUsd": trade["profitUsd"] if trade else 0.0,
+                    "target": ((self.transactions.get(tx_hash) or {}).get("to") or "").lower(),
+                }
+            )
+        observations.sort(key=lambda item: (item["block"], item["transaction"]))
+        organic_observations = [item for item in observations if not item["controlled"]]
+        profitable_observations = [item for item in organic_observations if item["settled"]]
+        no_op_observations = [item for item in organic_observations if not item["settled"]]
         return {
             "organicTransactions": len(organic_txs),
             "organicSwapEvents": sum(len(swaps_by_tx[tx_hash]) for tx_hash in organic_txs),
@@ -573,6 +596,16 @@ class EventIndex:
             "averageOrganicProfitUsd": (
                 sum(trade["profitUsd"] for trade in organic_trades) / len(organic_trades) if organic_trades else 0.0
             ),
+            "minProfitableTriggerUsd": min(
+                (item["triggerNotionalUsd"] for item in profitable_observations), default=0.0
+            ),
+            "largestNoOpTriggerUsd": max(
+                (item["triggerNotionalUsd"] for item in no_op_observations), default=0.0
+            ),
+            "lastOrganicSettlementTimestamp": max(
+                (item["timestamp"] for item in profitable_observations), default=0
+            ),
+            "triggerObservations": observations,
             "trades": trades,
         }
 

@@ -121,15 +121,11 @@ function renderActivity(activity) {
   set("settlement-count", String(activity.organicSettlements));
   set("success-rate", `${number(activity.successRatePct, 1)}% hit rate`);
   set("average-profit", money(activity.averageOrganicProfitUsd, 3));
+  set("minimum-hit", money(activity.minProfitableTriggerUsd, 2));
   set("noop-count", String(activity.noOpTransactions));
 
   const trades = activity.trades || [];
-  const recent = trades.slice(0, 18).reverse();
-  const maxProfit = Math.max(...recent.map((trade) => trade.profitUsd), 0.01);
-  $("profit-bars").innerHTML = recent.map((trade) => {
-    const height = 12 + Math.sqrt(trade.profitUsd / maxProfit) * 52;
-    return `<span class="profit-bar ${trade.controlled ? "controlled" : ""}" style="height:${height}px" data-label="${money(trade.profitUsd, 3)}"></span>`;
-  }).join("");
+  renderTradeChart(activity.triggerObservations || []);
 
   if (!trades.length) return;
   $("trade-rows").innerHTML = trades.slice(0, 14).map((trade) => `
@@ -141,6 +137,44 @@ function renderActivity(activity) {
       <td class="profit">+${money(trade.profitUsd, 4)}<small>${token(trade.profitToken, 9)} ${trade.profitSymbol}</small></td>
       <td>${compact(trade.gasUsed)}<small>${token(trade.txFeeEth, 7)} ETH paid by trigger</small></td>
     </tr>`).join("");
+}
+
+function renderTradeChart(observations) {
+  const svg = $("trade-chart");
+  if (!observations.length) {
+    svg.innerHTML = '<text x="500" y="150" text-anchor="middle" fill="#53606b" font-family="DM Mono, monospace" font-size="12">Waiting for trigger observations...</text>';
+    return;
+  }
+  const width = 1000;
+  const height = 300;
+  const pad = { left: 70, right: 24, top: 22, bottom: 46 };
+  const maxX = Math.max(...observations.map((item) => item.triggerNotionalUsd), 10) * 1.08;
+  const maxY = Math.max(...observations.map((item) => item.profitUsd), 0.1) * 1.14;
+  const x = (value) => pad.left + value / maxX * (width - pad.left - pad.right);
+  const y = (value) => pad.top + (maxY - value) / maxY * (height - pad.top - pad.bottom);
+  const xTicks = Array.from({ length: 6 }, (_, index) => maxX * index / 5);
+  const yTicks = Array.from({ length: 5 }, (_, index) => maxY * index / 4);
+  const grid = [
+    ...xTicks.map((value) => `<line x1="${x(value)}" y1="${pad.top}" x2="${x(value)}" y2="${height - pad.bottom}" stroke="rgba(16,26,36,.08)"/><text x="${x(value)}" y="${height - 19}" text-anchor="middle" fill="#68747d" font-family="DM Mono, monospace" font-size="9">$${value.toFixed(0)}</text>`),
+    ...yTicks.map((value) => `<line x1="${pad.left}" y1="${y(value)}" x2="${width - pad.right}" y2="${y(value)}" stroke="rgba(16,26,36,.08)"/><text x="${pad.left - 10}" y="${y(value) + 3}" text-anchor="end" fill="#68747d" font-family="DM Mono, monospace" font-size="9">$${value.toFixed(2)}</text>`),
+  ].join("");
+  const points = observations.map((item, index) => {
+    const cx = x(item.triggerNotionalUsd);
+    const cy = item.settled ? y(item.profitUsd) : y(0) - (index % 4) * 2;
+    const label = `${item.controlled ? "Controlled" : item.settled ? "Profitable" : "No-op"}: ${money(item.triggerNotionalUsd, 2)} trigger / ${money(item.profitUsd, 4)} profit / ${item.direction}`;
+    if (item.controlled) {
+      return `<a href="https://basescan.org/tx/${item.transaction}" target="_blank"><rect x="${cx - 5}" y="${cy - 5}" width="10" height="10" transform="rotate(45 ${cx} ${cy})" fill="#ee6a4b" stroke="#f2f0e9" stroke-width="2"><title>${label}</title></rect></a>`;
+    }
+    const fill = item.settled ? "#137a55" : "#95a0a6";
+    const opacity = item.settled ? 0.9 : 0.38;
+    const radius = item.settled ? 7 : 4;
+    return `<a href="https://basescan.org/tx/${item.transaction}" target="_blank"><circle cx="${cx}" cy="${cy}" r="${radius}" fill="${fill}" fill-opacity="${opacity}" stroke="${item.settled ? "#f2f0e9" : "none"}" stroke-width="2"><title>${label}</title></circle></a>`;
+  }).join("");
+  svg.innerHTML = `${grid}
+    <line x1="${pad.left}" y1="${y(0)}" x2="${width - pad.right}" y2="${y(0)}" stroke="#101a24" stroke-width="1.2"/>
+    <text x="${(pad.left + width - pad.right) / 2}" y="${height - 2}" text-anchor="middle" fill="#53606b" font-family="DM Mono, monospace" font-size="9">TRIGGER NOTIONAL (USDC)</text>
+    <text x="13" y="${height / 2}" text-anchor="middle" fill="#53606b" font-family="DM Mono, monospace" font-size="9" transform="rotate(-90 13 ${height / 2})">RETAINED PROFIT (USD)</text>
+    ${points}`;
 }
 
 function renderHealth(health) {

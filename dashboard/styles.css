@@ -233,12 +233,14 @@ main { padding: 38px 0 56px; }
 
 .tape-summary { display: flex; gap: 14px; color: var(--ink-soft); font: 400 9px var(--mono); }
 .tape-summary b { color: var(--ink); font-weight: 500; }
-.profit-bars { min-height: 84px; display: flex; align-items: end; gap: 5px; padding: 18px 22px 15px; border-bottom: 1px solid var(--line); }
-.profit-bar { flex: 1; min-width: 4px; max-width: 34px; position: relative; background: var(--green); opacity: .72; transition: height .45s ease; }
-.profit-bar.controlled { background: var(--ink-soft); opacity: .35; }
-.profit-bar:hover { opacity: 1; }
-.profit-bar::after { content: attr(data-label); display: none; position: absolute; bottom: calc(100% + 7px); left: 50%; z-index: 3; transform: translateX(-50%); padding: 5px 7px; color: white; background: var(--ink); white-space: nowrap; font: 9px var(--mono); }
-.profit-bar:hover::after { display: block; }
+.trade-chart-wrap { position: relative; height: 300px; padding: 34px 16px 5px; border-bottom: 1px solid var(--line); background: rgba(228,224,212,.28); }
+.trade-chart-wrap svg { width: 100%; height: 100%; overflow: visible; }
+.trade-chart-legend { position: absolute; top: 12px; right: 20px; display: flex; gap: 13px; color: var(--ink-soft); font: 400 8px var(--mono); }
+.trade-chart-legend span { display: flex; align-items: center; gap: 5px; }
+.trade-chart-legend i { width: 7px; height: 7px; display: inline-block; border-radius: 50%; }
+.trade-chart-legend .hit-dot { background: var(--green); }
+.trade-chart-legend .noop-dot { background: #95a0a6; opacity: .48; }
+.trade-chart-legend .test-dot { border-radius: 0; background: var(--coral); transform: rotate(45deg); }
 
 .table-scroll { overflow-x: auto; }
 table { width: 100%; border-collapse: collapse; min-width: 830px; }
@@ -329,6 +331,8 @@ footer a { color: var(--ink); text-decoration: none; }
   .position-readout,
   .price-spread { margin-inline: 17px; }
   .tape-summary { flex-direction: column; gap: 4px; text-align: right; }
+  .trade-chart-wrap { height: 245px; padding-inline: 6px; }
+  .trade-chart-legend { right: 10px; gap: 8px; }
   .accounting-note { grid-template-columns: 1fr; }
   .accounting-note span { grid-row: auto; margin-bottom: 5px; }
   footer { flex-wrap: wrap; }
