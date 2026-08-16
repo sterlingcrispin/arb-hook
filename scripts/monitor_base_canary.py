@@ -194,11 +194,13 @@ def report_events(start: int, end: int) -> None:
             if emergency_disable("settlement violated profit, iteration, or revenue-recipient invariant"):
                 raise SystemExit("canary disabled")
 
+    reported_no_ops: set[str] = set()
     for entry in swap_logs:
         sender = "0x" + str(entry["topics"][2])[-40:].lower()
         tx_hash = str(entry["transactionHash"]).lower()
-        if sender != HOOK and tx_hash not in settled_transactions:
+        if sender != HOOK and tx_hash not in settled_transactions and tx_hash not in reported_no_ops:
             stamp(f"NO-OP tx={tx_hash}: trigger swap completed without a profitable settlement")
+            reported_no_ops.add(tx_hash)
 
 
 def main() -> None:
