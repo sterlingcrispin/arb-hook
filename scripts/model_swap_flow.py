@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Model Base WETH/USDC swap sizes and arrival rates from onchain events.
+"""Model WETH/quote-token swap sizes and arrival rates from onchain events.
 
 The model deliberately separates observed market flow from assumed routing
 share. A new pool's share cannot be inferred from historical swaps on existing
@@ -7,6 +7,7 @@ venues, so projections are emitted at explicit hypothetical shares.
 
 Usage:
     BASE_RPC_URL=... python3 scripts/model_swap_flow.py --days 7
+    ROBINHOOD_RPC_URL=... python3 scripts/model_swap_flow.py --network robinhood --days 3
 """
 
 from __future__ import annotations
@@ -856,7 +857,7 @@ def parse_shares(value: str) -> list[float]:
 def parser() -> argparse.ArgumentParser:
     command = argparse.ArgumentParser(description=__doc__)
     command.add_argument("--network", choices=("base", "robinhood"), default="base")
-    command.add_argument("--rpc-url", default=os.environ.get("BASE_RPC_URL"))
+    command.add_argument("--rpc-url")
     command.add_argument("--days", type=float, default=7.0)
     command.add_argument("--end-block", type=int)
     command.add_argument("--chunk-blocks", type=int, default=5_000)
@@ -875,10 +876,12 @@ def parser() -> argparse.ArgumentParser:
 def main() -> int:
     args = parser().parse_args()
     configure_network(args.network)
+    rpc_env = "BASE_RPC_URL" if args.network == "base" else "ROBINHOOD_RPC_URL"
+    args.rpc_url = args.rpc_url or os.environ.get(rpc_env)
     if args.sweep_results is None and args.network == "base":
         args.sweep_results = ROOT / "artifacts" / "frontier" / "v4-parameter-sweep-50052773.json"
     if not args.rpc_url:
-        raise SystemExit("BASE_RPC_URL or --rpc-url is required")
+        raise SystemExit(f"{rpc_env} or --rpc-url is required")
     if args.days <= 0 or args.chunk_blocks <= 0 or args.workers <= 0:
         raise SystemExit("days, chunk-blocks, and workers must be positive")
 

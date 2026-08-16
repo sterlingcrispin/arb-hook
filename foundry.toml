@@ -25,6 +25,7 @@ remappings = [
 [rpc_endpoints]
 base = '${BASE_RPC_URL}'
 base_testnet = '${BASE_TESTNET_RPC_URL}'
+robinhood = '${ROBINHOOD_RPC_URL}'
 
 [fmt]
 line_length = 120
