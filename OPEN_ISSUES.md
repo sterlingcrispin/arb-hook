@@ -9,32 +9,27 @@ The initial deployment is owner-operated with a small set of manually verified, 
 
 ## Strategy Findings
 
-66. Caller resolution stops at the immediate router, not the end user
+68. Universal Router caller resolution is one hop, not recursive
 - Status: `DOCUMENTED`
 - Priority: `MEDIUM`
 - Summary: Empty hook data resolves the recipient through
   `IMsgSender.msgSender()` on the address that called `PoolManager.swap`. That
-  returns the router's immediate caller. When a user reaches Universal Router
-  directly the result is the user, which is the intended behaviour. When an
-  aggregator, relayer or smart-account router sits in between, the immediate
-  caller is that contract, so the rebate is paid there instead.
-- Measurement: `testEmptyHookDataPaysIntermediateRouterNotEndUser` forwards a
-  100 USDC swap through a minimal contract that calls Universal Router. The
-  arbitrage settles normally and pays 0.000432 WETH to the forwarding contract.
-  The end user who initiated the trade receives zero. The forwarder in the test
-  has no sweep function, so that WETH is unrecoverable.
-- Why it matters: a large share of real swap flow arrives through aggregators.
-  The rebate is an unexpected extra token those contracts have no reason to
-  forward, so in practice it is stranded or captured by the intermediary rather
-  than reaching the person who paid for it. Nothing is lost by the hook, the
-  LP, or the lender; only the intended recipient changes.
+  returns the Universal Router's immediate caller. A direct wallet call pays the
+  wallet, and a user-owned smart account pays that account. If another routing
+  contract calls Universal Router, the hook pays that intermediary.
+- Consequence: the hook cannot infer an ultimate beneficial owner through an
+  arbitrary contract call chain. Whether an intermediary forwards or retains
+  the rebate depends on its settlement logic; a router that sweeps its full WETH
+  balance to the user naturally includes the rebate.
 - Not a security issue: any contract can already name any recipient by supplying
   20 bytes of hook data, so trusting `msgSender()` grants no new capability. The
   lookup is gas-capped at 10,000 and a router without the interface reverts into
   the catch, which skips the attempt rather than misdirecting funds.
 - Decision: treat direct Universal Router calls as the supported rebate path and
-  document it. Integrators routing through their own contracts must pass the end
-  user as packed hook data. Revisit only if aggregator flow becomes a target.
+  document the one-hop boundary. Intermediaries should either forward their full
+  WETH output or pass the end user as packed hook data. There is no safe generic
+  onchain mechanism for the hook to discover a user hidden behind arbitrary
+  contracts.
 
 65. Hook profit is LP value redistribution, not new value
 - Status: `BLOCKS DEPLOYMENT`
@@ -255,7 +250,8 @@ The initial deployment is owner-operated with a small set of manually verified, 
   optional override, while failed lookups and malformed data remain fail-closed.
 - Decision: ordinary canonical-router swaps rebate their initiator without a
   custom frontend. Unsupported routers skip arbitrage rather than misdirecting
-  profit. The triggering user's ordinary swap output remains unchanged.
+  profit. Intermediary semantics are documented in item 68. The triggering
+  user's ordinary swap output remains unchanged.
 
 ## Deferred Outside Canary Threat Model
 

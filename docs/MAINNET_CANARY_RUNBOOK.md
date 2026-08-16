@@ -283,7 +283,7 @@ If an empty-data swap uses a custom router that does not implement `IMsgSender`,
 
 Normal swap output is returned by the router and the hook returns zero V4 delta. Arbitrage profit is a separate WETH transfer from the hook to the resolved recipient.
 
-The caller lookup does not guarantee that the public Uniswap interface or an aggregator will discover and route through the canary pool. It only removes the need for recipient-specific calldata once a canonical Universal Router swap reaches the pool. An aggregator contract that initiates the Universal Router execution receives the rebate and is responsible for forwarding it to its user.
+The caller lookup does not guarantee that the public Uniswap interface or an aggregator will discover and route through the canary pool. It only removes the need for recipient-specific calldata once a canonical Universal Router swap reaches the pool. An intermediary contract that initiates the Universal Router execution receives the rebate and must either forward its full WETH output or pass the end user through the packed recipient override.
 
 ## Stop And Withdraw
 

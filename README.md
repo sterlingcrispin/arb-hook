@@ -77,7 +77,7 @@ The swapper's ordinary output is identical in all cases; hook profit is an addit
 
 Normal swaps require no custom hook data. The `afterSwap` callback identifies the router through its `sender` argument, then calls the standard v4 periphery `IMsgSender.msgSender()` interface. Base's canonical Universal Router returns the address that initiated its active execution lock. For a wallet calling the router directly, that is the wallet; for a smart account, it is the smart account.
 
-The hook caps this external lookup at 10,000 gas. If empty hook data arrives from a custom router that does not implement `IMsgSender`, returns zero, or fails the lookup, the hook skips arbitrage rather than guessing with `tx.origin` or paying the wrong address. An aggregator that calls the Universal Router from its own contract is the router initiator and must forward any received rebate itself.
+The hook caps this external lookup at 10,000 gas. If empty hook data arrives from a custom router that does not implement `IMsgSender`, returns zero, or fails the lookup, the hook skips arbitrage rather than guessing with `tx.origin` or paying the wrong address. An intermediary that calls the Universal Router is the router initiator; it must forward its full WETH output or pass the end user through the optional packed recipient override.
 
 Exactly 20 packed bytes remain an optional explicit-recipient override:
 
