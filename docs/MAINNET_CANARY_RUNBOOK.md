@@ -32,5 +32,9 @@ A replacement runbook must be written from a reviewed release commit after all o
 6. Trigger-size economics showing the loop clears venue fees, lender fees, and gas.
 7. An explicit acceptance of the LP-to-beneficiary redistribution described in
    `OPEN_ISSUES.md` item 65.
+8. A measured route-discovery plan. If canonical Uniswap UI/API flow is part of
+   the economic case, the exact deployed hook must be allowlisted and production
+   quotes must be shown to consider and select the PoolId. See `OPEN_ISSUES.md`
+   item 71.
 
 Until that work exists, keep `hookMaxIterations = 0` on any deployed hook.

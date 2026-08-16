@@ -273,6 +273,27 @@ The initial deployment is owner-operated with a small set of manually verified, 
 
 ## Open Before Any Deployment
 
+71. Organic Uniswap routing requires hook allowlisting
+- Status: `REQUIRED BEFORE ROUTING-DEPENDENT DEPLOYMENT`
+- Priority: `CRITICAL`
+- Summary: Uniswap's production routing API filters v4 pools whose nonzero hook
+  address is not in its explicit hook-address allowlist. Adding metadata to the
+  public hooklist does not automatically add an address to that routing
+  allowlist. Direct swaps, third-party integrations, and searchers can still
+  target the PoolId, but ordinary UI/API route discovery cannot be assumed.
+- Consequence: historical canonical-router replays are upper-bound scenarios
+  conditional on allowlisting. They are not evidence that a newly deployed pool
+  will receive canonical flow. Without a measured traffic source, expected
+  routing share and therefore expected LP revenue remain unknown.
+- Action: deploy the exact reviewed hook disabled, complete the current Uniswap
+  allowlisting process, then verify production quote requests consider and
+  select the PoolId before enabling or scaling liquidity. Keep explicit
+  discovery-share sensitivity in every economic projection.
+- Sources: the routing API's
+  [hook allowlist](https://github.com/Uniswap/routing-api/blob/main/lib/util/hooksAddressesAllowlist.ts),
+  [quote filter](https://github.com/Uniswap/routing-api/blob/main/lib/handlers/quote/quote.ts),
+  and the [hooklist submission notes](https://github.com/Uniswap/hooklist).
+
 20. Independent review of release commit
 - Status: `REQUIRED FOR NEXT DEPLOYMENT`
 - Priority: `CRITICAL`

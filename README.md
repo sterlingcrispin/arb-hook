@@ -246,7 +246,32 @@ The model uses empirical size quantiles and threshold rates rather than forcing 
 
 The deep 5 bp pool is an upper-flow reference, not a forecast for a new pool. Randomly receiving `0.1%`, `1%`, or `5%` of its observed flow would imply about `10.8`, `108.4`, or `542.0` swaps/day, with `4.0`, `39.9`, or `199.5` swaps of at least `$100`. The live v4 comparison is a more conservative empirical reference: it saw `52.4` swaps of at least `$100` per day, `5.4` of at least `$250`, `0.9` of at least `$500`, and none of at least `$1,000` during the sample.
 
-Coupling the observed USDC-to-WETH flow to the `$10..$1,000` fork sweep exposes the routing bottleneck. At a hypothetical `1%` share, the best tested LP-PnL row (`$10,000` per side, `+/-500` ticks, `0.10 bp`) covers `19.6` sampled trades/day, is quote-and-gas competitive for `8.6`, and both wins the route and executes an arb for only about `1.4`. Its reset-per-trigger estimate is roughly `$0.11/day` of LP PnL and `$0.014/day` of user rebate. Those values are not a deployment forecast: routing share is unknown, historical events mix user flow with routers and searchers, LP inventory does not reset after each real swap, and the current sweep models only USDC-to-WETH.
+The reset-per-trigger projection produced by that first flow model is superseded
+by the persistent, bidirectional replay:
+
+```bash
+python3 scripts/replay_v4_strategy.py \
+  --capitals 250,500,2000,10000 \
+  --ranges 300 --fees 1500 \
+  --hook-modes on --principal-caps 100 \
+  --max-iterations 10 --min-profits 0.05 \
+  --discovery-shares 0.1,1,10,100
+```
+
+The replay keeps candidate liquidity, inventory, and fees across all 622,266
+transaction-level orders; compares candidate output with observed source output;
+and mirrors the production adaptive v4/V3 loop. In the full-flow optimization
+ceiling, the return-efficient region was roughly `$2,000` per side, `+/-300`
+ticks, and a `15 bp` fee. A small-capital canary favored roughly `$250..$500`
+per side, `+/-300` ticks, and `10 bp`.
+
+Those are configuration rankings, not revenue forecasts. Uniswap's production
+routing API filters non-allowlisted hooks, so canonical UI/API flow is
+conditional on allowlisting the exact deployed hook. Route discovery is swept
+explicitly rather than assumed, and low-discovery results are near break-even.
+See [`docs/BASE_WETH_USDC_STRATEGY_REPLAY.md`](docs/BASE_WETH_USDC_STRATEGY_REPLAY.md)
+for methodology, reference-pool results, sensitivity tables, and the canary
+decision sequence.
 
 Historical exact inventory oracle:
 
