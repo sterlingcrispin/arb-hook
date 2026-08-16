@@ -522,6 +522,7 @@ def replay(
     return {
         **asdict(config),
         "gas_penalty_usdc": gas_penalty_usdc,
+        "min_profit_usdc": min_profit_usdc,
         "duration_days": duration_days,
         "orders": len(orders),
         "initial_price_usdc": initial_price,
@@ -656,13 +657,16 @@ def write_results(output_dir: Path, metadata: dict, arguments: dict, rows: list[
 
 def report(rows: list[dict]) -> None:
     print("\nTop candidate pools by LP excess versus holding the deposited assets")
-    print("hook fee   LP/side range gas    routes/day arbs/day LP excess/day rebate/day")
+    print("hook fee   LP/side range iter cap   min$  gas    routes/day arbs/day LP excess/day rebate/day")
     for row in rows[:12]:
         print(
             f"{'on' if row['hook_enabled'] else 'off':>4} "
             f"{row['fee_ppm'] / 100:>4.2f}bp "
             f"${row['capital_per_side']:<7,.0f} "
             f"{row['half_range_ticks']:>5}t "
+            f"{row['max_iterations']:>4} "
+            f"{row['principal_cap_bps']:>4} "
+            f"{row['min_profit_usdc']:>5.2f} "
             f"${row['gas_penalty_usdc']:<6,.3f} "
             f"{row['route_wins_per_day']:>10,.1f} "
             f"{row['arb_count_per_day']:>8,.1f} "
@@ -680,10 +684,10 @@ def parser() -> argparse.ArgumentParser:
     command.add_argument("--ranges", default="50,100,250,500,1000")
     command.add_argument("--fees", default="1,10,100")
     command.add_argument("--hook-modes", choices=("on", "off", "both"), default="both")
-    command.add_argument("--principal-cap-bps", type=int, default=1000)
-    command.add_argument("--max-iterations", type=int, default=10)
+    command.add_argument("--principal-cap-bps", "--principal-caps", dest="principal_caps", default="1000")
+    command.add_argument("--max-iterations", dest="max_iterations", default="10")
     command.add_argument("--min-spread-ticks", type=int, default=10)
-    command.add_argument("--min-profit-usdc", type=float, default=0.0)
+    command.add_argument("--min-profit-usdc", "--min-profits", dest="min_profits", default="0")
     command.add_argument("--gas-penalty-usdc", "--gas-penalties", dest="gas_penalties", default="0.005")
     command.add_argument("--start-day", type=float, default=0.0)
     command.add_argument("--duration-days", type=float)
@@ -699,10 +703,13 @@ def main() -> int:
     unknown = references - REFERENCE_POOLS.keys()
     if not references or unknown:
         raise SystemExit(f"invalid references: {sorted(unknown)}")
-    if not 0 < args.principal_cap_bps <= 10_000 or args.max_iterations <= 0:
-        raise SystemExit("principal cap and max iterations must be positive")
+    principal_caps = parse_numbers(args.principal_caps, int)
+    max_iterations = parse_numbers(args.max_iterations, int)
+    min_profits = parse_numbers(args.min_profits, float)
+    if any(not 0 < cap <= 10_000 for cap in principal_caps) or any(value <= 0 for value in max_iterations):
+        raise SystemExit("principal caps and max iterations must be positive")
     gas_penalties = parse_numbers(args.gas_penalties, float)
-    if any(penalty < 0 for penalty in gas_penalties) or args.min_profit_usdc < 0:
+    if any(penalty < 0 for penalty in gas_penalties) or any(value < 0 for value in min_profits):
         raise SystemExit("gas penalty and minimum profit cannot be negative")
     if args.start_day < 0 or (args.duration_days is not None and args.duration_days <= 0):
         raise SystemExit("replay window must be positive")
@@ -733,20 +740,24 @@ def main() -> int:
     fees = parse_numbers(args.fees, int)
     hook_modes = [True, False] if args.hook_modes == "both" else [args.hook_modes == "on"]
     scenarios = [
-        (Config(capital, half_range, fee, enabled, args.principal_cap_bps, args.max_iterations), gas_penalty)
+        (Config(capital, half_range, fee, enabled, principal_cap, iterations), gas_penalty, min_profit)
         for capital in capitals
         for half_range in ranges
         for fee in fees
         for enabled in hook_modes
+        for principal_cap in principal_caps
+        for iterations in max_iterations
         for gas_penalty in gas_penalties
+        for min_profit in min_profits
     ]
 
     rows = []
-    for index, (config, gas_penalty) in enumerate(scenarios, start=1):
+    for index, (config, gas_penalty, min_profit) in enumerate(scenarios, start=1):
         print(
             f"[{index}/{len(scenarios)}] ${config.capital_per_side:,.0f}/side, "
             f"{config.half_range_ticks} ticks, {config.fee_ppm / 100:.2f} bp, "
-            f"hook={'on' if config.hook_enabled else 'off'}, gas=${gas_penalty:g}",
+            f"hook={'on' if config.hook_enabled else 'off'}, iterations={config.max_iterations}, "
+            f"cap={config.principal_cap_bps} bps, min=${min_profit:g}, gas=${gas_penalty:g}",
             flush=True,
         )
         rows.append(
@@ -755,7 +766,7 @@ def main() -> int:
                 orders,
                 gas_penalty_usdc=gas_penalty,
                 min_spread_ticks=args.min_spread_ticks,
-                min_profit_usdc=args.min_profit_usdc,
+                min_profit_usdc=min_profit,
             )
         )
     rows.sort(key=lambda row: row["lp_excess_vs_hodl_usdc"], reverse=True)
@@ -768,10 +779,10 @@ def main() -> int:
         "ranges": ranges,
         "fees_ppm": fees,
         "hook_modes": args.hook_modes,
-        "principal_cap_bps": args.principal_cap_bps,
-        "max_iterations": args.max_iterations,
+        "principal_caps_bps": principal_caps,
+        "max_iterations": max_iterations,
         "min_spread_ticks": args.min_spread_ticks,
-        "min_profit_usdc": args.min_profit_usdc,
+        "min_profits_usdc": min_profits,
         "gas_penalties_usdc": gas_penalties,
         "start_day": args.start_day,
         "duration_days": args.duration_days,
