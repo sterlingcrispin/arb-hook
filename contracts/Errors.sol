@@ -42,5 +42,6 @@ library ArbErrors {
     error UnsupportedPoolType();
     error InvalidV2FlashSwapParams();
     error InvalidGasReserve();
+    error InsufficientHookGas();
     error OwnershipRenunciationDisabled();
 }

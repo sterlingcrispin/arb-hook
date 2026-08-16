@@ -11,21 +11,26 @@ import {PoolManagerHarness} from "../../contracts/test/PoolManagerHarness.sol";
 import {ArbitrageLogic} from "../../contracts/ArbitrageLogic.sol";
 import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 import {Hooks} from "@uniswap/v4-core/src/libraries/Hooks.sol";
+import {IHooks} from "@uniswap/v4-core/src/interfaces/IHooks.sol";
 import {IPoolManager} from "@uniswap/v4-core/src/interfaces/IPoolManager.sol";
 import {PoolKey} from "@uniswap/v4-core/src/types/PoolKey.sol";
-import {PoolId} from "@uniswap/v4-core/src/types/PoolId.sol";
+import {PoolId, PoolIdLibrary} from "@uniswap/v4-core/src/types/PoolId.sol";
+import {Currency} from "@uniswap/v4-core/src/types/Currency.sol";
 import {BalanceDelta} from "@uniswap/v4-core/src/types/BalanceDelta.sol";
 import {SwapParams} from "@uniswap/v4-core/src/types/PoolOperation.sol";
 import {HookMiner} from "@uniswap/v4-periphery/src/utils/HookMiner.sol";
 
 contract ArbHookFlashConfigTest is Test {
+    using PoolIdLibrary for PoolKey;
+
     ArbHookHarness internal hook;
+    PoolManagerHarness internal poolManager;
 
     address internal constant TOKEN = address(0x1234);
     address internal constant LENDER = address(0x9999);
 
     function setUp() public {
-        PoolManagerHarness poolManager = new PoolManagerHarness(address(this));
+        poolManager = new PoolManagerHarness(address(this));
         ArbitrageLogic logic = new ArbitrageLogic();
         hook = new ArbHookHarness(
             IPoolManager(address(poolManager)),
@@ -84,11 +89,46 @@ contract ArbHookFlashConfigTest is Test {
         );
     }
 
+    function testEligibleSwapRejectsInsufficientAttemptGas() public {
+        hook.setHookMaxIterations(1);
+
+        (bool success, bytes memory reason) = address(poolManager).call{gas: 500_000}(
+            abi.encodeCall(
+                PoolManagerHarness.callAfterSwap,
+                (IHooks(address(hook)), address(this), abi.encodePacked(address(this)))
+            )
+        );
+
+        assertFalse(success, "eligible low-gas swap must not silently skip");
+        assertEq(bytes4(reason), ArbErrors.InsufficientHookGas.selector);
+    }
+
+    function testBelowTriggerSwapStillSettlesWithLowGas() public {
+        hook.setHookMaxIterations(1);
+        PoolKey memory key = PoolKey({
+            currency0: Currency.wrap(address(0x1)),
+            currency1: Currency.wrap(address(0x2)),
+            fee: 3000,
+            tickSpacing: 1,
+            hooks: IHooks(address(hook))
+        });
+        hook.setMinTriggerAmount(key.toId(), true, 1);
+
+        (bool success,) = address(poolManager).call{gas: 250_000}(
+            abi.encodeCall(
+                PoolManagerHarness.callAfterSwap,
+                (IHooks(address(hook)), address(this), bytes(""))
+            )
+        );
+
+        assertTrue(success, "below-trigger swap should skip before the gas floor");
+    }
+
     function testProductionHookDeploysAtMinedAddress() public {
-        PoolManagerHarness poolManager = new PoolManagerHarness(address(this));
+        PoolManagerHarness productionPoolManager = new PoolManagerHarness(address(this));
         ArbitrageLogic logic = new ArbitrageLogic();
         bytes memory args = abi.encode(
-            IPoolManager(address(poolManager)),
+            IPoolManager(address(productionPoolManager)),
             address(this),
             address(logic)
         );
@@ -100,7 +140,7 @@ contract ArbHookFlashConfigTest is Test {
         );
 
         ArbHook deployed = new ArbHook{salt: salt}(
-            IPoolManager(address(poolManager)),
+            IPoolManager(address(productionPoolManager)),
             address(this),
             address(logic)
         );
