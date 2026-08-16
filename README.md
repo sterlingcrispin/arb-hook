@@ -302,10 +302,12 @@ An owner-revenue Base WETH/USDC research canary is active from source commit
   iteration, or revenue-recipient invariant failure
 
 The controlled 50 USDC swap completed ten live-repriced rounds, repaid Morpho,
-and retained `0.000093783763919242 WETH` in the hook for owner withdrawal. At the
-first observation snapshot, the pool had already received 15 additional
-third-party swaps totaling about `41.79 USDC` of notional. That proves some
-external route discovery, not durable volume or profitability.
+and retained `0.000093783763919242 WETH` in the hook for owner withdrawal. By
+Base block `50064407`, the pool had received 23 third-party transactions totaling
+about `455.64 USDC` of notional. Two triggered profitable ten-round settlements,
+bringing retained hook revenue to `0.000719606100210729 WETH`. That proves
+external route discovery and live owner revenue, not durable volume or a
+long-term return rate.
 
 Earlier canaries are disabled and have no liquidity. Current addresses,
 receipts, configuration, shutdown instructions, and timestamped observations

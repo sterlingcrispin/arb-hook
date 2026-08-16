@@ -40,11 +40,20 @@ before the receipt's L1 data fee.
 
 ### Initial Organic Observation
 
-Through Base block `50064263`, the pool received 15 third-party swaps after the
-controlled transaction, totaling about `41.79 USDC` of notional across both
-directions and six non-canonical transaction targets. None produced a profitable
-hook settlement or violated an invariant. This proves immediate external route
-discovery, not sustained volume or profitability.
+Through Base block `50064407`, the pool received 23 third-party transactions
+after the controlled swap, totaling about `455.64 USDC` of notional across both
+directions and six non-canonical transaction targets. Two produced profitable
+ten-round hook settlements:
+
+| Trigger transaction | Trigger size | Retained WETH profit |
+|---|---:|---:|
+| `0x430c968d72ae09afc419986c41f9dc7c0ad688875fd55126b6ece98375b0f1c6` | `71.701586 USDC` | `0.000098362506912760` |
+| `0x0aa19f1b5e06bfb47cac32af72f8f204243ccb0c341335e292a4d4bbde426609` | `180.712651 USDC` | `0.000527459829378727` |
+
+Total retained hook revenue at that snapshot was
+`0.000719606100210729 WETH`. No invariant was violated. This proves immediate
+external route discovery and actual third-party revenue, not sustained volume
+or a long-term return rate.
 
 The automatic kill-switch monitor runs in tmux session
 `arb-hook-canary-079a`; its log is

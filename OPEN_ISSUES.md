@@ -40,9 +40,9 @@ The initial deployment is owner-operated with a small set of manually verified, 
   lookup skipped their arbitrage attempts.
 - Live evidence: the creator-retained canary's controlled Universal Router swap
   used a `4,459,209` gas limit, consumed `1,387,508`, and settled ten rounds.
-  Within two minutes, 15 third-party transactions through six other transaction
-  targets also reached the pool without reverting. Their no-op attempts found no
-  profitable settlement, which is expected after dynamic screening.
+  Within the first observation window, 23 third-party transactions through six
+  other transaction targets also reached the pool without reverting. Two
+  produced profitable settlements; the remainder safely screened as no-ops.
 - Decision: keep the floor during this canary. It did not prevent immediate
   third-party routing, while removing it can restore the fail-open behavior in
   item 70. Continue measuring route share and gas limits before scaling.
@@ -335,9 +335,10 @@ The initial deployment is owner-operated with a small set of manually verified, 
   public hooklist does not automatically add an address to that routing
   allowlist. Direct swaps, third-party integrations, and searchers can still
   target the PoolId, but ordinary UI/API route discovery cannot be assumed.
-- Live evidence: the non-allowlisted hook received 15 third-party swaps totaling
-  about `41.79 USDC` of notional within two minutes of its controlled swap. Those
-  transactions used six non-canonical transaction targets. Exact-address
+- Live evidence: by Base block `50064407`, the non-allowlisted hook received 23
+  third-party transactions totaling about `455.64 USDC` of notional. Those
+  transactions used six non-canonical transaction targets, and two produced
+  profitable hook settlements. Exact-address
   allowlisting therefore limits canonical Uniswap routing, but does not imply
   that aggregators, searchers, or other routers will ignore the pool.
 - Action: observe actual route share before scaling. Uniswap allowlisting may
@@ -443,6 +444,10 @@ The initial deployment is owner-operated with a small set of manually verified, 
   transaction `0xb0f1a93ae4fb495723a8c7237f2f0c459fbf418c4bd88a20168410c5f5844eab`
   borrowed `0.0027 WETH`, completed ten rounds, repaid Morpho with zero fee, and
   retained `0.000093783763919242 WETH` in the hook.
+- Organic evidence: a `71.701586 USDC` trigger retained
+  `0.000098362506912760 WETH`; a `180.712651 USDC` trigger retained
+  `0.000527459829378727 WETH`. Total hook revenue through block `50064407` was
+  `0.000719606100210729 WETH`.
 - Calibration sweep: 20 rounds settled under the default 3,000,000-gas attempt
   budget and earned `0.001313458837594588 WETH`; 25 rounds exhausted that budget
   and settled nothing. At an 8,000,000-gas diagnostic budget, the route stopped
