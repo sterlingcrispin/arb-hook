@@ -1,0 +1,36 @@
+{
+  "chainId": 8453,
+  "chainName": "Base",
+  "baselineBlock": 50063975,
+  "enabledBlock": 50064136,
+  "owner": "0x38580D3E838EdE8E6770Ae80881Cf71BaD2530aB",
+  "hook": "0x079a5f5231a34C60E60090f7C0CcF333510A4040",
+  "poolManager": "0x498581fF718922c3f8e6A244956aF099B2652b2b",
+  "positionManager": "0x7C5f5A4bBd8fD63184577525326123B519429bDc",
+  "wethAdapter": "0x2a7911Afdb539B776579F9ce04C7d292C5A0a1F3",
+  "usdcAdapter": "0x5c192911f3e5AAaf244ba9d133A3A81010bCA459",
+  "weth": "0x4200000000000000000000000000000000000006",
+  "usdc": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+  "referencePool": "0x72AB388E2E2F6FaceF59E3C3FA2C4E29011c2D38",
+  "poolId": "0x2d92e3aff6dc298dab4bea46e759156162777da3636d43424254ffbdbc4466db",
+  "positionTokenId": 2913425,
+  "tickLower": -201260,
+  "tickUpper": -200650,
+  "depositedWethRaw": "133398674855053634",
+  "depositedUsdcRaw": "245086496",
+  "controlledTransaction": "0xb0f1a93ae4fb495723a8c7237f2f0c459fbf418c4bd88a20168410c5f5844eab",
+  "milestoneTransactions": [
+    "0x528e1d7c9d46d4033a0636e1b00a4d368f48a4b241974840397284853323cfaa",
+    "0xc80507ff00a610bb284baa7cc8e2bc1bd229e5ee1d3665a5ad67afde6f9eb4d0",
+    "0x98163735c4f4e38bfc3f5a0d696bc662b8012276d511fa2bae37a7c9fecb1829",
+    "0x4bd7ad50da8ee707a31c6e47457c52c33170f0630ace7b6c6d89aaca53854bdc",
+    "0x1e6c1ddebe3a594e3bf3b1057afc7396dbcd159c5dfd88361c1e1c3a0777ed12",
+    "0xd56f62c22872427ef976f5d0e9a00ad76081811046a580d883594a0cebdc0616",
+    "0xb0f1a93ae4fb495723a8c7237f2f0c459fbf418c4bd88a20168410c5f5844eab"
+  ],
+  "baseline": {
+    "nativeWei": "25270668873400072",
+    "wethRaw": "167025158311010617",
+    "usdcRaw": "539624145"
+  }
+}

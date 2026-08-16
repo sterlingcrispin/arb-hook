@@ -1,0 +1,202 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#f2f0e9">
+  <title>Base Canary / Live</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=DM+Mono:wght@300;400;500&family=Space+Grotesk:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <div class="noise" aria-hidden="true"></div>
+  <header class="masthead reveal">
+    <a class="identity" href="https://basescan.org/address/0x079a5f5231a34C60E60090f7C0CcF333510A4040" target="_blank" rel="noreferrer">
+      <span class="identity-mark">AH</span>
+      <span>
+        <strong>ARB HOOK</strong>
+        <small>BASE / CANARY 079A</small>
+      </span>
+    </a>
+    <div class="chain-state">
+      <span id="live-dot" class="live-dot"></span>
+      <span id="live-label">INDEXING</span>
+      <span class="rule"></span>
+      <span>BLOCK <b id="head-block">--</b></span>
+      <span id="last-updated">--:--:--</span>
+    </div>
+  </header>
+
+  <main>
+    <section class="hero reveal delay-1">
+      <div class="hero-copy">
+        <p class="eyebrow">NET STRATEGY P&amp;L <span>VS HOLD</span></p>
+        <div class="pnl-line">
+          <span id="pnl-sign" class="pnl-sign">+</span>
+          <strong id="net-pnl">$0.00</strong>
+          <span id="net-pnl-pct" class="pnl-pct">0.00%</span>
+        </div>
+        <p class="hero-note">Wallet + withdrawable LP + accrued fees + hook revenue, marked against the launch portfolio at the same WETH price.</p>
+      </div>
+      <div class="hero-stamp">
+        <span>RUN TIME</span>
+        <strong id="run-time">--</strong>
+        <small>POSITION #2913425</small>
+      </div>
+    </section>
+
+    <section class="metric-strip reveal delay-2" aria-label="Primary metrics">
+      <article>
+        <span>STRATEGY VALUE</span>
+        <strong id="strategy-value">$--</strong>
+        <small id="hold-value">Hold benchmark $--</small>
+      </article>
+      <article>
+        <span>RETAINED REVENUE</span>
+        <strong id="hook-revenue">$--</strong>
+        <small id="hook-weth">-- WETH</small>
+      </article>
+      <article>
+        <span>LP FEES</span>
+        <strong id="lp-fees">$--</strong>
+        <small id="lp-range">Range --</small>
+      </article>
+      <article>
+        <span>ORGANIC VOLUME</span>
+        <strong id="organic-volume">$--</strong>
+        <small id="organic-count">-- transactions</small>
+      </article>
+      <article>
+        <span>PROFITABLE HITS</span>
+        <strong id="settlement-count">--</strong>
+        <small id="success-rate">--% hit rate</small>
+      </article>
+    </section>
+
+    <div class="primary-grid">
+      <section class="panel chart-panel reveal delay-3">
+        <div class="panel-head">
+          <div>
+            <p class="eyebrow">PERFORMANCE TRACE</p>
+            <h2>Net P&amp;L over time</h2>
+          </div>
+          <div class="legend">
+            <span><i class="legend-pnl"></i>Net P&amp;L</span>
+            <span><i class="legend-zero"></i>Break-even</span>
+          </div>
+        </div>
+        <div class="chart-wrap">
+          <svg id="pnl-chart" role="img" aria-label="Net P and L over time" viewBox="0 0 1000 340" preserveAspectRatio="none"></svg>
+          <div id="chart-empty" class="chart-empty">Building historical state...</div>
+        </div>
+        <div class="chart-footer">
+          <span id="chart-start">LAUNCH --</span>
+          <span id="chart-range">-- SAMPLES</span>
+          <span id="chart-end">NOW --</span>
+        </div>
+      </section>
+
+      <aside class="panel composition-panel reveal delay-3">
+        <div class="panel-head">
+          <div>
+            <p class="eyebrow">CAPITAL MAP</p>
+            <h2>Where value sits</h2>
+          </div>
+        </div>
+        <div id="composition" class="composition"></div>
+        <dl class="position-readout">
+          <div><dt>Wallet</dt><dd id="wallet-value">$--</dd></div>
+          <div><dt>LP principal</dt><dd id="lp-principal">$--</dd></div>
+          <div><dt>Accrued fees</dt><dd id="fee-value">$--</dd></div>
+          <div><dt>Hook revenue</dt><dd id="revenue-value">$--</dd></div>
+          <div class="total"><dt>Total</dt><dd id="portfolio-total">$--</dd></div>
+        </dl>
+        <div class="price-spread">
+          <span>REFERENCE <b id="reference-price">$--</b></span>
+          <span>V4 POOL <b id="pool-price">$--</b></span>
+          <span>DELTA <b id="price-delta">-- bps</b></span>
+        </div>
+      </aside>
+    </div>
+
+    <div class="secondary-grid">
+      <section class="panel trades-panel reveal delay-4">
+        <div class="panel-head">
+          <div>
+            <p class="eyebrow">SETTLEMENT TAPE</p>
+            <h2>Profit per trigger</h2>
+          </div>
+          <div class="tape-summary">
+            <span>AVG <b id="average-profit">$--</b></span>
+            <span>NO-OPS <b id="noop-count">--</b></span>
+          </div>
+        </div>
+        <div id="profit-bars" class="profit-bars"></div>
+        <div class="table-scroll">
+          <table>
+            <thead>
+              <tr>
+                <th>TIME / TX</th>
+                <th>TRIGGER</th>
+                <th>ROUTE</th>
+                <th>ROUNDS</th>
+                <th>PROFIT</th>
+                <th>TRIGGER GAS</th>
+              </tr>
+            </thead>
+            <tbody id="trade-rows">
+              <tr><td colspan="6" class="empty-row">Waiting for indexed settlements...</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <aside class="panel health-panel reveal delay-4">
+        <div class="panel-head">
+          <div>
+            <p class="eyebrow">LIVE GUARDRAILS</p>
+            <h2>System health</h2>
+          </div>
+          <span id="health-badge" class="health-badge">CHECKING</span>
+        </div>
+        <div id="health-checks" class="health-checks"></div>
+        <div class="inventory-grid">
+          <div>
+            <span>LP WETH</span>
+            <b id="lp-weth">--</b>
+          </div>
+          <div>
+            <span>LP USDC</span>
+            <b id="lp-usdc">--</b>
+          </div>
+          <div>
+            <span>FEE WETH</span>
+            <b id="fee-weth">--</b>
+          </div>
+          <div>
+            <span>FEE USDC</span>
+            <b id="fee-usdc">--</b>
+          </div>
+        </div>
+      </aside>
+    </div>
+
+    <section class="accounting-note reveal delay-4">
+      <span>ACCOUNTING BASIS</span>
+      <p id="accounting-method">Loading accounting definition...</p>
+      <p id="accounting-assumption" class="assumption"></p>
+    </section>
+  </main>
+
+  <footer>
+    <span>READ-ONLY LOCAL INDEXER</span>
+    <span>ALCHEMY RPC / BASE MAINNET</span>
+    <a href="https://basescan.org/address/0x079a5f5231a34C60E60090f7C0CcF333510A4040" target="_blank" rel="noreferrer">VIEW HOOK ON BASESCAN</a>
+  </footer>
+
+  <div id="error-banner" class="error-banner" hidden></div>
+  <script src="/app.js" defer></script>
+</body>
+</html>

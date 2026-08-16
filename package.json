@@ -9,6 +9,7 @@
     "test:parity": "forge test --match-contract ArbHookParityTest -v",
     "anvil:base:cached": "scripts/start_cached_base_anvil.sh",
     "test:flash:fork:cached": "scripts/test_flash_fork_cached.sh",
+    "dashboard": "/Users/sterlingcrispin/miniconda3/bin/python3 dashboard/server.py",
     "size": "forge build && node scripts/check_runtime_sizes.mjs",
     "fmt": "forge fmt"
   },
