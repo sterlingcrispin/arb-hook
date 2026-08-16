@@ -1,8 +1,9 @@
 # Base WETH Canary Deployment
 
-> **HISTORICAL DEPLOYMENT RECORD.** The one-round self-pool route exercised by
-> these contracts has been removed from the source tree. Do not use the
-> addresses, settings, or measured economics below as a current launch plan.
+> **HISTORICAL DEPLOYMENT RECORD.** These contracts contain the retired
+> one-round self-pool route. Current source uses a new multi-round executor and
+> is not represented by these addresses. Do not use the settings or measured
+> economics below as a current launch plan.
 
 ## Current Status
 

@@ -1,291 +1,331 @@
 # ArbHook Logic Deep Dive
 
-This document describes the current production path. The temporary one-round route that counter-traded the triggering v4 pool has been removed. Production now calls the original registered-pool scanner and iterative executor through a flash-loan wrapper.
+This document describes the current production callback path and the preserved legacy parity engine. The production strategy uses the triggering Uniswap v4 pool as the first arbitrage leg and a registered V3-compatible pool for the return leg. It performs repeated live-repriced rounds inside one flash loan.
 
 Relevant files:
 
 - `contracts/ArbHook.sol`
+- `contracts/V4ArbExecutor.sol`
 - `contracts/ArbitrageLogic.sol`
 - `contracts/ArbUtils.sol`
 - `contracts/lib/ArbMath.sol`
 - `contracts/test/ArbHookHarness.sol`
 
-## 1. What The V4 Hook Does
+## 1. Why The Triggering Pool Is The Opportunity
 
-The v4 pool is an execution trigger, not an arbitrage venue.
-
-`afterSwap` ignores the triggering `PoolKey`, direction, amount, and balance delta for route selection. Once execution is enabled, it scans the owner-registered external pool book. This preserves the original arbitrage engine's model:
+A user swap moves the v4 pool before `afterSwap` runs. If the swap buys token X from v4, token X becomes more expensive in that pool relative to an external reference. The correcting route is therefore:
 
 ```text
-registered base token
-  -> registered counter token
-  -> cheapest external pool to buy base
-  -> richest external pool to sell base
-  -> bounded iterative round trip
+borrow X
+  -> sell X back into the triggering v4 pool
+  -> receive Y
+  -> spend Y in the external reference pool to buy X
+  -> repay borrowed X
 ```
 
-The hook callback supplies two things:
+The hook runs in the same transaction as the dislocating swap. It does not need an unrelated external opportunity to happen at the same time, and it does not race a searcher to observe published post-block state.
 
-- a point in time at which the scanner runs; and
-- the address that receives any realized net profit.
+The user's original swap has already settled its own v4 balance delta. The hook's nested counter-swap accrues separate deltas to the hook. Its profit is paid as a separate token transfer; it does not alter the router's quoted output accounting.
 
-This means the triggering swap need not involve the arbitrage pair. It also means the trigger does not create the external spread. Opportunity and trigger timing are independent.
+## 2. `afterSwap`, Recipient Resolution, And Failure Isolation
 
-## 2. `afterSwap` And Failure Isolation
-
-The callback performs only recipient resolution and dispatch:
+`afterSwap` performs a small amount of orchestration:
 
 1. `onlyPoolManager` requires the immutable v4 `PoolManager`.
-2. Read `hookMaxIterations`; zero returns immediately.
-3. Resolve the beneficiary from `IMsgSender.msgSender()` or exact 20-byte hook data.
-4. Store the beneficiary in transient storage.
-5. call `_attemptAllViaSelfCall(iterations)`.
+2. Read `hookMaxIterations`; zero means execution is disabled.
+3. Resolve the beneficiary from exact 20-byte hook data or `IMsgSender.msgSender()` on the router.
+4. Store the beneficiary in EIP-1153 transient storage.
+5. Call `attemptTriggerPoolInternal` through a bounded external self-call.
 6. Clear the transient beneficiary.
 7. Return the `afterSwap` selector and zero hook delta.
 
-The self-call is the failure boundary. Route discovery, lender calls, swaps, callback repayment, unwind, and profit checks can revert without reverting the user's swap because `_attemptAllViaSelfCall` captures the call result.
+The self-call is a failure boundary. Route discovery, lender calls, nested swaps, callback repayment, unwind, and profit checks can revert without reverting the user's swap.
 
-There is one explicit exception: `_attemptGasBudget` can revert before that self-call. With a nonzero `hookGasLimit`, the transaction must provide more than:
+`_attemptGasBudget` runs before the failure boundary. With the default nonzero `hookGasLimit`, the transaction must provide more than:
 
 ```text
 hookGasReserve + hookGasLimit
+200,000       + 3,000,000 by default
 ```
 
-The defaults are `200,000 + 3,000,000`. This prevents RPC estimation from selecting a lower-gas successful branch that silently skips arbitrage. Setting `hookGasLimit` to zero removes the floor and uses all gas above the reserve.
+This is deliberate. It prevents RPC estimation from selecting a cheaper successful path where the arbitrage subcall simply runs out of gas and is skipped. A zero limit removes the floor and gives the attempt all gas above the reserve.
 
-There is no trigger-amount gate. An enabled callback with a valid beneficiary always enters scanner discovery.
+## 3. Direction And Token Selection
 
-## 3. Registration Graph And Outer Loops
-
-`ArbUtils._addPools(base, pools, fees, types)` builds three ordered structures:
-
-- `tokenPools[base]`: all venues registered under a base token;
-- `supportedTokens`: each distinct base token in first-registration order; and
-- `baseCounterList[base]`: each distinct counter token in first-seen order.
-
-For every registered pool, the counter is whichever token is not the supplied base token.
-
-`_attemptAllInternal(maxIterations)` contains two nested loops:
+`SwapParams.zeroForOne` identifies what the triggering swap sold and bought.
 
 ```text
-for each base in supportedTokens:
-    for each counter in baseCounterList[base]:
-        runPair(base, counter, maxIterations)
-        if profit > 0: stop both loops
+trigger zeroForOne = true:
+    user sold currency0 and bought currency1
+    startToken        = currency1
+    intermediateToken = currency0
+
+trigger zeroForOne = false:
+    user sold currency1 and bought currency0
+    startToken        = currency0
+    intermediateToken = currency1
 ```
 
-The first profitable pair wins. This is deliberate gas bounding, not global optimization across every simultaneous opportunity. Registration order therefore affects behavior whenever multiple pairs are profitable.
+`startToken` is the token the hook borrows, profits in, and pays to the beneficiary. It is also the token that the user just made more expensive in v4.
 
-The scanner runs through an external self-call even though it is part of the same contract. `_attemptAllInternal` verifies `msg.sender == address(this)`, preventing arbitrary callers from invoking the expensive production cycle directly.
+Native currency is rejected because the current flash, transfer, and callback paths operate on ERC20 balances. ERC20/ERC20 v4 pairs are supported.
 
-## 4. Pair Discovery And Fallback Loop
+## 4. External Reference Selection
 
-`_runPair(tokenA, tokenB, maxIter)` has a separate bounded loop with at most two attempts.
+Pools are registered under a base token with `addPools(base, pools, fees, types)`. Production scans only `tokenPools[startToken]` for the current callback.
 
-### First attempt
+`_findReferencePool`:
 
-`findBestPools` scans `tokenPools[tokenA]` once. It ignores pools that do not contain exactly `tokenA/tokenB`, asks `ArbitrageLogic._getSinglePoolPrices` for fee-adjusted buy and sell prices, then records:
+1. filters to Uniswap V3 or PancakeSwap V3;
+2. requires the candidate to contain `intermediateToken` (registration validation already guarantees it contains `startToken`);
+3. reads the current pool price;
+4. computes the fee-adjusted price to buy `startToken`; and
+5. retains the lowest price.
 
-- the pool with the lowest effective cost to buy `tokenA`; and
-- the pool with the highest effective proceeds from selling `tokenA`.
+A strict `<` comparison preserves first-registration order when two candidates quote equally.
 
-If either side is missing, both sides are the same pool, or the best sell price is not above the best buy price, there is no candidate.
+Reference selection happens once before the flash loan. Every execution round rereads that selected pool's current state, but it does not switch external venues mid-loan. This keeps callback gas and state complexity bounded.
 
-The returned orientation is important:
+For both directions of a pair to execute, the same reference may need registration under both tokens, and both output tokens need lender/economic configuration.
 
-- `sellPool` becomes pool A, where `startToken` is sold for `intermediateToken`;
-- `buyPool` becomes pool B, where `intermediateToken` buys back `startToken`.
+## 5. Initial Spread, Fees, And Principal
 
-### Isolated execution
+`ArbitrageLogic.getLiveV4V3RouteParams` reads:
 
-The candidate is passed to `executeIterativeArbViaFlash` through another self-call with `gasleft() >> 1`. A route failure cannot consume all scanner gas or revert the outer scan.
+- v4 `sqrtPriceX96`, tick, active liquidity, LP fee, and directional protocol fee;
+- external V3/Pancake V3 `sqrtPriceX96`, tick, active liquidity, and pool fee; and
+- token decimals captured at registration.
 
-### Fallback attempt
+The effective v4 fee combines LP and directional protocol fees using the v4 core fee library.
 
-If execution reverts or returns no profitable trade, `_runPair` excludes the first route's sell pool and performs one more discovery pass. This can select a different sell venue. After that second attempt, the pair is finished.
-
-The fallback does not exhaustively enumerate all pool combinations. Its purpose is to avoid getting stuck on one failing best quote while keeping callback gas bounded.
-
-## 5. Flash Principal Selection
-
-`executeIterativeArbViaFlash` validates the route's base-token configuration before borrowing:
-
-- a lender must be bound;
-- `maxFlashFeeBps` must be nonzero;
-- `minNetProfit` must be nonzero;
-- the configured principal cap must be nonzero; and
-- lender availability must be nonzero.
-
-The effective cap is:
+The directional spread is oriented around selling `startToken` into v4:
 
 ```text
-min(configured principal cap, lender maxFlashLoan)
+startToken is token0: v4Tick - externalTick
+startToken is token1: externalTick - v4Tick
 ```
 
-The borrowed amount is then derived by pool type.
-
-### V3/V3
-
-`_deriveV3Principal` reuses the executor's V3 state and sizing model:
-
-1. Read both current ticks.
-2. Orient the signed spread by `startToken` and reject a spread below `minSpreadBps`.
-3. Build the same `IterationConfig` used during execution.
-4. Call `getV3SwapParameters` for the coarse liquidity/spread-bounded chunk and price limits.
-5. Call `findBestV3Chunk` for the refined binary-search candidate.
-6. Borrow the coarse chunk so the executor retains the same search range it had under inventory funding.
-
-The refined result is retained as a retry principal. If the coarse flash attempt reverts for a retryable reason, the wrapper can try the refined amount and then one half of that amount. A positive route below `minNetProfit` is final and is not retried smaller.
-
-The V3 `edgeScore` is only a sign that modeled edge exists. It is not compared numerically with `minNetProfit` because its linear approximation is not denominated like authoritative realized profit.
-
-### V2/V2
-
-`calculateV2TradeParams` reads both reserve pairs, simulates the real two-fee round trip at four representative chunks, and chooses the most profitable of:
+A negative spread means the user's swap did not create the expected direction of edge. A positive spread still must reach `minSpreadBps` and clear both venues' fee-adjusted prices:
 
 ```text
-minimum chunk
-1% of available balance
-10% of available balance
-50% of available balance
+effective v4 sell price > effective external buy price
 ```
 
-The unchanged executor starts its own V2 search from at most half its available balance. The flash wrapper therefore borrows twice the selected chunk, capped at the effective principal ceiling, so the executor sees the same candidate it would have seen with inventory.
+This second check matters because tick distance alone does not prove a profitable round trip after fees.
 
-### Mixed V2/V3
+### Adaptive movement
 
-`findBestMixedPairChunk` starts at half the cap and uses fee-aware route simulation. It accepts the first profitable candidate or halves up to nine times. As with V2/V2, the wrapper funds twice the selected chunk so the executor's original half-balance starting point is preserved.
-
-These are bounded heuristics. They avoid replacing the original executor with a new optimal-sizing system.
-
-## 6. Flash Request And Retry Semantics
-
-Before each request, the wrapper quotes `flashFee` and rejects a fee above `maxFlashFeeBps`. It stores the lender, token, amount, and full loan-data hash in transient storage, then calls ERC-3156 `flashLoan`.
-
-The request result distinguishes three cases:
-
-- success: return the trade result recorded by `onFlashLoan`;
-- positive profit below `minNetProfit`: stop, because smaller principal is not expected to clear a fixed floor; and
-- other V3/V3 revert: retry only with the precomputed smaller candidate described above.
-
-The bundled Morpho and Aave adapters bubble callback revert data unchanged. Retry selection relies on that behavior, while repayment safety does not.
-
-## 7. The Iterative Executor
-
-`onFlashLoan` authenticates the flash context and self-calls:
+The first calculation uses the current spread as `initialSpread`. Later rounds retain that original anchor:
 
 ```text
-executeIterativeArb(
-    sellPool,
-    buyPool,
-    startToken,
-    intermediateToken,
-    maxIterations,
-    sellPoolType,
-    buyPoolType
-)
+move = remainingSpread
+     * (chunkSpreadConsumptionBps + 2000 * remainingSpread / initialSpread)
+     / (2 * 10000)
 ```
 
-The executor rejects zero iterations and identical pools. It snapshots the intermediate-token balance so only residue created by this attempt can be unwound.
+At defaults:
 
-For V3/V3, it also snapshots the initial absolute spread. Later chunk aggressiveness is measured relative to this starting spread rather than resetting the baseline every round.
+- `chunkSpreadConsumptionBps = 1500`;
+- the adaptive term begins at `2000` and shrinks with the remaining spread;
+- division by two allocates movement across both venues; and
+- `_MAX_IMPACT_BPS = 500` caps one venue's modeled tick movement.
 
-The main loop is:
+The names retain the original contract terminology, but the result is used as a bounded tick movement when constructing both sqrt-price limits.
+
+### Capacity-derived principal
+
+`ArbMath._deltaAmounts` calculates:
+
+- how much `startToken` moves v4 from its current price to the v4 limit;
+- how much `intermediateToken` that v4 movement can produce; and
+- how much `intermediateToken` the external venue can absorb before its own limit.
+
+If the v4 output exceeds external capacity, principal is reduced proportionally:
 
 ```text
-for i < maxIterations:
-    calculate sizing balance
-    calculate a fresh route-specific chunk from current state
-    execute start -> intermediate on pool A
-    measure intermediate actually received
-    execute intermediate -> start on pool B
-    measure realized marginal start-token profit
-    accumulate profit and swapped amount
-    stop if marginal profit <= 0
+principal = v4StartInput * externalCapacity / v4IntermediateOutput
 ```
 
-Under flash funding, sizing balance is:
+It is then clamped to:
 
 ```text
-active flash principal + cumulative profit from prior iterations
+min(configured principal cap, lender availability)
 ```
 
-It is not `balanceOf(hook)`. That prevents donated or pre-existing tokens from enlarging the trade.
+and rejected below `_minChunk(startToken)`.
 
-### V3/V3 iteration
+This is the amount borrowed once for the whole attempt. There is no arbitrary fixed principal and no tick-by-tick traversal.
 
-Each pass rereads slot0 and active liquidity, recomputes the remaining spread, derives bounded target price movement, calculates a coarse chunk, and runs the V3 refinement. If spread, liquidity, impact, or chunk size fails a guard, the loop ends.
+## 6. Flash Context And The Execution Module
 
-The adaptive movement starts from `CHUNK_SPREAD_CONSUMPTION_BPS = 1500` plus a term based on current spread as a percentage of initial spread. It is divided between the two legs and capped by `_MAX_IMPACT_BPS = 500`. This makes early rounds larger while allowing later rounds to shrink as the pools converge.
+`attemptTriggerPoolInternal` requires nonzero:
 
-### V2/V2 iteration
+- lender availability and configured principal cap;
+- `maxFlashFeeBps`; and
+- `minNetProfit`.
 
-Each pass recomputes the four-probe heuristic from current reserves. It then starts at the selected candidate and halves up to nine times until simulated two-leg profit is positive and cumulative profit reaches the small route guardrail.
+It encodes the selected v4 key, reference metadata, initial spread anchor, execution parameters, and beneficiary-independent route data. `_requestFlashLoan` binds lender, token, amount, and the exact data hash in transient storage before calling ERC-3156.
 
-### Mixed iteration
+`onFlashLoan` authenticates:
 
-Each pass starts at half the current sizing balance and uses the bounded mixed-route simulator. It halves until it finds a positive candidate or reaches the minimum chunk/halving bound. V3-side impact is checked before execution.
+- lender;
+- initiator;
+- loan token and amount; and
+- the full context hash.
 
-## 8. Why More Than One Round Matters
+It then delegate-calls the immutable `V4ArbExecutor`.
 
-One round only moves each pool by one bounded step. It is intentionally not expected to consume the entire spread. After that step:
+Delegatecall is load-bearing here:
 
-- pool prices have changed;
-- available liquidity and reserves may have changed;
-- the safest/profitable next chunk is different; and
-- another round can still be profitable.
+- PoolManager sees `ArbHook` as the nested swap caller;
+- v4 therefore suppresses recursive hook callbacks for the hook's own swap;
+- V3 pools call their repayment callback on `ArbHook`;
+- the executor can install the same transient swap-context hash that `ArbHook` validates; and
+- token balances remain on `ArbHook`, where flash repayment is measured.
 
-That is why the original executor recalculates inside the loop. Reusing its first chunk repeatedly would be unsafe; stopping after one chunk leaves edge behind. `hookMaxIterations` now reaches this loop unchanged, and the callback regression test pins that behavior.
+The executor address is created in the hook constructor and cannot be replaced.
 
-The configured bound still may not close the entire opportunity. The loop can also stop because a price limit partially fills, a quote becomes zero, a callback swap fails, impact is too high, chunk size is too small, or marginal profit becomes non-positive. Closing every possible last unit is not the goal; realizing bounded positive steps is.
+The module also dispatches preserved legacy external/external flash routes back to `ArbHook.executeIterativeArb`. This keeps the historical engine available without embedding another dispatch branch in the size-constrained hook.
 
-## 9. Swap Execution And Callback Authentication
+## 7. The Multi-Round Loop
 
-V3 and Pancake V3 swaps install a transient hash of the expected pool and callback data immediately before calling the pool. The callback must match that single-use context and owe a positive amount of the expected token.
+The executor snapshots the pre-attempt intermediate-token balance and initializes cumulative state:
 
-V2 and Pancake V2 flash swaps additionally verify:
+```text
+profit = 0
+iterations = 0
+amountSwapped = 0
+```
 
-- the pool is registered with matching token metadata;
-- its address matches the canonical factory pair; and
-- callback data matches the active transient context.
+For each `i < maxIterations`:
 
-Every context is consumed or cleared synchronously. A merely registered pool cannot call later and spend hook balances.
+1. Set sizing balance to borrowed principal plus positive cumulative profit.
+2. Call `getLiveV4V3RouteParams` again.
+3. Stop if the live route now returns zero principal.
+4. Snapshot `startToken` balance.
+5. Execute the bounded exact-input v4 counter-swap.
+6. Settle the v4 input delta with `sync -> transfer -> settle`.
+7. Take the v4 output delta to the hook.
+8. Execute all received `intermediateToken` through the selected V3-compatible reference with its newly computed price limit.
+9. Measure marginal `startToken` profit from actual balances.
+10. Accumulate v4 input, profit, and completed iteration count.
+11. Stop if marginal profit is non-positive; otherwise repeat from fresh state.
 
-## 10. Residue Unwind
+The sizing balance is not `balanceOf(hook)`. Donated or pre-existing `startToken` cannot enlarge the route:
 
-A partial first or second leg can leave intermediate tokens. After the iteration loop, the executor computes only the amount above its entry snapshot.
+```text
+currentStartTokenBalance = initial loan principal + positive prior-round profit
+```
 
-It tries to sell residue through pool B first because pool B is already the route's intermediate-to-start venue. If residue remains, it tries pool A. V2 and V3 unwind paths are both supported.
+Each round can be smaller than the available balance because v4 movement, external capacity, spread, and minimum chunk are recomputed.
 
-If any attempt-created intermediate balance remains, the executor reverts. Profit or loss caused by the unwind is included in cumulative route profit.
+At fixed Base block `50018808`, an identical 100 USDC trigger produced:
+
+| Bound | Completed rounds | WETH traded | Net WETH profit | Residual gap |
+|---:|---:|---:|---:|---:|
+| 1 | 1 | `0.008916275255831863` | `0.000427855387719440` | 434 ticks |
+| 10 | 10 | `0.038512027703384331` | `0.001247055334869567` | 134 ticks |
+
+The result demonstrates why the one-round stopgap was incomplete: later rounds remained profitable after live repricing.
+
+## 8. V4 Settlement Details
+
+The v4 leg uses exact input:
+
+```text
+amountSpecified = -int256(route.principal)
+```
+
+After `PoolManager.swap`, the executor requires:
+
+- a negative input delta; and
+- a positive output delta.
+
+It pays exactly the actual input delta, not the requested maximum, and takes exactly the actual output. Any failure reverts the nested swap and its transient deltas.
+
+The hook passes empty nested hook data, but recursion safety does not depend on that emptiness. v4's hook library skips callbacks when `msg.sender` is the hook itself.
+
+## 9. External V3 Swap And Callback Authentication
+
+Before the external swap, the executor stores a transient hash of:
+
+```text
+external pool + callback data(tokenIn, payer, amountIn, pool)
+```
+
+Uniswap V3 and PancakeSwap V3 callbacks on `ArbHook` require that exact single-use context and exact calling pool before transferring owed input. The callback consumes the context; the executor clears it when no callback ran.
+
+A merely registered pool cannot call later and spend hook balances.
+
+## 10. Failed Later Leg And Residue Unwind
+
+A V3 call can fail after the v4 leg succeeded. The executor then stops normal iteration and tries to convert only attempt-created intermediate residue through the same external pool with the broad protocol sqrt-price boundary.
+
+Pre-existing intermediate balance is never spent. After unwind, the intermediate balance must equal its entry snapshot exactly. Otherwise the flash callback reverts, rolling back every prior round.
+
+Any start-token gain or loss from unwind is included in the executor result. Final settlement does not trust that reported result; it measures balances independently.
 
 ## 11. Authoritative Settlement
 
-`onFlashLoan` snapshots:
+`onFlashLoan` snapshots `startToken` after receiving principal and snapshots `intermediateToken` before execution.
 
-- base-token balance after receiving principal; and
-- intermediate-token balance before execution.
-
-After execution:
+After the module returns:
 
 ```text
-netProfit = baseBalanceAfter - baseBalanceBefore - lenderFee
+netProfit = startBalanceAfter - startBalanceBefore - lenderFee
 ```
 
 Settlement requires:
 
+- at least one successful round;
 - exact intermediate-balance restoration;
-- a successful route;
 - positive net profit;
 - net profit at least `minNetProfit`; and
-- enough remaining base token for principal plus fee after beneficiary payment.
+- enough remaining start token for principal plus fee after beneficiary payment.
 
-The profit transfer and lender repayment are in the same transaction. Any failure reverts the full loan and every underlying swap.
+The beneficiary comes from transient callback context. Profit is transferred first, leaving exactly the principal and fee available for the authenticated lender to pull. Any failure reverts the loan, all nested swaps, and the payout atomically.
 
-## 12. What The Parity Tests Prove
+## 12. Why This Is Bounded Rather Than Exact
 
-`ArbHookParity.t.sol` retains a test-only inventory mode in `ArbHookHarness`. That mode runs the same scanner and executor against the historical fixed-block setup and asserts exact pool selection and exact gross profit for all ten rounds.
+An exact concentrated-liquidity optimum would need detailed initialized-tick traversal across both venues and would still need to account for fees, changing active liquidity, rounding, and gas. That is inappropriate inside a general user swap callback.
 
-The flash fork suite uses the same pool registration order and natural route sequence, but wraps execution in real lender adapters. It demonstrates that flash funding did not replace route planning or chunk logic.
+The implemented model instead:
 
-The parity oracle does not prove that a profitable external spread will coincide with a real v4 callback. That is a market/trigger question, not an executor-correctness question.
+- uses current active liquidity;
+- bounds each venue with a sqrt-price limit;
+- caps movement;
+- respects the shallower venue's capacity;
+- checks fee-adjusted edge before trading;
+- measures real marginal profit after each round; and
+- stops under an operator-configured iteration and gas ceiling.
+
+It seeks repeated safe profitable steps. It does not claim to close every last unit of spread.
+
+## 13. Preserved Legacy Scanner
+
+The original non-hook strategy remains in `ArbHook` and `ArbitrageLogic` for regression and research:
+
+```text
+supportedTokens outer loop
+  -> baseCounterList inner loop
+  -> find cheapest external buy and richest external sell
+  -> one fallback route
+  -> V3/V3, V2/V2, or mixed iterative executor
+```
+
+Production `afterSwap` does not call this scanner. `ArbHookHarness.attemptAllForTest` invokes it through a test-only self-call so the fixed historical oracle remains exact.
+
+`ArbHookParity.t.sol` asserts the prior inventory-funded sequence and `18,679,602` raw USDC total. `ArbHookFlashForkAave.t.sol` exercises the same natural external route sequence with lender adapters. Those tests protect legacy logic during the self-pool refactor; they do not describe the current production callback route.
+
+## 14. Current Limits
+
+- Only ERC20/ERC20 triggering pools are eligible.
+- The production return leg supports Uniswap V3 and PancakeSwap V3, not V2.
+- The external reference is selected once per callback, not once per round.
+- A direction without reference registration and flash configuration safely skips.
+- Ten rounds at the pinned test block still left 134 ticks; the bound is a risk/gas control, not a guarantee of full convergence.
+- At that snapshot, 20 rounds settled under the default 3,000,000-gas attempt
+  budget and captured about 99% of the 31-round high-gas diagnostic profit. A
+  25-round cap exhausted the default attempt budget and settled nothing. The
+  iteration cap and gas budget must therefore be calibrated as one setting.
+- The current hook is close to its project runtime budget, so new onchain features should be justified by measurable execution value.

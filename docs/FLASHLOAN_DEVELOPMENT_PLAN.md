@@ -1,18 +1,22 @@
 # Flash Loan Migration Plan
 
-Status: implemented. This file records the inventory-to-flash migration. The
-temporary self-pool, one-round trigger architecture that followed the migration
-has been removed; production once again uses the registered-pool scanner and
-original iterative executor described in `README.md` and
-`docs/ARB_LOGIC_DEEP_DIVE.md`.
+Status: implemented and extended. This file records the inventory-to-flash
+migration and the later replacement of a temporary one-round self-pool route
+with repeated live-repriced self-pool execution. Current architecture is
+described in `README.md` and `docs/ARB_LOGIC_DEEP_DIVE.md`.
 
 ## Goal
-Migrate `ArbHook` from inventory-funded arbitrage to flash-loan-funded arbitrage without replacing its route traversal or iterative sizing. The hook does not need to hold principal inventory. Empty hook data resolves through the canonical router's original caller, with an exact packed recipient as an optional override.
+Migrate `ArbHook` from inventory-funded arbitrage to flash-loan-funded arbitrage
+without deleting its route traversal, sizing, or guardrails. The hook does not
+need to hold principal inventory. Empty hook data resolves through the canonical
+router's original caller, with an exact packed recipient as an optional override.
 
 ## Context
-- Production execution is hook-triggered via `afterSwap -> attemptAllInternal -> _runPair -> executeIterativeArbViaFlash -> onFlashLoan -> executeIterativeArb`.
-- The triggering v4 pool supplies timing and a beneficiary; all arbitrage legs use registered external pools.
-- `ArbHookHarness` retains only the prefunded branch needed to reproduce the historical inventory oracle. The scanner and flash wrapper are production code.
+- Production execution is hook-triggered via `afterSwap -> attemptTriggerPoolInternal -> onFlashLoan -> V4ArbExecutor`.
+- The triggering v4 pool is the first arbitrage leg; one registered V3-compatible pool for the same pair is the return leg.
+- `V4ArbExecutor` recomputes a bounded chunk from live state on every round while one flash loan remains active.
+- The external pool scanner and its V2/V3/mixed iterative executor remain intact for historical parity and research, but production `afterSwap` does not call them.
+- `ArbHookHarness` exposes the prefunded branch needed to reproduce the historical inventory oracle.
 - The pre-migration implementation used contract balances as principal in iterative sizing and callback repayment logic.
 - The legacy inventory parity suite is the historical gross-profit baseline. The flash fork suite must preserve its natural per-round route sequence while remaining net-positive after lender fees.
 
@@ -38,7 +42,8 @@ Migrate `ArbHook` from inventory-funded arbitrage to flash-loan-funded arbitrage
 
 ## Deployment Size
 - `npm run size` reports production runtime sizes and enforces the repository budget.
-- With the scanner restored, `ArbHook` is 22,491 runtime bytes: 2,085 bytes below EIP-170 and 1,509 bytes below the repository's 24,000-byte budget.
+- `ArbHook` is 23,818 runtime bytes: 758 bytes below EIP-170 and 182 bytes below the repository's 24,000-byte budget.
+- The immutable delegate-called `V4ArbExecutor` is 5,429 runtime bytes. Its separation preserves both the production loop and the legacy route engine without making the hook undeployable.
 - Size reduction remains separate from flash-loan correctness and parity work; do not remove route behavior merely to satisfy an interim development budget.
 
 ## Refactor Constraints (Critical)
@@ -58,12 +63,33 @@ Migrate `ArbHook` from inventory-funded arbitrage to flash-loan-funded arbitrage
    - and explicit sign-off before merge.
 
 ## Target Architecture
-1. `afterSwap` resolves a beneficiary and dispatches the registered-pool scanner behind a failure boundary.
-2. The scanner traverses base/counter pairs in registration order and stops at the first profitable pair.
-3. Pool discovery selects the best fee-adjusted external buy and sell venues for that pair.
-4. Route-specific existing math derives a bounded base-token flash principal.
-5. The loan callback runs the unchanged iterative executor, repays, and pays the router-reported initiator or optional encoded recipient.
-6. Realized balance checks remain authoritative. The triggering v4 pool is not an arbitrage leg.
+1. `afterSwap` resolves a beneficiary and dispatches the triggering-pool attempt behind a gas-bounded failure boundary.
+2. Direction comes from the triggering swap: borrow the token the user bought and sell it back into v4.
+3. Reference discovery selects the cheapest fee-adjusted registered V3-compatible venue for that exact pair and direction.
+4. Existing concentrated-liquidity math derives a bounded flash principal from live spread, active liquidity, price limits, and configured caps.
+5. The loan callback repeatedly recomputes and executes v4-to-V3 rounds up to `hookMaxIterations`.
+6. Realized balance checks remain authoritative; exact intermediate restoration, net profit, beneficiary payout, and repayment are atomic.
+
+## Iterative Self-Pool Extension
+
+The first self-pool prototype hardcoded one V4/V3 round. A live canary proved
+that this left a large gap for the next external backrunner. Commit `d78c3f3`
+replaced that stopgap with a bounded loop while preserving the original engines:
+
+1. Select the reference and derive one flash principal before borrowing.
+2. Borrow once.
+3. Before every round, reread v4 and reference ticks, fees, and active liquidity.
+4. Recompute directional edge, adaptive movement, both price limits, and the
+   smaller venue capacity.
+5. Execute v4 exact input, settle its deltas, execute the complete intermediate
+   output through V3, and measure actual marginal start-token profit.
+6. Repeat while profitable and below `hookMaxIterations`; then require exact
+   residue restoration and settle the loan.
+
+The fixed Base-block comparison for the same 100 USDC trigger improved from one
+round and `0.000427855387719440 WETH` to ten rounds and
+`0.001247055334869567 WETH`, while reducing the residual gap from 434 to 134
+ticks. This is bounded convergence, not a claim of an exact tick-level optimum.
 
 ## Data Model and Config Additions
 Implemented in `ArbHook`:
@@ -278,7 +304,10 @@ Acceptance:
 - V3/V3, V2/V2, and both mixed route directions reuse their existing sizing
   logic before borrowing and have real Base fork coverage. The ten-round default
   gate uses Morpho; Aave remains covered as a fee-bearing comparison.
-- Moving execution into a separate engine remains deferred because the runtime budget was met by relocating cold registration validation instead of splitting the hot execution path.
+- Further executor decomposition is deferred. The current immutable
+  `V4ArbExecutor` contains the self-pool loop and delegate-calls in hook context;
+  moving callback-sensitive legacy execution requires more complexity than the
+  remaining size benefit justifies.
 
 ## Definition of Done
 - Contract can execute arb without prefunded principal inventory.
@@ -287,4 +316,6 @@ Acceptance:
 - Unauthorized flash callbacks are rejected.
 - Flash-loan test suite is green and designated as release gate.
 - Cached fork sequence test preserves all reference routes and positive net settlement.
+- Fixed-block self-pool test proves multiple live-repriced rounds outperform the
+  one-round baseline with exact repayment and no token residue.
 - README and test docs distinguish inventory gross parity from flash net-profit parity.
