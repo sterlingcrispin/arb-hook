@@ -14,15 +14,11 @@ import {Hooks} from "@uniswap/v4-core/src/libraries/Hooks.sol";
 import {IHooks} from "@uniswap/v4-core/src/interfaces/IHooks.sol";
 import {IPoolManager} from "@uniswap/v4-core/src/interfaces/IPoolManager.sol";
 import {PoolKey} from "@uniswap/v4-core/src/types/PoolKey.sol";
-import {PoolId, PoolIdLibrary} from "@uniswap/v4-core/src/types/PoolId.sol";
-import {Currency} from "@uniswap/v4-core/src/types/Currency.sol";
 import {BalanceDelta} from "@uniswap/v4-core/src/types/BalanceDelta.sol";
 import {SwapParams} from "@uniswap/v4-core/src/types/PoolOperation.sol";
 import {HookMiner} from "@uniswap/v4-periphery/src/utils/HookMiner.sol";
 
 contract ArbHookFlashConfigTest is Test {
-    using PoolIdLibrary for PoolKey;
-
     ArbHookHarness internal hook;
     PoolManagerHarness internal poolManager;
 
@@ -63,13 +59,6 @@ contract ArbHookFlashConfigTest is Test {
         hook.setMaxFlashFeeBpsForToken(TOKEN, 10001);
     }
 
-    function testSetMinimumTriggerAmount() public {
-        PoolId poolId = PoolId.wrap(bytes32(uint256(1)));
-        hook.setMinTriggerAmount(poolId, false, 49e6);
-        assertEq(hook.getMinTriggerAmount(poolId, false), 49e6);
-        assertEq(hook.getMinTriggerAmount(poolId, true), 0);
-    }
-
     function testOnFlashLoanRejectsUnknownLender() public {
         vm.expectRevert(ArbErrors.InvalidFlashLender.selector);
         hook.onFlashLoan(address(this), TOKEN, 1, 0, hex"01");
@@ -101,27 +90,6 @@ contract ArbHookFlashConfigTest is Test {
 
         assertFalse(success, "eligible low-gas swap must not silently skip");
         assertEq(bytes4(reason), ArbErrors.InsufficientHookGas.selector);
-    }
-
-    function testBelowTriggerSwapStillSettlesWithLowGas() public {
-        hook.setHookMaxIterations(1);
-        PoolKey memory key = PoolKey({
-            currency0: Currency.wrap(address(0x1)),
-            currency1: Currency.wrap(address(0x2)),
-            fee: 3000,
-            tickSpacing: 1,
-            hooks: IHooks(address(hook))
-        });
-        hook.setMinTriggerAmount(key.toId(), true, 1);
-
-        (bool success,) = address(poolManager).call{gas: 250_000}(
-            abi.encodeCall(
-                PoolManagerHarness.callAfterSwap,
-                (IHooks(address(hook)), address(this), bytes(""))
-            )
-        );
-
-        assertTrue(success, "below-trigger swap should skip before the gas floor");
     }
 
     function testProductionHookDeploysAtMinedAddress() public {

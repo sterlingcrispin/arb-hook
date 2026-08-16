@@ -10,12 +10,7 @@ import {Hooks} from "@uniswap/v4-core/src/libraries/Hooks.sol";
 import {IHooks} from "@uniswap/v4-core/src/interfaces/IHooks.sol";
 import {IPoolManager} from "@uniswap/v4-core/src/interfaces/IPoolManager.sol";
 import {PoolKey} from "@uniswap/v4-core/src/types/PoolKey.sol";
-import {PoolId, PoolIdLibrary} from "@uniswap/v4-core/src/types/PoolId.sol";
-import {Currency} from "@uniswap/v4-core/src/types/Currency.sol";
-import {
-    BalanceDelta,
-    BalanceDeltaLibrary
-} from "@uniswap/v4-core/src/types/BalanceDelta.sol";
+import {BalanceDelta} from "@uniswap/v4-core/src/types/BalanceDelta.sol";
 import {SwapParams} from "@uniswap/v4-core/src/types/PoolOperation.sol";
 import {IMsgSender} from "@uniswap/v4-periphery/src/interfaces/IMsgSender.sol";
 
@@ -40,17 +35,14 @@ import {IERC3156FlashBorrower} from "./interfaces/IERC3156FlashBorrower.sol";
 import {IERC3156FlashLender} from "./interfaces/IERC3156FlashLender.sol";
 
 /// @title ArbHook
-/// @notice Uniswap v4 hook that counter-trades its triggering pool against a
-///         registered concentrated-liquidity reference venue, repays flash
-///         principal, and pays the realized profit to the swap initiator.
+/// @notice Uniswap v4 hook that runs bounded iterative arbitrage across
+///         registered external pools using flash-loaned principal.
 contract ArbHook is
     ArbUtils,
     Ownable2Step,
     IERC3156FlashBorrower
 {
     using SafeERC20 for IERC20;
-    using BalanceDeltaLibrary for BalanceDelta;
-    using PoolIdLibrary for PoolKey;
 
     error NotPoolManager();
 
@@ -68,7 +60,7 @@ contract ArbHook is
 
     // Cache token decimals to make _minChunk cheaper
     mapping(address => uint8) private cachedTokenDecimals;
-    // Default max iterations when attempting arb via hook callbacks (0 disables hook execution)
+    // Maximum executor iterations for a hook-triggered route (0 disables execution).
     uint256 internal hookMaxIterations;
 
     /// @notice Gas withheld from the arbitrage attempt for triggering-swap settlement.
@@ -82,14 +74,6 @@ contract ArbHook is
     uint256 private constant CALLER_LOOKUP_GAS = 10_000;
     bytes32 private constant ERC3156_CALLBACK_SUCCESS =
         keccak256("ERC3156FlashBorrower.onFlashLoan");
-    bytes4 private constant ATTEMPT_ALL_INTERNAL_SELECTOR =
-        bytes4(keccak256("attemptAllInternal(uint256)"));
-    bytes4 private constant EXECUTE_ITERATIVE_ARB_VIA_FLASH_SELECTOR =
-        bytes4(
-            keccak256(
-                "executeIterativeArbViaFlash(address,address,address,address,uint256,uint8,uint8)"
-            )
-        );
 
     // Trusted factories for callback validation
     IUniswapV2Factory private constant V2_FACTORY =
@@ -116,7 +100,6 @@ contract ArbHook is
     mapping(address => uint256) internal flashPrincipalByToken;
     mapping(address => uint256) internal maxFlashFeeBpsByToken;
     mapping(address => uint256) internal minNetProfitByToken;
-    mapping(PoolId => uint256[2]) private minTriggerAmountByPool;
 
     // Flash-loan runtime context. All of it is single-transaction state and lives
     // in transient storage; see ArbUtils for the slot assignments.
@@ -166,43 +149,17 @@ contract ArbHook is
 
     function afterSwap(
         address sender,
-        PoolKey calldata key,
-        SwapParams calldata params,
-        BalanceDelta delta,
+        PoolKey calldata,
+        SwapParams calldata,
+        BalanceDelta,
         bytes calldata hookData
     ) external onlyPoolManager returns (bytes4, int128) {
-        return _afterSwap(sender, key, params, delta, hookData);
-    }
-
-    function _afterSwap(
-        address sender,
-        PoolKey calldata key,
-        SwapParams calldata params,
-        BalanceDelta delta,
-        bytes calldata hookData
-    ) internal returns (bytes4, int128) {
-        // Once the configured gas budget is present, route failure remains isolated
-        // from the triggering swap by the self-call below.
         uint256 iterations = hookMaxIterations;
         if (iterations > 0) {
-            // Avoid route discovery and borrowing for calibrated-small swaps.
-            uint256 minimumInput = minTriggerAmountByPool[key.toId()][
-                params.zeroForOne ? 1 : 0
-            ];
-            if (minimumInput != 0) {
-                int128 inputDelta = params.zeroForOne
-                    ? delta.amount0()
-                    : delta.amount1();
-                if (
-                    inputDelta >= 0 ||
-                    uint256(-int256(inputDelta)) < minimumInput
-                ) return (IHooks.afterSwap.selector, 0);
-            }
-
             address beneficiary = _resolveProfitRecipient(sender, hookData);
             if (beneficiary != address(0)) {
                 _setActiveProfitRecipient(beneficiary);
-                _attemptHookPoolViaSelfCall(key, params.zeroForOne);
+                _attemptAllViaSelfCall(iterations);
                 _setActiveProfitRecipient(address(0));
             }
         }
@@ -240,29 +197,10 @@ contract ArbHook is
         // and the explicit budget bounds what a failure can cost the user.
         (bool successCall, bytes memory returndata) = address(this).call{
             gas: gasBudget
-        }(abi.encodeWithSelector(ATTEMPT_ALL_INTERNAL_SELECTOR, iterations));
+        }(abi.encodeWithSelector(this.attemptAllInternal.selector, iterations));
 
         bool tradeSuccess = successCall && abi.decode(returndata, (bool));
         return successCall && tradeSuccess;
-    }
-
-    function _attemptHookPoolViaSelfCall(
-        PoolKey calldata key,
-        bool triggerZeroForOne
-    ) private returns (bool) {
-        uint256 gasBudget = _attemptGasBudget();
-        if (gasBudget == 0) return false;
-
-        (bool successCall, bytes memory returndata) = address(this).call{
-            gas: gasBudget
-        }(
-            abi.encodeWithSelector(
-                this.attemptHookPoolInternal.selector,
-                key,
-                triggerZeroForOne
-            )
-        );
-        return successCall && abi.decode(returndata, (bool));
     }
 
     function getHookPermissions()
@@ -396,23 +334,6 @@ contract ArbHook is
         return (hookGasReserve, hookGasLimit);
     }
 
-    /// @notice Set the actual input required before one pool direction attempts arbitrage.
-    /// @dev Amount uses currency0 units for zeroForOne, otherwise currency1; zero disables.
-    function setMinTriggerAmount(
-        PoolId poolId,
-        bool zeroForOne,
-        uint256 amount
-    ) external onlyOwner {
-        minTriggerAmountByPool[poolId][zeroForOne ? 1 : 0] = amount;
-    }
-
-    function getMinTriggerAmount(
-        PoolId poolId,
-        bool zeroForOne
-    ) external view returns (uint256) {
-        return minTriggerAmountByPool[poolId][zeroForOne ? 1 : 0];
-    }
-
     function setLenderForToken(
         address token,
         address lender
@@ -502,117 +423,15 @@ contract ArbHook is
         return d > 4 ? 10 ** (d - 4) : 1;
     }
 
-    /// @notice Counter-trade the triggering v4 pool against its registered V3 reference venue.
-    /// @dev This self-call is the failure boundary used by afterSwap. The triggering swap's
-    ///      output token is the flash principal and the first leg runs in the opposite direction.
-    function attemptHookPoolInternal(
-        PoolKey calldata key,
-        bool triggerZeroForOne
-    ) external returns (bool) {
-        if (msg.sender != address(this)) revert ArbErrors.WrapperOnlySelf();
-
-        address startToken = Currency.unwrap(
-            triggerZeroForOne ? key.currency1 : key.currency0
-        );
-        address intermediateToken = Currency.unwrap(
-            triggerZeroForOne ? key.currency0 : key.currency1
-        );
-        if (startToken == address(0) || intermediateToken == address(0)) return false;
-
-        address lender = lenderByToken[startToken];
-        uint256 principalCap = _resolvePrincipalCap(startToken, lender);
-        uint256 maxFeeBps = maxFlashFeeBpsByToken[startToken];
-        if (
-            principalCap == 0 ||
-            maxFeeBps == 0 ||
-            minNetProfitByToken[startToken] == 0
-        ) return false;
-
-        ArbUtils.PoolInfo memory externalPool;
-        ArbUtils.PoolInfo[] storage pools = tokenPools[startToken];
-        for (uint256 i; i < pools.length; ) {
-            ArbUtils.PoolInfo storage candidate = pools[i];
-            if (
-                (candidate.poolType == ArbUtils.PoolType.V3 ||
-                    candidate.poolType == ArbUtils.PoolType.PANCAKESWAP_V3) &&
-                ((candidate.token0 == startToken &&
-                    candidate.token1 == intermediateToken) ||
-                    (candidate.token1 == startToken &&
-                        candidate.token0 == intermediateToken))
-            ) {
-                externalPool = candidate;
-                break;
-            }
-            unchecked {
-                ++i;
-            }
-        }
-        if (externalPool.poolAddress == address(0)) return false;
-
-        ArbitrageLogic.IterationConfig memory config;
-        config.minSpreadBps = minSpreadBps;
-        config.chunkSpreadConsumptionBps = CHUNK_SPREAD_CONSUMPTION_BPS;
-        config.bpsDivisor = BPS_DIVISOR;
-        config.maxImpactBps = _MAX_IMPACT_BPS;
-        config.minChunkForStartToken = _minChunk(startToken);
-        config.currentStartTokenBalance = principalCap;
-
-        ArbitrageLogic.V4V3RouteParams memory route = arbLib
-            .getLiveV4V3RouteParams(
-                poolManager,
-                key.toId(),
-                Currency.unwrap(key.currency0),
-                startToken,
-                intermediateToken,
-                externalPool,
-                config
-            );
-        if (route.principal == 0) return false;
-
-        FlashLoanExecutionParams memory params = FlashLoanExecutionParams({
-            sellPool: address(poolManager),
-            buyPool: externalPool.poolAddress,
-            tokenA: startToken,
-            tokenB: intermediateToken,
-            maxIterations: 1,
-            sellPoolType: ArbUtils.PoolType.V3,
-            buyPoolType: externalPool.poolType,
-            beneficiary: _activeProfitRecipient()
-        });
-        bytes memory loanData = abi.encode(
-            params,
-            key,
-            route.sqrtPriceLimitX96,
-            route.externalSqrtPriceLimitX96
-        );
-        uint256 principal = route.principal;
-        for (uint8 attempt; attempt < 3; ) {
-            uint256 fee;
-            try IERC3156FlashLender(lender).flashFee(startToken, principal) returns (
-                uint256 quotedFee
-            ) {
-                fee = quotedFee;
-            } catch {
-                return false;
-            }
-            if (_feeExceedsCap(principal, fee, maxFeeBps)) return false;
-
-            (bool requested, bool reverted, bool belowMinimum) =
-                _requestFlashLoan(lender, startToken, principal, loanData);
-            if (requested) return _flashLastTradeSuccess();
-            if (!reverted || belowMinimum) return false;
-
-            principal >>= 1;
-            if (principal < config.minChunkForStartToken) return false;
-            unchecked {
-                ++attempt;
-            }
-        }
-        return false;
+    // -------------------------- Core entrypoint ----------------------------
+    /// @notice Self-call target for the registered-pool scanner.
+    function attemptAllInternal(
+        uint256 maxIterations
+    ) external returns (bool success) {
+        return _attemptAllInternal(maxIterations);
     }
 
-    // -------------------------- Core entrypoint ----------------------------
-    /// @notice Legacy parity scanner for configured external base/counter pairs.
+    /// @notice Scan configured external base/counter pairs in registration order.
     /// @dev Must be executed via self-call. Individual pair attempts are isolated with
     ///      low-level calls so a failing path does not revert the full cycle.
     ///      This internal execution path may still revert on invariant or auth failures.
@@ -698,7 +517,7 @@ contract ArbHook is
                 gas: gasleft() >> 1
             }(
                 abi.encodeWithSelector(
-                    EXECUTE_ITERATIVE_ARB_VIA_FLASH_SELECTOR,
+                    this.executeIterativeArbViaFlash.selector,
                     sellPool,
                     buyPool,
                     tokenA,
@@ -837,7 +656,7 @@ contract ArbHook is
     /// @notice Execute one arbitrage attempt using flash-loaned startToken capital.
     /// @dev Preserves existing iterative execution logic by invoking executeIterativeArb
     ///      inside the flash-loan callback.
-    function _executeIterativeArbViaFlash(
+    function executeIterativeArbViaFlash(
         address poolA_addr,
         address poolB_addr,
         address startToken,
@@ -846,7 +665,8 @@ contract ArbHook is
         ArbUtils.PoolType poolAType,
         ArbUtils.PoolType poolBType
     )
-        internal
+        public
+        virtual
         returns (bool success, int256 cumulativeProfit, uint256 iterations)
     {
         if (msg.sender != address(this)) revert ArbErrors.WrapperOnlySelf();
@@ -1047,63 +867,21 @@ contract ArbHook is
             address(this)
         );
 
-        bool tradeSuccess;
-        uint256 iters;
-        uint256 totalAmountSwapped;
-        if (params.sellPool == address(poolManager)) {
-            PoolKey memory key;
-            uint160 sqrtPriceLimitX96;
-            uint160 externalSqrtPriceLimitX96;
-            (, key, sqrtPriceLimitX96, externalSqrtPriceLimitX96) = abi.decode(
-                data,
-                (FlashLoanExecutionParams, PoolKey, uint160, uint160)
-            );
-            bool zeroForOne = Currency.unwrap(key.currency0) == token;
-            if (
-                address(key.hooks) != address(this) ||
-                Currency.unwrap(zeroForOne ? key.currency1 : key.currency0) !=
-                params.tokenB
-            ) revert ArbErrors.FlashTokenMismatch();
-
-            uint256 intermediateReceived;
-            (totalAmountSwapped, intermediateReceived) = _executeV4Swap(
-                key,
-                zeroForOne,
-                amount,
-                sqrtPriceLimitX96
-            );
-            bool externalSuccess = _executeSwapInternal_noBalanceCheck(
+        (bool successCall, bytes memory returndata) = address(this).call(
+            abi.encodeWithSelector(
+                this.executeIterativeArb.selector,
+                params.sellPool,
                 params.buyPool,
-                params.buyPoolType,
+                params.tokenA,
                 params.tokenB,
-                token,
-                intermediateReceived,
-                externalSqrtPriceLimitX96
-            );
-            if (!externalSuccess)
-                revert ArbErrors.FlashArbitrageExecutionFailed();
-            tradeSuccess = true;
-            iters = 1;
-        } else {
-            (bool successCall, bytes memory returndata) = address(this).call(
-                abi.encodeWithSelector(
-                    this.executeIterativeArb.selector,
-                    params.sellPool,
-                    params.buyPool,
-                    params.tokenA,
-                    params.tokenB,
-                    params.maxIterations,
-                    params.sellPoolType,
-                    params.buyPoolType
-                )
-            );
-            if (!successCall)
-                revert ArbErrors.FlashArbitrageExecutionFailed();
-            (tradeSuccess, , iters, totalAmountSwapped) = abi.decode(
-                returndata,
-                (bool, int256, uint256, uint256)
-            );
-        }
+                params.maxIterations,
+                params.sellPoolType,
+                params.buyPoolType
+            )
+        );
+        if (!successCall) revert ArbErrors.FlashArbitrageExecutionFailed();
+        (bool tradeSuccess, , uint256 iters, uint256 totalAmountSwapped) =
+            abi.decode(returndata, (bool, int256, uint256, uint256));
         if (
             IERC20(params.tokenB).balanceOf(address(this)) !=
             intermediateBalanceBefore
@@ -1740,44 +1518,6 @@ contract ArbHook is
     }
 
     // ----------------------- Swap helpers (V3/V2) --------------------------
-    function _executeV4Swap(
-        PoolKey memory key,
-        bool zeroForOne,
-        uint256 amountIn,
-        uint160 sqrtPriceLimitX96
-    ) private returns (uint256 paid, uint256 received) {
-        if (amountIn > uint256(type(int256).max))
-            revert ArbErrors.FlashArbitrageExecutionFailed();
-
-        // V4 skips hook callbacks when the hook itself initiates the swap.
-        BalanceDelta delta = poolManager.swap(
-            key,
-            SwapParams({
-                zeroForOne: zeroForOne,
-                amountSpecified: -int256(amountIn),
-                sqrtPriceLimitX96: sqrtPriceLimitX96
-            }),
-            bytes("")
-        );
-        int128 inputDelta = zeroForOne ? delta.amount0() : delta.amount1();
-        int128 outputDelta = zeroForOne ? delta.amount1() : delta.amount0();
-        if (inputDelta >= 0 || outputDelta <= 0)
-            revert ArbErrors.FlashArbitrageExecutionFailed();
-
-        paid = uint256(-int256(inputDelta));
-        received = uint256(uint128(outputDelta));
-        Currency inputCurrency = zeroForOne ? key.currency0 : key.currency1;
-        Currency outputCurrency = zeroForOne ? key.currency1 : key.currency0;
-
-        poolManager.sync(inputCurrency);
-        IERC20(Currency.unwrap(inputCurrency)).safeTransfer(
-            address(poolManager),
-            paid
-        );
-        poolManager.settle();
-        poolManager.take(outputCurrency, address(this), received);
-    }
-
     function _executeSwapInternal_noBalanceCheck(
         address poolAddress,
         ArbUtils.PoolType poolType,

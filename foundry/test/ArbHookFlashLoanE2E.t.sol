@@ -13,7 +13,9 @@ import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {IERC3156FlashBorrower} from "../../contracts/interfaces/IERC3156FlashBorrower.sol";
 import {IERC3156FlashLender} from "../../contracts/interfaces/IERC3156FlashLender.sol";
 import {IUniswapV2Pair} from "../../contracts/interfaces/IUniswapV2Pair.sol";
+import {IHooks} from "@uniswap/v4-core/src/interfaces/IHooks.sol";
 import {IPoolManager} from "@uniswap/v4-core/src/interfaces/IPoolManager.sol";
+import {IMsgSender} from "@uniswap/v4-periphery/src/interfaces/IMsgSender.sol";
 import {TickMath} from "@uniswap/v3-core/contracts/libraries/TickMath.sol";
 
 contract MockERC3156Lender is IERC3156FlashLender {
@@ -269,7 +271,7 @@ contract ArbHookFlashLoanE2ETest is Test {
         hook.setMinNetProfitForToken(address(token), minNetProfit);
     }
 
-    function _configureLegacyRoute(
+    function _configureExternalRoute(
         IERC3156FlashLender lender,
         uint256 principal
     ) private {
@@ -332,7 +334,7 @@ contract ArbHookFlashLoanE2ETest is Test {
             5
         );
         token.mint(address(lender), principalCap);
-        _configureLegacyRoute(lender, principalCap);
+        _configureExternalRoute(lender, principalCap);
 
         vm.recordLogs();
         (int256 profit, uint256 iterations) = hook.runPairForTest(
@@ -352,6 +354,34 @@ contract ArbHookFlashLoanE2ETest is Test {
         );
         assertGt(profit, 0, "route should profit");
         assertEq(iterations, 1, "expected one iteration");
+    }
+
+    function testAfterSwapRunsRegisteredScannerWithConfiguredIterationLimit() public {
+        uint256 principalCap = 100_000e18;
+        MockERC3156Lender lender = new MockERC3156Lender(
+            IERC20(address(token)),
+            5
+        );
+        token.mint(address(lender), principalCap);
+        _configureExternalRoute(lender, principalCap);
+        hook.setHookMaxIterations(2);
+
+        address router = makeAddr("router");
+        vm.mockCall(
+            router,
+            abi.encodeWithSelector(IMsgSender.msgSender.selector),
+            abi.encode(address(this))
+        );
+        uint256 beneficiaryBefore = token.balanceOf(address(this));
+        poolManager.callAfterSwap(
+            IHooks(address(hook)),
+            router,
+            bytes("")
+        );
+
+        assertEq(lender.flashLoanCallCount(), 1, "callback did not request flash loan");
+        assertEq(hook.testLastMaxIterations(), 2, "callback replaced iterative bound");
+        assertGt(token.balanceOf(address(this)), beneficiaryBefore, "callback profit not paid");
     }
 
     function testFeeAboveCapSkipsLoan() public {
