@@ -71,12 +71,11 @@ contract ArbHook is
     // Default max iterations when attempting arb via hook callbacks (0 disables hook execution)
     uint256 internal hookMaxIterations;
 
-    /// @notice Gas withheld from the arbitrage attempt so the triggering swap can
-    ///         always finish settling after the hook returns.
+    /// @notice Gas withheld from the arbitrage attempt for triggering-swap settlement.
     /// @dev The 63/64 call rule alone does not guarantee enough remains on a
     ///      low-gas-limit swap, so the attempt is given an explicit budget.
     uint32 internal hookGasReserve = 200_000;
-    /// @notice Hard ceiling on gas one arbitrage attempt may consume (0 = no ceiling).
+    /// @notice Required gas budget and hard ceiling for one attempt (0 = use available gas).
     uint32 internal hookGasLimit = 3_000_000;
 
     uint256 private constant FEE_BPS_DIVISOR = 10_000;
@@ -182,7 +181,8 @@ contract ArbHook is
         BalanceDelta delta,
         bytes calldata hookData
     ) internal returns (bytes4, int128) {
-        // Hook path is best-effort only: trade failure must never block user swap settlement.
+        // Once the configured gas budget is present, route failure remains isolated
+        // from the triggering swap by the self-call below.
         uint256 iterations = hookMaxIterations;
         if (iterations > 0) {
             // Avoid route discovery and borrowing for calibrated-small swaps.
@@ -210,22 +210,23 @@ contract ArbHook is
         return (IHooks.afterSwap.selector, 0);
     }
 
-    /// @dev Gas available to an arbitrage attempt, or zero when the triggering swap
-    ///      cannot spare any. Reserving before the call is what keeps a costly
-    ///      discovery pass from consuming the user's whole gas limit: the 63/64
-    ///      rule leaves only 1/64 behind, which is not enough to settle a swap
-    ///      when the caller set a modest limit.
+    /// @dev A nonzero limit is also a gas floor. Otherwise estimators can choose a
+    ///      cheaper successful branch where the attempt runs out of gas and the
+    ///      ordinary swap settles without arbitrage.
     function _attemptGasBudget() private view returns (uint256) {
         uint256 available = gasleft();
         uint256 reserve = hookGasReserve;
+        uint256 limit = hookGasLimit;
+        if (limit != 0) {
+            if (available <= reserve + limit) revert ArbErrors.InsufficientHookGas();
+            return limit;
+        }
+
         if (available <= reserve) return 0;
 
         unchecked {
-            available -= reserve;
+            return available - reserve;
         }
-        uint256 ceiling = hookGasLimit;
-        if (ceiling != 0 && available > ceiling) available = ceiling;
-        return available;
     }
 
     function _attemptAllViaSelfCall(
@@ -374,9 +375,10 @@ contract ArbHook is
         hookMaxIterations = newMaxIterations;
     }
 
-    /// @notice Set the gas withheld for swap settlement and the ceiling on one attempt.
+    /// @notice Set the gas withheld for settlement and the budget for one attempt.
     /// @param gasReserve Gas guaranteed to remain for the caller after the attempt.
-    /// @param gasLimit Maximum gas one attempt may consume; zero removes the ceiling.
+    /// @param gasLimit Required attempt budget and maximum consumption; zero uses
+    ///        all gas above the reserve without enforcing a floor.
     function setHookGasBounds(
         uint32 gasReserve,
         uint32 gasLimit
