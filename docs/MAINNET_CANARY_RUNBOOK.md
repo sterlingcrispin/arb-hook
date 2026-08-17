@@ -4,8 +4,8 @@
 
 The WETH/USDC canary described by the former version of this file has been
 retired. Its deployed bytecode performed only one counter-trade against the
-hook's own v4 pool. Current source performs repeated live-repriced rounds, but it
-has not been deployed and the old settings were calibrated for different code.
+hook's own v4 pool. A separate repeated-round canary is now active, but these
+old instructions remain incompatible with its bytecode and configuration.
 
 The retired instructions are not compatible with current bytecode:
 
@@ -19,7 +19,10 @@ The retired instructions are not compatible with current bytecode:
   and
 - the old principal/profit calibration measured one-shot bytecode and must not be reused.
 
-The deployed research hooks are disabled and their LP positions were burned. Transactions, addresses, balances, and the reason for retirement remain in [`BASE_WETH_CANARY_DEPLOYMENT.md`](BASE_WETH_CANARY_DEPLOYMENT.md).
+The hooks governed by this retired runbook are disabled and their LP positions
+were burned. The active repeated-round deployment, current pool, transactions,
+and shutdown evidence are recorded in
+[`BASE_WETH_CANARY_DEPLOYMENT.md`](BASE_WETH_CANARY_DEPLOYMENT.md).
 
 A replacement runbook must be written from a reviewed release commit after all of the following are known:
 
@@ -30,11 +33,10 @@ A replacement runbook must be written from a reviewed release commit after all o
 4. Current fixed-block and current-head fork results for the production callback path.
 5. Runtime byte size and gas requirements at the chosen iteration bound.
 6. Trigger-size economics showing the loop clears venue fees, lender fees, and gas.
-7. An explicit acceptance of the LP-to-beneficiary redistribution described in
-   `OPEN_ISSUES.md` item 65.
+7. An explicit profit-recipient policy and acceptance of its LP economics.
 8. A measured route-discovery plan. If canonical Uniswap UI/API flow is part of
-   the economic case, the exact deployed hook must be allowlisted and production
-   quotes must be shown to consider and select the PoolId. See `OPEN_ISSUES.md`
-   item 71.
+   the economic case, production quotes must be shown to consider and select
+   the PoolId. See `OPEN_ISSUES.md` item 71.
 
-Until that work exists, keep `hookMaxIterations = 0` on any deployed hook.
+This retired file authorizes no action on the active hook. Use the current
+deployment record and chain-attested scripts for its operation and shutdown.

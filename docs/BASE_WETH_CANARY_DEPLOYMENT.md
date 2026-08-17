@@ -1,9 +1,72 @@
 # Base WETH Canary Deployment
 
-## Active Multi-Round Canary
+## Active 5 bp Canary
 
-This limited-capital research canary is active on Base from source commit
-`57a0cfb`. Profit remains in the hook for current-owner withdrawal.
+The reviewed hook at `0x079a5f5231a34C60E60090f7C0CcF333510A4040`
+is active against a new 5 bp WETH/USDC pool. The hook bytecode, reference
+registrations, flash adapters, range width, and execution controls are unchanged
+from the preceding 10 bp epoch.
+
+| Pool field | Value |
+|---|---|
+| Pool ID | `0xd18a99e2b8363ed02a75863dbbc5b05501a41a708240b9fd038c0f97aaa2e0de` |
+| Position NFT | `2917608` |
+| Position liquidity | `1626294573145581` |
+| Pool fee | `5 bp` |
+| Tick range | `-201190..-200580` |
+| WETH principal | `0.566572455855413364` |
+| USDC principal | `1,069.116219` |
+| Pool initialization and mint | `0xcea6823f4d55885e197538015bcbc14afc21b021626c1ac7ced0de325534191f` |
+| Enable ten rounds | `0xf9d10962947a75c70ccfb763f42b194c5b8cdfc424ae56db1a3d868da724b950` |
+| Accounting start block | `50071787` |
+
+### 5 bp Relaunch
+
+| Action | Transaction |
+|---|---|
+| Disable execution | `0xc3b643999c72bdffa5f7dfba7488ab150c8465ab73ced7f19bc9fac985a51af1` |
+| Disable WETH borrowing | `0x9d1982f0a41422adff0ad0632a291dd4817d297622fd0d4404144b9975257356` |
+| Disable USDC borrowing | `0x4cc7fec73f2e54f69d49d774a1e17b46128f3644ebf33770abaef462927263a5` |
+| Close 10 bp NFT `2916720` | `0x0f747a518f6a4f48810f9bbf5589959903f7ac12527b22f83ae7d113bfc40d41` |
+| Rebalance `262 USDC` to WETH | `0xce2bc8d599e124366df8eda734c8898ad3bae41f7283e27bcc8b5e0ee6136551` |
+| Initialize 5 bp pool and mint NFT `2917608` | `0xcea6823f4d55885e197538015bcbc14afc21b021626c1ac7ced0de325534191f` |
+| Restore WETH borrowing | `0x422c33fd7acb2335781f3ccb3dfa1ed3a5f1e554cf544765d5adfbe0ad9d1cbb` |
+| Restore USDC borrowing | `0xfdba0b0309f9ff642cb3c15a66f4aaaecc88197feec78b32ff186ebbb256b80a` |
+| Enable ten rounds | `0xf9d10962947a75c70ccfb763f42b194c5b8cdfc424ae56db1a3d868da724b950` |
+| Controlled 1 USDC swap | `0x2f0f853c8a888e60c274a7e9318667481f028ddad9118e6334c479ab22655873` |
+
+The closed position returned `0.427842531960916051 WETH` and
+`1,333.203923 USDC`, including accrued LP fees. Rebalancing produced a roughly
+symmetric replacement while retaining approximately `0.011 ETH` for gas. The
+PositionManager's global token counter advanced between script simulation and
+the mint transaction, so the predicted token ID was `2917607`; the mint receipt
+proves that the owner received the actual NFT `2917608`.
+
+The controlled swap exchanged `1 USDC` for `0.000529261550885832 WETH` through
+the canonical Universal Router. The hook was enabled for ten rounds, both
+adapters remained empty, and no settlement was emitted because the trade did
+not create a profitable gap. A Forge-generated transaction with insufficient
+gas reverted atomically before the successful `4.5M`-gas retry; this confirms
+the configured hook gas floor remains enforced.
+
+By Base block `50072002`, the new pool had already received four third-party
+transactions totaling `359.880103 USDC` of notional. Transaction
+`0x2263ad5ddcd20c650d1d6f32ab11e4c3873dfe5a76f6a30029c014146bbcaf15`
+triggered ten profitable rounds from a `205.663560 USDC` swap and retained
+`0.000124772601852537 WETH` in the hook. This is initial execution evidence,
+not a durable traffic or return estimate.
+
+The automatic kill-switch monitor runs in tmux session
+`arb-hook-canary-079a`; its current log is
+`artifacts/base-canary-monitor-079a-5bp.log`. The dashboard accounting and event
+index start fresh at block `50071787`; prior LP fees and hook revenue are opening
+capital rather than current-epoch profit.
+
+## Closed 10 bp Canary
+
+This section records the immediately preceding pool from source commit
+`57a0cfb`. NFT `2916720` is burned with zero liquidity; the same hook remains
+active only through the 5 bp pool documented above.
 
 | Artifact | Address | Deployment transaction |
 |---|---|---|
@@ -88,8 +151,7 @@ Total retained hook revenue at that snapshot was
 external route discovery and actual third-party revenue, not sustained volume
 or a long-term return rate.
 
-The automatic kill-switch monitor runs in tmux session
-`arb-hook-canary-079a`; its log is
+The 10 bp epoch used tmux session `arb-hook-canary-079a`; its historical log is
 `artifacts/base-canary-monitor-079a.log`.
 
 ## Retired Canaries

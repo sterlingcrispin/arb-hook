@@ -320,34 +320,31 @@ The initial deployment is owner-operated with a small set of manually verified, 
 - Action: add a chain-attested Robinhood deployment path, deploy a USDG Morpho
   adapter, register the Uniswap v3 `1 bp` WETH/USDG reference, and prove the
   real v4/v3/Morpho/owner-revenue path at a fixed Robinhood block. Calibrate gas and
-  economics at current head, then complete exact-hook allowlisting and verify
-  production quote selection before adding liquidity.
+  economics at current head, then verify production quote selection before
+  adding liquidity.
 - Economics: the optimized three-day ceiling was `$10.40/day` of LP excess at
   `$500` per side, but the known-router subset was `$4.31/day` and neither is a
   route-share forecast. Base remains the stronger modeled first deployment.
 - Detail: [`docs/ROBINHOOD_WETH_USDG_STRATEGY_REPLAY.md`](docs/ROBINHOOD_WETH_USDG_STRATEGY_REPLAY.md).
 
-71. Organic Uniswap routing requires hook allowlisting
-- Status: `CANONICAL UNISWAP LIMITATION; NOT A CANARY BLOCKER`
+71. Organic Uniswap routing remains a measured-discovery question
+- Status: `DOCUMENTED; NOT A CANARY BLOCKER`
 - Priority: `MEDIUM`
-- Summary: Uniswap's production routing API filters v4 pools whose nonzero hook
-  address is not in its explicit hook-address allowlist. Adding metadata to the
-  public hooklist does not automatically add an address to that routing
-  allowlist. Direct swaps, third-party integrations, and searchers can still
-  target the PoolId, but ordinary UI/API route discovery cannot be assumed.
-- Live evidence: by Base block `50064407`, the non-allowlisted hook received 23
+- Summary: Uniswap Labs states that classic routing automatically considers v4
+  pools with hooks and reserves manual allowlisting for hooks that perform
+  custom accounting. This hook requests only `afterSwap`, has both swap
+  return-delta permissions disabled, and returns zero accounting delta. It is
+  therefore eligible for automatic consideration, but consideration does not
+  guarantee that its quote beats deeper or cheaper routes.
+- Live evidence: by Base block `50064407`, the hook received 23
   third-party transactions totaling about `455.64 USDC` of notional. Those
   transactions used six non-canonical transaction targets, and two produced
-  profitable hook settlements. Exact-address
-  allowlisting therefore limits canonical Uniswap routing, but does not imply
-  that aggregators, searchers, or other routers will ignore the pool.
-- Action: observe actual route share before scaling. Uniswap allowlisting may
-  increase traffic, but it is not required to run this small research canary.
-  Keep discovery-share sensitivity in every economic projection.
-- Sources: the routing API's
-  [hook allowlist](https://github.com/Uniswap/routing-api/blob/main/lib/util/hooksAddressesAllowlist.ts),
-  [quote filter](https://github.com/Uniswap/routing-api/blob/main/lib/handlers/quote/quote.ts),
-  and the [hooklist submission notes](https://github.com/Uniswap/hooklist).
+  profitable hook settlements. This proves third-party discovery, not Labs UI
+  selection.
+- Action: observe actual route share before scaling and identify canonical
+  classic-router or UniswapX flow separately from searcher traffic. Keep
+  discovery-share sensitivity in every economic projection.
+- Source: [Uniswap Labs hook routing documentation](https://support.uniswap.org/hc/en-us/articles/33829289869965-How-do-custom-hooks-work-in-the-Labs-interface).
 
 20. Independent review of release commit
 - Status: `ACCEPTED FOR RESEARCH CANARY; REQUIRED AGAIN BEFORE SCALE`

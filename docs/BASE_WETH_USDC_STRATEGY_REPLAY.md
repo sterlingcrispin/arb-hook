@@ -8,11 +8,11 @@ fixed seven-day sample of Base swaps. It answers a narrower question than
 known fraction of this historical flow, which fee, range, capital level, and
 reference venues produced the strongest LP outcome?
 
-It does not prove that a new pool will receive that flow. Uniswap's production
-routing API filters pools with non-allowlisted hooks. Hook registration in the
-[Uniswap hooklist](https://github.com/Uniswap/hooklist) does not automatically
-grant routing allowlisting; the routing repository maintains a separate
-[hook-address allowlist](https://github.com/Uniswap/routing-api/blob/main/lib/util/hooksAddressesAllowlist.ts).
+It does not prove that a new pool will receive that flow. Uniswap Labs states
+that classic routing automatically considers v4 pools with hooks and reserves
+manual allowlisting for hooks that perform custom accounting. This hook requests
+only `afterSwap` and returns no accounting delta. Actual Labs quote inclusion
+and route wins still need to be observed rather than assumed.
 
 ## Fixed Sample
 
@@ -95,7 +95,7 @@ remain stale relative to the market and then receive adverse flow. That makes
 traffic acquisition and arbitrage discovery at least as important as capital.
 
 Restricting the tape to historically observed canonical-router calls gives a
-second, narrower ceiling, conditional on the hook being allowlisted:
+second, narrower ceiling:
 
 | Profile | Canonical flow assumption | LP excess/day | User rebate/day |
 |---|---:|---:|---:|
@@ -105,9 +105,8 @@ second, narrower ceiling, conditional on the hook being allowlisted:
 | $10,000/side, 15 bp | 100% | $251.54 | $24.74 |
 
 This does not mean the canonical router will send those swaps to a new pool.
-It means those historical calls would have been considered by the replay after
-the flow filter. Actual quote inclusion and route wins must be measured after
-allowlisting.
+It means those historical calls were considered by the replay after the flow
+filter. Actual quote inclusion and route wins must still be measured live.
 
 ## Reference Venues
 
@@ -201,11 +200,11 @@ operational:
 1. Deploy the reviewed hook disabled.
 2. Register both low-fee WETH/USDC references and configure both token
    directions.
-3. Complete Uniswap routing allowlisting for the exact deployed hook.
-4. Verify production quotes actually consider and select the PoolId.
+3. Verify production quotes actually consider and select the PoolId.
+4. Record whether selected routes arrive through classic routing or UniswapX.
 5. Start near `$250..$500` per side around `+/-300` ticks and `10 bp`.
 6. Compare actual quote requests, route wins, LP fees, inventory drift, hook
    settlements, rebates, and gas with the replay before adding capital.
 
-Without step 3 or another measured traffic source, the expected organic routing
-share is unknown and the earnings tables should not be used as forecasts.
+Without measured production route wins, the expected organic routing share is
+unknown and the earnings tables should not be used as forecasts.

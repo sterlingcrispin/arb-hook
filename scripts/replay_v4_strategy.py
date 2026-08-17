@@ -654,7 +654,7 @@ def write_results(output_dir: Path, metadata: dict, arguments: dict, rows: list[
         "limitations": [
             "Historical swaps are a counterfactual order proxy and include user, router, searcher, and split-route flow.",
             "Discovery share deterministically samples transaction hashes; it is a scenario input, not an inferred routing forecast.",
-            "Uniswap's production router filters non-allowlisted hooks, so canonical-router flow requires hook allowlisting.",
+            "Labs classic routing considers hooked v4 pools, but discovery share and actual route selection remain unmeasured.",
             "Observed source output is the competing route; the model does not rerun every external router path.",
             "External venue state follows the historical tape and does not persist the candidate hook's market impact.",
             "The candidate position is fixed for the replay and is not automatically recentered or compounded.",

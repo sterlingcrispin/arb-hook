@@ -250,10 +250,12 @@ ceiling, the return-efficient region was roughly `$2,000` per side, `+/-300`
 ticks, and a `15 bp` fee. A small-capital canary favored roughly `$250..$500`
 per side, `+/-300` ticks, and `10 bp`.
 
-Those are configuration rankings, not revenue forecasts. Uniswap's production
-routing API filters non-allowlisted hooks, so canonical Uniswap UI/API flow is
-conditional on allowlisting the exact deployed hook. That is not a network-wide
-routing ban: the live canary received third-party routed swaps immediately.
+Those are configuration rankings, not revenue forecasts. Uniswap Labs states
+that classic routing automatically considers v4 pools with hooks; manual
+allowlisting is reserved for hooks that perform custom accounting. This hook
+requests only `afterSwap` and returns no accounting delta, so route selection,
+not allowlisting, is the remaining uncertainty. The live canary has received
+third-party routed swaps, but Labs UI route wins have not been identified.
 Route discovery is swept explicitly rather than assumed, and low-discovery
 results are near break-even.
 See [`docs/BASE_WETH_USDC_STRATEGY_REPLAY.md`](docs/BASE_WETH_USDC_STRATEGY_REPLAY.md)
@@ -268,7 +270,7 @@ of about `$1.03/day` was modeled as paid to swap callers under the now
 retired rebate policy. Base remains the stronger
 modeled first target, but Robinhood has enough positive evidence for a separate
 `$250..$500`-per-side canary after its deployment path, fixed-block integration
-test, hook allowlisting, and live quote verification are complete. See
+test, and live quote verification are complete. See
 [`docs/ROBINHOOD_WETH_USDG_STRATEGY_REPLAY.md`](docs/ROBINHOOD_WETH_USDG_STRATEGY_REPLAY.md).
 
 Historical exact inventory oracle:
@@ -291,28 +293,29 @@ The inventory oracle's exact reference is `18,679,602` raw USDC across ten round
 
 ## Deployment Status
 
-An owner-revenue Base WETH/USDC research canary is active from source commit
-`57a0cfb`:
+An owner-revenue Base WETH/USDC research canary uses the hook deployed from
+source commit `57a0cfb` and the 5 bp pool configuration in `aaba7e6`:
 
 - hook: `0x079a5f5231a34C60E60090f7C0CcF333510A4040`
-- pool: `0x2d92e3aff6dc298dab4bea46e759156162777da3636d43424254ffbdbc4466db`
-- position NFT: `2916720`
-- relaunch liquidity: `0.589761878443739373 WETH` and `1,028.015276 USDC`
-- relaunch block: `50069285`
+- pool: `0xd18a99e2b8363ed02a75863dbbc5b05501a41a708240b9fd038c0f97aaa2e0de`
+- position NFT: `2917608`
+- pool fee: `5 bp`
+- relaunch liquidity: `0.566572455855413364 WETH` and `1,069.116219 USDC`
+- relaunch block: `50071787`
 - monitor: automatic disable on owner/config, adapter-residue, settlement-floor,
   iteration, or revenue-recipient invariant failure
 
-The previous position NFT `2913425` has zero liquidity. The replacement used
-the same `-201260..-200650` range and left `0.011151056246671743 ETH` in the
-operator wallet, approximately `$20.91` at relaunch, for gas.
+The previous 10 bp position NFT `2916720` was burned with zero remaining
+liquidity. The 5 bp replacement uses the `-201190..-200580` range and preserves
+approximately `0.011 ETH` in the operator wallet for gas.
 
-The controlled 50 USDC swap completed ten live-repriced rounds, repaid Morpho,
-and retained `0.000093783763919242 WETH` in the hook for owner withdrawal. By
-Base block `50064407`, the pool had received 23 third-party transactions totaling
-about `455.64 USDC` of notional. Two triggered profitable ten-round settlements,
-bringing retained hook revenue to `0.000719606100210729 WETH`. That proves
-external route discovery and live owner revenue, not durable volume or a
-long-term return rate.
+Controlled transaction
+`0x2f0f853c8a888e60c274a7e9318667481f028ddad9118e6334c479ab22655873`
+swapped `1 USDC` for `0.000529261550885832 WETH`. It completed through the
+canonical Universal Router with the hook enabled, left both flash adapters
+empty, and correctly emitted no settlement because the trade did not create a
+profitable gap. Earlier 10 bp observations remain recorded in the deployment
+document; they are not part of the new dashboard epoch.
 
 Earlier canaries are disabled and have no liquidity. Current addresses,
 receipts, configuration, shutdown instructions, and timestamped observations
@@ -331,7 +334,7 @@ Then open `http://127.0.0.1:8765`. The server reads `BASE_RPC_URL` from the
 ignored `.env`; it never sends the RPC URL or private key to the browser and
 does not sign transactions.
 
-The dashboard starts a fresh accounting epoch at relaunch block `50069285`.
+The dashboard starts a fresh accounting epoch at relaunch block `50071787`.
 Net P&L compares withdrawable v4 LP principal, accrued fees, hook balances, and
 adapter balances with those same assets at that block. Earlier earnings and
 relaunch transaction costs remain historical. Both sides are marked at the

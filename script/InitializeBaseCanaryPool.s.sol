@@ -110,7 +110,7 @@ contract InitializeBaseCanaryPool is Script {
 
         console2.log("V4 pool ID");
         console2.logBytes32(PoolId.unwrap(key.toId()));
-        console2.log("V4 LP token ID", tokenId);
+        console2.log("Expected V4 LP token ID; verify the mint receipt", tokenId);
         console2.log("Tick lower", tickLower);
         console2.log("Tick upper", tickUpper);
         console2.log("WETH deposited", wethBefore - IERC20(C.WETH).balanceOf(owner));
