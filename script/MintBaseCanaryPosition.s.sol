@@ -13,7 +13,6 @@ import {PoolKey} from "@uniswap/v4-core/src/types/PoolKey.sol";
 import {Actions} from "@uniswap/v4-periphery/src/libraries/Actions.sol";
 import {LiquidityAmounts} from "@uniswap/v4-periphery/src/libraries/LiquidityAmounts.sol";
 import {ArbHook} from "../contracts/ArbHook.sol";
-import {IPancakeV3Pool} from "../contracts/interfaces/IPancakeV3Pool.sol";
 import {IUniswapV4PositionManager} from "../contracts/interfaces/uniswap/IUniswapV4PositionManager.sol";
 import {BaseCanaryConfig as C} from "./BaseCanaryConfig.sol";
 
@@ -40,6 +39,8 @@ contract MintBaseCanaryPosition is Script {
         ArbHook hook = ArbHook(payable(vm.envAddress("HOOK")));
         uint256 wethMax = vm.envUint("WETH_LP_AMOUNT_WEI");
         uint256 usdcMax = vm.envUint("USDC_LP_AMOUNT_RAW");
+        int24 tickLower = int24(vm.envInt("TICK_LOWER"));
+        int24 tickUpper = int24(vm.envInt("TICK_UPPER"));
         if (address(hook).code.length == 0 || hook.owner() != owner || address(hook.poolManager()) != C.POOL_MANAGER) {
             revert InvalidHook();
         }
@@ -49,12 +50,11 @@ contract MintBaseCanaryPosition is Script {
             wethMax == 0 || usdcMax == 0 || wethMax > type(uint128).max || usdcMax > type(uint128).max
                 || IERC20(C.WETH).balanceOf(owner) < wethMax || IERC20(C.USDC).balanceOf(owner) < usdcMax
         ) revert InvalidAmounts();
-
-        IPancakeV3Pool source = IPancakeV3Pool(C.PANCAKE_WETH_USDC_100);
-        if (source.token0() != C.WETH || source.token1() != C.USDC || source.fee() != 100) revert InvalidPrice();
-        (, int24 referenceTick,,,,,) = source.slot0();
-        int24 tickLower = _floorToSpacing(referenceTick - C.HALF_RANGE_TICKS, C.TICK_SPACING);
-        int24 tickUpper = _ceilToSpacing(referenceTick + C.HALF_RANGE_TICKS, C.TICK_SPACING);
+        int24 width = tickUpper - tickLower;
+        if (
+            tickLower % C.TICK_SPACING != 0 || tickUpper % C.TICK_SPACING != 0 || width < C.HALF_RANGE_TICKS * 2
+                || width > C.HALF_RANGE_TICKS * 2 + C.TICK_SPACING * 2
+        ) revert InvalidPrice();
 
         PoolKey memory key = C.poolKey(address(hook));
         (uint160 sqrtPriceX96,,,) = IPoolManager(C.POOL_MANAGER).getSlot0(key.toId());
@@ -88,23 +88,11 @@ contract MintBaseCanaryPosition is Script {
         positionManager.modifyLiquidities(abi.encode(actions, params), block.timestamp + 10 minutes);
         vm.stopBroadcast();
 
-        console2.log("V4 LP token ID", tokenId);
+        console2.log("Expected V4 LP token ID; verify the mint receipt", tokenId);
         console2.log("Position liquidity", positionManager.getPositionLiquidity(tokenId));
         console2.log("Tick lower", tickLower);
         console2.log("Tick upper", tickUpper);
         console2.log("WETH deposited", wethBefore - IERC20(C.WETH).balanceOf(owner));
         console2.log("USDC deposited", usdcBefore - IERC20(C.USDC).balanceOf(owner));
-    }
-
-    function _floorToSpacing(int24 tick, int24 spacing) private pure returns (int24 aligned) {
-        int24 remainder = tick % spacing;
-        aligned = tick - remainder;
-        if (remainder < 0) aligned -= spacing;
-    }
-
-    function _ceilToSpacing(int24 tick, int24 spacing) private pure returns (int24 aligned) {
-        int24 remainder = tick % spacing;
-        aligned = tick - remainder;
-        if (remainder > 0) aligned += spacing;
     }
 }
