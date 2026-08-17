@@ -12,8 +12,8 @@ The practical order is:
 
 1. Keep Base as the first economic target.
 2. Port and rehearse Robinhood independently.
-3. Start Robinhood near `$250..$500` per side only after the exact hook is
-   allowlisted and production quotes prove that its PoolId is considered.
+3. Start Robinhood near `$250..$500` per side only after production quotes
+   prove that its PoolId is considered and selected.
 4. Scale either chain from measured route wins and LP returns, not from the
    full-discovery replay.
 
@@ -259,18 +259,17 @@ specific. A Robinhood launch requires:
    assuming the Base proof transfers.
 5. Calibrate `hookGasLimit`, the absolute USDG principal cap, and raw-USDG
    `minNetProfit` at current head.
-6. Deploy the exact reviewed hook disabled and complete Uniswap routing
-   allowlisting for that address.
+6. Deploy the exact reviewed hook disabled.
 7. Confirm live production quotes compare and select the WETH/USDG PoolId,
    including wrap/unwrap competition with native-ETH pools.
 8. Start near `$250..$500` per side, `+/-50` ticks, and `10 bp`; monitor route
    wins, inventory, fees, hook settlements, recipient payouts, and gas before
    increasing capital.
 
-The exact allowlisting requirement applies on both chains. Hooklist metadata is
-not sufficient by itself; see the routing API's
-[hook allowlist](https://github.com/Uniswap/routing-api/blob/main/lib/util/hooksAddressesAllowlist.ts)
-and [quote filter](https://github.com/Uniswap/routing-api/blob/main/lib/handlers/quote/quote.ts).
+Uniswap Labs states that classic routing automatically considers hooked v4
+pools and reserves manual allowlisting for hooks using custom accounting. This
+hook profile does not return accounting deltas, but production quote selection
+on Robinhood must still be verified directly.
 
 ## Reproduction
 
