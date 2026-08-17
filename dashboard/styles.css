@@ -200,7 +200,7 @@ main { padding: 38px 0 56px; }
 .legend i { width: 16px; height: 2px; display: inline-block; }
 .legend-pnl { background: var(--acid); }
 .legend .legend-trade { width: 7px; height: 7px; border-radius: 50%; background: var(--coral); }
-.legend-zero { border-top: 1px dashed rgba(255, 255, 255, 0.55); }
+.legend .legend-hit { width: 7px; height: 7px; border: 2px solid var(--acid); border-radius: 50%; background: var(--coral); }
 
 .chart-panel { color: #eff5ee; background: var(--night); border-color: var(--night); }
 .chart-panel .panel-head { border-color: rgba(255, 255, 255, 0.12); }

@@ -71,7 +71,7 @@ function renderComposition(current) {
   set("fee-usdc", number(current.balances.lpFeeUsdc, 6));
 }
 
-function renderChart(history, trades) {
+function renderChart(history, observations) {
   const svg = $("pnl-chart");
   if (!history || history.length < 2) return;
   $("chart-empty").hidden = true;
@@ -91,9 +91,9 @@ function renderChart(history, trades) {
   const plotBottom = height - pad.bottom;
   const x = (timestamp) => pad.left + (timestamp - startTime) / timeRange * (plotRight - pad.left);
   const y = (value) => pad.top + (max - value) / (max - min) * (height - pad.top - pad.bottom);
-  const visibleTrades = (trades || []).filter((trade) => trade.timestamp >= startTime && trade.timestamp <= endTime);
-  const maxTradeProfit = Math.max(...visibleTrades.map((trade) => trade.profitUsd), 0.1) * 1.15;
-  const tradeY = (value) => pad.top + (maxTradeProfit - value) / maxTradeProfit * (plotBottom - pad.top);
+  const visibleTrades = (observations || []).filter((trade) => trade.timestamp >= startTime && trade.timestamp <= endTime);
+  const maxTradeNotional = Math.max(...visibleTrades.map((trade) => trade.triggerNotionalUsd), 10) * 1.15;
+  const tradeY = (value) => pad.top + (maxTradeNotional - value) / maxTradeNotional * (plotBottom - pad.top);
   const points = history.map((point) => `${x(point.timestamp).toFixed(2)},${y(point.netPnlUsd).toFixed(2)}`);
   const line = `M${points.join(" L")}`;
   const area = `${line} L${x(endTime)},${plotBottom} L${x(startTime)},${plotBottom} Z`;
@@ -105,20 +105,31 @@ function renderChart(history, trades) {
       <text x="${pad.left - 10}" y="${gy + 3}" fill="rgba(255,255,255,.44)" font-family="DM Mono, monospace" font-size="9" text-anchor="end">${value >= 0 ? "+" : ""}$${value.toFixed(2)}</text>`;
   }).join("");
   const tradeAxis = Array.from({ length: 5 }, (_, index) => {
-    const value = maxTradeProfit * index / 4;
+    const value = maxTradeNotional * index / 4;
     const gy = tradeY(value);
     return `<line x1="${plotRight}" y1="${gy}" x2="${plotRight + 5}" y2="${gy}" stroke="rgba(238,106,75,.62)" />
-      <text x="${plotRight + 9}" y="${gy + 3}" fill="rgba(238,106,75,.78)" font-family="DM Mono, monospace" font-size="9">$${value.toFixed(2)}</text>`;
+      <text x="${plotRight + 9}" y="${gy + 3}" fill="rgba(238,106,75,.78)" font-family="DM Mono, monospace" font-size="9">$${value < 10 ? value.toFixed(1) : value.toFixed(0)}</text>`;
   }).join("");
+  const timestampCounts = visibleTrades.reduce((counts, trade) => {
+    counts.set(trade.timestamp, (counts.get(trade.timestamp) || 0) + 1);
+    return counts;
+  }, new Map());
+  const timestampOffsets = new Map();
   const tradeMarks = visibleTrades.map((trade) => {
-    const cx = x(trade.timestamp);
-    const cy = tradeY(trade.profitUsd);
-    const label = `${trade.controlled ? "Controlled test" : "Organic trade"}: ${money(trade.profitUsd, 4)} retained at ${clock(trade.timestamp)} / ${money(trade.triggerNotionalUsd, 2)} trigger`;
+    const count = timestampCounts.get(trade.timestamp);
+    const offsetIndex = timestampOffsets.get(trade.timestamp) || 0;
+    timestampOffsets.set(trade.timestamp, offsetIndex + 1);
+    const offset = (offsetIndex - (count - 1) / 2) * 7;
+    const cx = Math.max(pad.left, Math.min(plotRight, x(trade.timestamp) + offset));
+    const cy = tradeY(trade.triggerNotionalUsd);
+    const result = trade.settled ? `${money(trade.profitUsd, 4)} retained` : "no profitable settlement";
+    const label = `${trade.controlled ? "Controlled" : "Organic"} swap: ${money(trade.triggerNotionalUsd, 2)} at ${clock(trade.timestamp)} / ${trade.direction} / ${result}`;
+    const stroke = trade.settled ? "#b7f34a" : "#11222d";
     const marker = trade.controlled
-      ? `<rect x="${cx - 4.5}" y="${cy - 4.5}" width="9" height="9" transform="rotate(45 ${cx} ${cy})" fill="#ee6a4b" stroke="#11222d" stroke-width="1.5" vector-effect="non-scaling-stroke"><title>${label}</title></rect>`
-      : `<circle cx="${cx}" cy="${cy}" r="5" fill="#ee6a4b" stroke="#11222d" stroke-width="1.5" vector-effect="non-scaling-stroke"><title>${label}</title></circle>`;
+      ? `<rect x="${cx - 4.5}" y="${cy - 4.5}" width="9" height="9" transform="rotate(45 ${cx} ${cy})" fill="#ee6a4b" stroke="${stroke}" stroke-width="2" vector-effect="non-scaling-stroke"><title>${label}</title></rect>`
+      : `<circle cx="${cx}" cy="${cy}" r="${trade.settled ? 6 : 4.5}" fill="#ee6a4b" fill-opacity="${trade.settled ? 1 : 0.72}" stroke="${stroke}" stroke-width="${trade.settled ? 2.5 : 1.5}" vector-effect="non-scaling-stroke"><title>${label}</title></circle>`;
     return `<a href="https://basescan.org/tx/${trade.transaction}" target="_blank">
-      <line x1="${cx}" y1="${plotBottom}" x2="${cx}" y2="${cy}" stroke="rgba(238,106,75,.32)" stroke-width="1.5" stroke-dasharray="3 4" vector-effect="non-scaling-stroke" />
+      <line x1="${cx}" y1="${plotBottom}" x2="${cx}" y2="${cy}" stroke="rgba(238,106,75,.42)" stroke-width="2" vector-effect="non-scaling-stroke" />
       ${marker}</a>`;
   }).join("");
   const latest = history[history.length - 1];
@@ -133,7 +144,7 @@ function renderChart(history, trades) {
     ${grid}
     <line x1="${plotRight}" y1="${pad.top}" x2="${plotRight}" y2="${plotBottom}" stroke="rgba(238,106,75,.35)" />
     ${tradeAxis}
-    <text x="${width - 5}" y="${pad.top - 8}" fill="rgba(238,106,75,.78)" font-family="DM Mono, monospace" font-size="8" text-anchor="end">TRADE PROFIT</text>
+    <text x="${width - 5}" y="${pad.top - 8}" fill="rgba(238,106,75,.78)" font-family="DM Mono, monospace" font-size="8" text-anchor="end">SWAP NOTIONAL</text>
     <line x1="${pad.left}" y1="${zeroY}" x2="${plotRight}" y2="${zeroY}" stroke="rgba(255,255,255,.5)" stroke-dasharray="5 7" />
     <path d="${area}" fill="url(#pnl-fill)" />
     ${tradeMarks}
@@ -231,7 +242,7 @@ function render(data) {
   set("position-id", `POSITION #${data.deployment.positionTokenId}`);
   renderPnl(data.current);
   renderComposition(data.current);
-  renderChart(data.history, data.activity.trades || []);
+  renderChart(data.history, data.activity.triggerObservations || []);
   renderActivity(data.activity);
   renderHealth(data.health);
   set("accounting-method", data.accounting.method);
