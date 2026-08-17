@@ -23,7 +23,7 @@ library BaseCanaryConfig {
     address internal constant PANCAKE_WETH_USDC_100 = 0x72AB388E2E2F6FaceF59E3C3FA2C4E29011c2D38;
     address internal constant UNISWAP_WETH_USDC_100 = 0xb4CB800910B228ED3d0834cF79D697127BBB00e5;
 
-    uint24 internal constant POOL_FEE = 1_000;
+    uint24 internal constant POOL_FEE = 500;
     int24 internal constant TICK_SPACING = 10;
     int24 internal constant HALF_RANGE_TICKS = 300;
 
