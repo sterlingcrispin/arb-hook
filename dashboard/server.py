@@ -530,7 +530,7 @@ class EventIndex:
             trigger_swaps = swaps_by_tx.get(tx_hash, [])
             amount0 = sum(item["amount0"] for item in trigger_swaps)
             amount1 = sum(item["amount1"] for item in trigger_swaps)
-            direction = "USDC -> WETH" if amount1 > 0 else "WETH -> USDC"
+            direction = "USDC -> WETH" if amount1 < 0 else "WETH -> USDC"
             token_is_weth = settlement["tokenA"] == self.config.address("weth")
             decimals = 18 if token_is_weth else 6
             token_symbol = "WETH" if token_is_weth else "USDC"
@@ -580,7 +580,7 @@ class EventIndex:
                     "block": block,
                     "timestamp": int((self.blocks.get(block) or {}).get("timestamp", "0x0"), 16),
                     "controlled": tx_hash == self.controlled,
-                    "direction": "USDC -> WETH" if amount1 > 0 else "WETH -> USDC",
+                    "direction": "USDC -> WETH" if amount1 < 0 else "WETH -> USDC",
                     "triggerNotionalUsd": sum(abs(item["amount1"]) for item in trigger_swaps) / 1e6,
                     "settled": trade is not None,
                     "profitUsd": trade["profitUsd"] if trade else 0.0,
