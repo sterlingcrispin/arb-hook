@@ -199,6 +199,7 @@ main { padding: 38px 0 56px; }
 .legend span { display: flex; align-items: center; gap: 6px; }
 .legend i { width: 16px; height: 2px; display: inline-block; }
 .legend-pnl { background: var(--acid); }
+.legend .legend-trade { width: 7px; height: 7px; border-radius: 50%; background: var(--coral); }
 .legend-zero { border-top: 1px dashed rgba(255, 255, 255, 0.55); }
 
 .chart-panel { color: #eff5ee; background: var(--night); border-color: var(--night); }
