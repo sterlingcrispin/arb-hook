@@ -34,6 +34,11 @@ class AccountingMathTest(unittest.TestCase):
         self.assertAlmostEqual(accounting["netPnlUsd"], 5.84)
         self.assertAlmostEqual(accounting["netPnlPct"], 5.84 / 495.16 * 100)
 
+    def test_strategy_accounting_can_reset_with_existing_reserves(self) -> None:
+        accounting = strategy_accounting(495.0, 0.0, 4.0, 0.0, 495.0, 0.0, 4.0)
+        self.assertEqual(accounting["netPnlUsd"], 0.0)
+        self.assertEqual(accounting["netPnlPct"], 0.0)
+
 
 if __name__ == "__main__":
     unittest.main()

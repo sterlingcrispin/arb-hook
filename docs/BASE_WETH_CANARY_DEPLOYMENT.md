@@ -17,15 +17,48 @@ The hook requests only `afterSwap`; its low permission bits are `0x0040`.
 | Pool field | Value |
 |---|---|
 | Pool ID | `0x2d92e3aff6dc298dab4bea46e759156162777da3636d43424254ffbdbc4466db` |
-| Position NFT | `2913425` |
-| Position liquidity | `377847812833483` |
+| Position NFT | `2916720` |
+| Position liquidity | `1628106437688273` |
 | Tick range | `-201260..-200650` |
-| WETH deposited | `0.133398674855053634` |
-| USDC deposited | `245.086496` |
-| Initialize and mint | `0x1e6c1ddebe3a594e3bf3b1057afc7396dbcd159c5dfd88361c1e1c3a0777ed12` |
-| Enable ten rounds | `0xd56f62c22872427ef976f5d0e9a00ad76081811046a580d883594a0cebdc0616` |
+| WETH principal at relaunch | `0.589761878443739373` |
+| USDC principal at relaunch | `1,028.015276` |
+| Final mint | `0xbc0edaf85e4d722ac278e117a6517f7c70d84baca00828607c631f1dc6dd78a3` |
+| Enable ten rounds | `0x6f95511f39ba8a958663163ec6da9ddad3a163bad44abc3e3294740a1a9a2cc4` |
+| Relaunch block | `50069285` |
 
-### Controlled Swap
+### Position Relaunch
+
+The original NFT `2913425` was closed with zero remaining liquidity. Wallet
+capital was rebalanced against the configured PancakeSwap V3 reference pool,
+then reminted into the same v4 pool and range. The final operator balance was
+`0.011151056246671743 ETH`, approximately `$20.91` at the relaunch reference
+price. Only token dust remained outside the strategy.
+
+| Action | Transaction |
+|---|---|
+| Disable execution | `0x78f60b3d3c2963ac4e90271c66e709eee406ddced13ebc695161d76dfa5a0d6f` |
+| Disable WETH borrowing | `0x0ef7aad1f9fe84a341a1a07130856bf6bc54aa7873ae4d6b3272a93ce876cd08` |
+| Disable USDC borrowing | `0xcc53186058da99d43c587fcf732547cbd4e1395f5bc3c4ee75ec34f5f316dbd1` |
+| Close NFT `2913425` | `0x08090b6379b8e1cde8e59a74c81d98630d9e66c721641e956b9a9d86f15fa9ed` |
+| Wrap wallet ETH | `0x2cdc02346e7f10a5cbc4717f905831b8f16971b87c013ad7bc847bf4395fc372` |
+| Rebalance WETH to USDC | `0x1695b652d81161008c8db6a4c84c8745ea025074db97666b28515aef9fd24e9a` |
+| Close provisional NFT `2916697` | `0x4acb36ee0a5cca85dab91872f31be413f91bc90f45c619cc728bbbe57e11ff12` |
+| Mint final NFT `2916720` | `0xbc0edaf85e4d722ac278e117a6517f7c70d84baca00828607c631f1dc6dd78a3` |
+| Restore WETH configuration | `0x575f1da7e9602dff5993c16c1e20a2a6e2d6c564a79e5d4afe686c9af16c5849` |
+| Restore USDC configuration | `0xdea1aa3e370045df1ff44a420ab7c217f1239e655611458ce1946655aadebcb0` |
+| Enable ten rounds | `0x6f95511f39ba8a958663163ec6da9ddad3a163bad44abc3e3294740a1a9a2cc4` |
+
+The provisional NFT was opened while execution remained disabled, then closed
+when its computed range differed from the prequoted range by one tick-spacing
+step. The final mint pins `-201260..-200650` explicitly. NFTs `2913425` and
+`2916697` both report zero liquidity.
+
+At relaunch, the hook already held `0.002070361754776988 WETH` earned during
+the prior position epoch; both adapters held zero. The dashboard preserves that
+balance in strategy value but treats it as opening capital, so relaunch P&L and
+retained revenue both begin at zero at block `50069285`.
+
+### Previous-Epoch Controlled Swap
 
 Transaction `0xb0f1a93ae4fb495723a8c7237f2f0c459fbf418c4bd88a20168410c5f5844eab`
 swapped 50 USDC for `0.026562851994812012 WETH`. The hook borrowed
@@ -38,7 +71,7 @@ The swap used a `4,459,209` gas limit and consumed `1,387,508` gas. Its L2
 execution gas was about `$0.025` at the contemporaneous WETH reference price,
 before the receipt's L1 data fee.
 
-### Initial Organic Observation
+### Previous-Epoch Organic Observation
 
 Through Base block `50064407`, the pool received 23 third-party transactions
 after the controlled swap, totaling about `455.64 USDC` of notional across both

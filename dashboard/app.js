@@ -38,9 +38,9 @@ function renderPnl(current) {
   document.title = `${positive ? "+" : "-"}${money(Math.abs(pnl))} / Base Canary`;
 
   set("strategy-value", money(current.strategyValueUsd));
-  set("capital-benchmark", `Capital + gas ${money(current.capitalBenchmarkUsd)}`);
+  set("capital-benchmark", `Opening basis ${money(current.capitalBenchmarkUsd)}`);
   set("hook-revenue", money(current.hookRevenueValueUsd));
-  set("hook-weth", `${token(current.balances.hookWeth, 9)} WETH`);
+  set("hook-weth", `${token(current.balances.retainedRevenueWeth, 9)} WETH since relaunch`);
   set("lp-fees", money(current.lpFeeValueUsd));
   set("lp-range", `Range ${current.inRange ? "active" : "out"} / tick ${current.tick}`);
   set("reference-price", money(current.referencePrice, 2));
@@ -53,7 +53,7 @@ function renderComposition(current) {
   const parts = [
     ["lp", current.lpPrincipalValueUsd],
     ["fees", current.lpFeeValueUsd],
-    ["revenue", current.hookRevenueValueUsd],
+    ["revenue", current.hookBalanceValueUsd],
     ["adapters", current.adapterValueUsd],
   ];
   const total = parts.reduce((sum, item) => sum + item[1], 0) || 1;
@@ -62,7 +62,7 @@ function renderComposition(current) {
   ).join("");
   set("lp-principal", money(current.lpPrincipalValueUsd));
   set("fee-value", money(current.lpFeeValueUsd));
-  set("revenue-value", money(current.hookRevenueValueUsd));
+  set("revenue-value", money(current.hookBalanceValueUsd));
   set("adapter-value", money(current.adapterValueUsd));
   set("portfolio-total", money(current.strategyValueUsd));
   set("lp-weth", token(current.balances.lpPrincipalWeth, 9));
@@ -228,6 +228,7 @@ function render(data) {
   $("error-banner").hidden = true;
   set("head-block", new Intl.NumberFormat("en-US").format(data.chain.head));
   set("run-time", duration(data.deployment.elapsedSeconds));
+  set("position-id", `POSITION #${data.deployment.positionTokenId}`);
   renderPnl(data.current);
   renderComposition(data.current);
   renderChart(data.history, data.activity.trades || []);

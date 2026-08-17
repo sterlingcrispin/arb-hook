@@ -211,9 +211,10 @@ def strategy_accounting(
     adapter_value: float,
     deployed_capital_value: float,
     setup_gas_value: float,
+    opening_reserve_value: float = 0.0,
 ) -> dict[str, float]:
     strategy_value = lp_principal_value + lp_fee_value + hook_value + adapter_value
-    capital_benchmark = deployed_capital_value + setup_gas_value
+    capital_benchmark = deployed_capital_value + opening_reserve_value + setup_gas_value
     return {
         "strategyValueUsd": strategy_value,
         "capitalBenchmarkUsd": capital_benchmark,
@@ -335,11 +336,24 @@ class PortfolioEngine:
         hook_usdc = raw["hook_usdc"]
         adapter_weth = raw["weth_adapter_weth"] + raw["usdc_adapter_weth"]
         adapter_usdc = raw["weth_adapter_usdc"] + raw["usdc_adapter_usdc"]
+        opening_hook_weth = int(self.config.raw.get("openingHookWethRaw", "0"))
+        opening_hook_usdc = int(self.config.raw.get("openingHookUsdcRaw", "0"))
+        opening_adapter_weth = int(self.config.raw.get("openingAdapterWethRaw", "0"))
+        opening_adapter_usdc = int(self.config.raw.get("openingAdapterUsdcRaw", "0"))
 
         lp_principal_value = principal0 / 1e18 * reference_price + principal1 / 1e6
         lp_fee_value = fee0 / 1e18 * reference_price + fee1 / 1e6
-        hook_value = hook_weth / 1e18 * reference_price + hook_usdc / 1e6
+        hook_balance_value = hook_weth / 1e18 * reference_price + hook_usdc / 1e6
         adapter_value = adapter_weth / 1e18 * reference_price + adapter_usdc / 1e6
+        opening_reserve_value = (
+            (opening_hook_weth + opening_adapter_weth) / 1e18 * reference_price
+            + (opening_hook_usdc + opening_adapter_usdc) / 1e6
+        )
+        retained_revenue_weth = hook_weth - opening_hook_weth
+        retained_revenue_usdc = hook_usdc - opening_hook_usdc
+        retained_revenue_value = (
+            retained_revenue_weth / 1e18 * reference_price + retained_revenue_usdc / 1e6
+        )
         deposited_value = (
             int(self.config.raw["depositedWethRaw"]) / 1e18 * reference_price
             + int(self.config.raw["depositedUsdcRaw"]) / 1e6
@@ -348,10 +362,11 @@ class PortfolioEngine:
         accounting = strategy_accounting(
             lp_principal_value,
             lp_fee_value,
-            hook_value,
+            hook_balance_value,
             adapter_value,
             deposited_value,
             setup_gas_value,
+            opening_reserve_value,
         )
         pool_price = sqrt_price * sqrt_price * 1e12 / (1 << 192) if sqrt_price else 0.0
 
@@ -367,14 +382,18 @@ class PortfolioEngine:
             **accounting,
             "lpPrincipalValueUsd": lp_principal_value,
             "lpFeeValueUsd": lp_fee_value,
-            "hookRevenueValueUsd": hook_value,
+            "hookRevenueValueUsd": retained_revenue_value,
+            "hookBalanceValueUsd": hook_balance_value,
             "adapterValueUsd": adapter_value,
             "deployedCapitalValueUsd": deposited_value,
+            "openingReserveValueUsd": opening_reserve_value,
             "setupGasValueUsd": setup_gas_value,
             "lpInventoryPnlUsd": lp_principal_value - deposited_value,
             "balances": {
                 "hookWeth": hook_weth / 1e18,
                 "hookUsdc": hook_usdc / 1e6,
+                "retainedRevenueWeth": retained_revenue_weth / 1e18,
+                "retainedRevenueUsdc": retained_revenue_usdc / 1e6,
                 "adapterWeth": adapter_weth / 1e18,
                 "adapterUsdc": adapter_usdc / 1e6,
                 "lpPrincipalWeth": principal0 / 1e18,
@@ -683,8 +702,8 @@ class DashboardModel:
             "history": self._history,
             "health": health,
             "accounting": {
-                "method": "Withdrawable v4 LP principal + accrued LP fees + hook revenue + adapter balances, compared with the original LP capital and setup gas.",
-                "assumption": "The owner/dev wallet and controlled swapper balances are excluded from strategy value. Both sides are marked at the same WETH price.",
+                "method": "Withdrawable v4 LP principal, fees, hook balances, and adapter balances compared with those same strategy assets at the current relaunch block.",
+                "assumption": "The previous launch epoch and relaunch transaction costs are historical. The owner wallet is excluded, and both sides are marked at the same WETH price.",
                 "reference": "PancakeSwap V3 WETH/USDC 0.01% pool",
             },
         }

@@ -296,10 +296,15 @@ An owner-revenue Base WETH/USDC research canary is active from source commit
 
 - hook: `0x079a5f5231a34C60E60090f7C0CcF333510A4040`
 - pool: `0x2d92e3aff6dc298dab4bea46e759156162777da3636d43424254ffbdbc4466db`
-- position NFT: `2913425`
-- initial liquidity: `0.133398674855053634 WETH` and `245.086496 USDC`
+- position NFT: `2916720`
+- relaunch liquidity: `0.589761878443739373 WETH` and `1,028.015276 USDC`
+- relaunch block: `50069285`
 - monitor: automatic disable on owner/config, adapter-residue, settlement-floor,
   iteration, or revenue-recipient invariant failure
+
+The previous position NFT `2913425` has zero liquidity. The replacement used
+the same `-201260..-200650` range and left `0.011151056246671743 ETH` in the
+operator wallet, approximately `$20.91` at relaunch, for gas.
 
 The controlled 50 USDC swap completed ten live-repriced rounds, repaid Morpho,
 and retained `0.000093783763919242 WETH` in the hook for owner withdrawal. By
@@ -326,13 +331,13 @@ Then open `http://127.0.0.1:8765`. The server reads `BASE_RPC_URL` from the
 ignored `.env`; it never sends the RPC URL or private key to the browser and
 does not sign transactions.
 
-Net P&L compares withdrawable v4 LP principal, accrued LP fees, hook revenue,
-and adapter balances with the original LP deposit plus setup and controlled-test
-gas. Both sides are marked at the same PancakeSwap V3 WETH/USDC reference
-price. The operator/dev wallet is deliberately excluded, so unrelated wallet
-deposits and withdrawals cannot change strategy value or P&L. Per-settlement
-profit remains gross hook revenue; transaction gas is shown separately because
-the triggering swapper pays it.
+The dashboard starts a fresh accounting epoch at relaunch block `50069285`.
+Net P&L compares withdrawable v4 LP principal, accrued fees, hook balances, and
+adapter balances with those same assets at that block. Earlier earnings and
+relaunch transaction costs remain historical. Both sides are marked at the
+same PancakeSwap V3 WETH/USDC reference price, and the operator wallet remains
+excluded. Per-settlement profit is gross hook revenue; the triggering swapper
+pays transaction gas.
 
 Current optimized runtime sizes are enforced by `npm run size`. `ArbHook` is `23,644` bytes, leaving 356 bytes below the repository's `24,000`-byte budget and 932 bytes below EIP-170. `V4ArbExecutor` is `5,624` bytes and remains a separate immutable delegate-called execution module so the original route logic does not have to be deleted for deployability.
 
